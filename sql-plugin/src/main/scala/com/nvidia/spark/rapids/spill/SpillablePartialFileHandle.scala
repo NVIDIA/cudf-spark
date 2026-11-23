@@ -246,9 +246,11 @@ class SpillablePartialFileHandle private (
             false
         }
       case None =>
-        throw new IllegalStateException("Host buffer is null")
+        throw new IllegalStateException(HOST_BUFFER_NULL_MSG)
     }
   }
+
+  private final val HOST_BUFFER_NULL_MSG = "Host buffer is null"
 
 
   /**
@@ -319,7 +321,7 @@ class SpillablePartialFileHandle private (
           host.get.setByte(writePosition, b.toByte)
           writePosition += 1
         case None =>
-          throw new IllegalStateException("Host buffer is null")
+          throw new IllegalStateException(HOST_BUFFER_NULL_MSG)
       }
     }
   }
@@ -361,7 +363,7 @@ class SpillablePartialFileHandle private (
           host.get.setBytes(writePosition, bytes, offset, length)
           writePosition += length
         case None =>
-          throw new IllegalStateException("Host buffer is null")
+          throw new IllegalStateException(HOST_BUFFER_NULL_MSG)
       }
     }
   }

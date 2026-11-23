@@ -331,9 +331,11 @@ class SerializedTableColumn(
     }
   }
 
-  override def hasNull: Boolean = throw new IllegalStateException("should not be called")
+  override def hasNull: Boolean =
+    throw new IllegalStateException(SerializedTableColumn.SHOULD_NOT_BE_CALLED_MSG)
 
-  override def numNulls(): Int = throw new IllegalStateException("should not be called")
+  override def numNulls(): Int =
+    throw new IllegalStateException(SerializedTableColumn.SHOULD_NOT_BE_CALLED_MSG)
 
   override def sizeInBytes: Long = if (hostBuffer == null) {
     0L
@@ -343,6 +345,8 @@ class SerializedTableColumn(
 }
 
 object SerializedTableColumn {
+  private[rapids] final val SHOULD_NOT_BE_CALLED_MSG = "should not be called"
+
   /**
    * Build a `ColumnarBatch` consisting of a single [[SerializedTableColumn]] describing
    * the specified serialized table.
@@ -673,9 +677,11 @@ case class KudoSerializedTableColumn(spillableKudoTable: SpillableKudoTable)
     }
   }
 
-  override def hasNull: Boolean = throw new IllegalStateException("should not be called")
+  override def hasNull: Boolean =
+    throw new IllegalStateException(SerializedTableColumn.SHOULD_NOT_BE_CALLED_MSG)
 
-  override def numNulls(): Int = throw new IllegalStateException("should not be called")
+  override def numNulls(): Int =
+    throw new IllegalStateException(SerializedTableColumn.SHOULD_NOT_BE_CALLED_MSG)
 
   override def sizeInBytes: Long = if (spillableKudoTable == null) {
     0L

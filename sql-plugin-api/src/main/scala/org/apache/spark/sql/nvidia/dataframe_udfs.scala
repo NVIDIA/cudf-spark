@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ trait DFUDF {
 case class DFUDF0(f: Function0[Column])
   extends UDF0[Any] with DFUDF {
   override def call(): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -41,7 +41,7 @@ case class DFUDF0(f: Function0[Column])
 case class DFUDF1(f: Function1[Column, Column])
   extends UDF1[Any, Any] with DFUDF {
   override def call(t1: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -53,7 +53,7 @@ case class DFUDF1(f: Function1[Column, Column])
 case class DFUDF2(f: Function2[Column, Column, Column])
   extends UDF2[Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -65,7 +65,7 @@ case class DFUDF2(f: Function2[Column, Column, Column])
 case class DFUDF3(f: Function3[Column, Column, Column, Column])
   extends UDF3[Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -77,7 +77,7 @@ case class DFUDF3(f: Function3[Column, Column, Column, Column])
 case class DFUDF4(f: Function4[Column, Column, Column, Column, Column])
   extends UDF4[Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -89,7 +89,7 @@ case class DFUDF4(f: Function4[Column, Column, Column, Column, Column])
 case class DFUDF5(f: Function5[Column, Column, Column, Column, Column, Column])
   extends UDF5[Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -101,7 +101,7 @@ case class DFUDF5(f: Function5[Column, Column, Column, Column, Column, Column])
 case class DFUDF6(f: Function6[Column, Column, Column, Column, Column, Column, Column])
   extends UDF6[Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -113,7 +113,7 @@ case class DFUDF6(f: Function6[Column, Column, Column, Column, Column, Column, C
 case class DFUDF7(f: Function7[Column, Column, Column, Column, Column, Column, Column, Column])
   extends UDF7[Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -126,7 +126,7 @@ case class DFUDF8(f: Function8[Column, Column, Column, Column, Column, Column, C
   Column])
   extends UDF8[Any, Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any, t8: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -140,7 +140,7 @@ case class DFUDF9(f: Function9[Column, Column, Column, Column, Column, Column, C
   extends UDF9[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any, t8: Any,
                     t9: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -154,7 +154,7 @@ case class DFUDF10(f: Function10[Column, Column, Column, Column, Column, Column,
   extends UDF10[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any, t8: Any,
                     t9: Any, t10: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -167,7 +167,7 @@ case class DFUDF10(f: Function10[Column, Column, Column, Column, Column, Column,
 case class JDFUDF0(f: UDF0[Column])
   extends UDF0[Any] with DFUDF {
   override def call(): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -179,7 +179,7 @@ case class JDFUDF0(f: UDF0[Column])
 case class JDFUDF1(f: UDF1[Column, Column])
   extends UDF1[Any, Any] with DFUDF {
   override def call(t1: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -191,7 +191,7 @@ case class JDFUDF1(f: UDF1[Column, Column])
 case class JDFUDF2(f: UDF2[Column, Column, Column])
   extends UDF2[Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -203,7 +203,7 @@ case class JDFUDF2(f: UDF2[Column, Column, Column])
 case class JDFUDF3(f: UDF3[Column, Column, Column, Column])
   extends UDF3[Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -215,7 +215,7 @@ case class JDFUDF3(f: UDF3[Column, Column, Column, Column])
 case class JDFUDF4(f: UDF4[Column, Column, Column, Column, Column])
   extends UDF4[Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -227,7 +227,7 @@ case class JDFUDF4(f: UDF4[Column, Column, Column, Column, Column])
 case class JDFUDF5(f: UDF5[Column, Column, Column, Column, Column, Column])
   extends UDF5[Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -239,7 +239,7 @@ case class JDFUDF5(f: UDF5[Column, Column, Column, Column, Column, Column])
 case class JDFUDF6(f: UDF6[Column, Column, Column, Column, Column, Column, Column])
   extends UDF6[Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -251,7 +251,7 @@ case class JDFUDF6(f: UDF6[Column, Column, Column, Column, Column, Column, Colum
 case class JDFUDF7(f: UDF7[Column, Column, Column, Column, Column, Column, Column, Column])
   extends UDF7[Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -264,7 +264,7 @@ case class JDFUDF8(f: UDF8[Column, Column, Column, Column, Column, Column, Colum
   Column])
   extends UDF8[Any, Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any, t8: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -278,7 +278,7 @@ case class JDFUDF9(f: UDF9[Column, Column, Column, Column, Column, Column, Colum
   extends UDF9[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any, t8: Any,
                     t9: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -292,7 +292,7 @@ case class JDFUDF10(f: UDF10[Column, Column, Column, Column, Column, Column, Col
   extends UDF10[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any] with DFUDF {
   override def call(t1: Any, t2: Any, t3: Any, t4: Any, t5: Any, t6: Any, t7: Any, t8: Any,
                     t9: Any, t10: Any): Any = {
-    throw new IllegalStateException("TODO better error message. This should have been replaced")
+    throw new IllegalStateException(DFUDF.NOT_REPLACED_MSG)
   }
 
   override def apply(input: Array[Column]): Column = {
@@ -303,6 +303,9 @@ case class JDFUDF10(f: UDF10[Column, Column, Column, Column, Column, Column, Col
 }
 
 object DFUDF {
+  private[nvidia] final val NOT_REPLACED_MSG =
+    "TODO better error message. This should have been replaced"
+
   /**
    * Determine if the UDF function implements the DFUDF.
    */

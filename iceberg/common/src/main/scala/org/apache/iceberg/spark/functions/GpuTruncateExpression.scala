@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,13 @@ import org.apache.spark.sql.types._
 case class GpuTruncateExpression(width: Expression, value: Expression)
   extends GpuBinaryExpression {
 
+  private final val SCALAR_FIRST_ARG_ERROR =
+    "GpuTruncateExpression requires first argument to be scalar, "
+
   private lazy val sanityCheckResult: Unit = sanityCheck()
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): CudfColumnVector = {
-    throw new IllegalStateException("GpuTruncateExpression requires first argument to be scalar, " +
+    throw new IllegalStateException(SCALAR_FIRST_ARG_ERROR +
       "second to be column, but both are columns")
   }
 
@@ -52,12 +55,12 @@ case class GpuTruncateExpression(width: Expression, value: Expression)
   }
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): CudfColumnVector = {
-    throw new IllegalStateException("GpuTruncateExpression requires first argument to be scalar, " +
+    throw new IllegalStateException(SCALAR_FIRST_ARG_ERROR +
       "second to be column, but first is column, second is scalar")
   }
 
   override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): CudfColumnVector = {
-    throw new IllegalStateException("GpuTruncateExpression requires first argument to be scalar, " +
+    throw new IllegalStateException(SCALAR_FIRST_ARG_ERROR +
       "second to be column, but both are scalars")
   }
 

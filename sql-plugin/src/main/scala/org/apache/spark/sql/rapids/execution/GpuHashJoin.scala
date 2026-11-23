@@ -726,6 +726,12 @@ object JoinImpl {
 }
 
 object GpuHashJoin {
+  private[execution] final val INNER_HASH_WITH_POST_STRATEGY = "INNER_HASH_WITH_POST strategy"
+  private[execution] final val INNER_SORT_WITH_POST_STRATEGY = "INNER_SORT_WITH_POST strategy"
+  private[execution] final val SORT_JOIN_NESTED_KEYS_FALLBACK_MSG =
+    s"$INNER_SORT_WITH_POST_STRATEGY requested but join keys contain ARRAY or " +
+      "STRUCT types which are not supported for sort joins. Falling back to " +
+      s"$INNER_HASH_WITH_POST_STRATEGY."
   /**
    * Captures the normalized join condition and child plans after extracting any non-AST
    * expressions that can be safely computed on one side of the join.
@@ -1622,9 +1628,7 @@ class HashJoinIterator(
           if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
             SortJoinPlan
           } else {
-            logWarning("INNER_SORT_WITH_POST strategy requested but join keys contain ARRAY or " +
-              "STRUCT types which are not supported for sort joins. Falling back to " +
-              "INNER_HASH_WITH_POST strategy.")
+            logWarning(GpuHashJoin.SORT_JOIN_NESTED_KEYS_FALLBACK_MSG)
             InnerHashPlan(joinType, isFallback = true)
           }
         case _ => DirectHashPlan(joinType)
@@ -1692,7 +1696,7 @@ class HashJoinIterator(
     val leftRowCount = leftKeys.getRowCount
     val rightRowCount = rightKeys.getRowCount
     val result = convertInnerJoinMapsToTargetType(innerMaps, leftRowCount, rightRowCount,
-      joinType, "INNER_HASH_WITH_POST strategy")
+      joinType, GpuHashJoin.INNER_HASH_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -1708,7 +1712,7 @@ class HashJoinIterator(
     val leftRowCount = leftKeys.getRowCount
     val rightRowCount = rightKeys.getRowCount
     val result = convertInnerJoinMapsToTargetType(innerMaps, leftRowCount, rightRowCount,
-      joinType, "INNER_SORT_WITH_POST strategy")
+      joinType, GpuHashJoin.INNER_SORT_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -1778,9 +1782,7 @@ class ConditionalHashJoinIterator(
         if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
           SortJoinPlan
         } else {
-          logWarning("INNER_SORT_WITH_POST strategy requested but join keys contain ARRAY or " +
-            "STRUCT types which are not supported for sort joins. Falling back to " +
-            "INNER_HASH_WITH_POST strategy.")
+          logWarning(GpuHashJoin.SORT_JOIN_NESTED_KEYS_FALLBACK_MSG)
           InnerHashPlan(joinType, isFallback = true, useExactForSizing = false)
         }
       case _ => MixedJoinPlan
@@ -1843,7 +1845,7 @@ class ConditionalHashJoinIterator(
     }
 
     val result = convertInnerJoinMapsToTargetType(filteredMaps, leftRowCount, rightRowCount,
-      joinType, "INNER_HASH_WITH_POST strategy")
+      joinType, GpuHashJoin.INNER_HASH_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -1870,7 +1872,7 @@ class ConditionalHashJoinIterator(
     }
 
     val result = convertInnerJoinMapsToTargetType(filteredMaps, leftRowCount, rightRowCount,
-      joinType, "INNER_SORT_WITH_POST strategy")
+      joinType, GpuHashJoin.INNER_SORT_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -2033,9 +2035,7 @@ class HashJoinStreamSideIterator(
           if (isSortJoinSupported(boundBuiltKeys) && isSortJoinSupported(boundStreamKeys)) {
             SortJoinPlan
           } else {
-            logWarning("INNER_SORT_WITH_POST strategy requested but join keys contain ARRAY or " +
-              "STRUCT types which are not supported for sort joins. Falling back to " +
-              "INNER_HASH_WITH_POST strategy.")
+            logWarning(GpuHashJoin.SORT_JOIN_NESTED_KEYS_FALLBACK_MSG)
             InnerHashPlan(
               subJoinType,
               isFallback = true,
@@ -2123,7 +2123,7 @@ class HashJoinStreamSideIterator(
     val rightRowCount = rightKeys.getRowCount
 
     val result = convertInnerJoinMapsToTargetType(innerMaps, leftRowCount, rightRowCount,
-      subJoinType, "INNER_HASH_WITH_POST strategy")
+      subJoinType, GpuHashJoin.INNER_HASH_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -2142,7 +2142,7 @@ class HashJoinStreamSideIterator(
     val rightRowCount = rightKeys.getRowCount
 
     val result = convertInnerJoinMapsToTargetType(innerMaps, leftRowCount, rightRowCount,
-      subJoinType, "INNER_SORT_WITH_POST strategy")
+      subJoinType, GpuHashJoin.INNER_SORT_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -2213,7 +2213,7 @@ class HashJoinStreamSideIterator(
     val rightRowCount = rightTable.getRowCount
 
     val result = convertInnerJoinMapsToTargetType(filteredMaps, leftRowCount, rightRowCount,
-      subJoinType, "INNER_HASH_WITH_POST strategy")
+      subJoinType, GpuHashJoin.INNER_HASH_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }
@@ -2242,7 +2242,7 @@ class HashJoinStreamSideIterator(
     val rightRowCount = rightTable.getRowCount
 
     val result = convertInnerJoinMapsToTargetType(filteredMaps, leftRowCount, rightRowCount,
-      subJoinType, "INNER_SORT_WITH_POST strategy")
+      subJoinType, GpuHashJoin.INNER_SORT_WITH_POST_STRATEGY)
     logJoinCompletion()
     result
   }

@@ -75,7 +75,7 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
         s"Iceberg deletion-vector reads require one Parquet buffer, found ${buffers.length}")
       debugDumpPrefix.foreach { prefix =>
         if (debugDumpAlways) {
-          val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+          val path = DumpUtils.dumpBuffer(conf, buffers, prefix, PARQUET_SUFFIX)
           logWarning(s"Wrote data for ${splits.mkString(", ")} to $path")
         }
       }
@@ -104,7 +104,7 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
             case NonFatal(e) =>
               val dumpMessage = debugDumpPrefix.map { prefix =>
                 if (!debugDumpAlways) {
-                  val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+                  val path = DumpUtils.dumpBuffer(conf, buffers, prefix, PARQUET_SUFFIX)
                   s", data dumped to $path"
                 } else {
                   ""
@@ -169,6 +169,7 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
     }
   }
 
+  private[parquet] final val PARQUET_SUFFIX = ".parquet"
 }
 
 private class ChunkedDeletionVectorProducer(
@@ -202,7 +203,8 @@ private class ChunkedDeletionVectorProducer(
       case NonFatal(e) =>
         val dumpMessage = debugDumpPrefix.map { prefix =>
           if (!debugDumpAlways) {
-            val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+            val path = DumpUtils.dumpBuffer(
+              conf, buffers, prefix, GpuIcebergDeletionVector.PARQUET_SUFFIX)
             s", data dumped to $path"
           } else {
             ""

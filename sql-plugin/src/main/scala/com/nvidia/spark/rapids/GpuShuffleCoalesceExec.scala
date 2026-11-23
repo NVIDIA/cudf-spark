@@ -308,6 +308,10 @@ class JCudfCoalescedHostResult(hostConcatResult: HostConcatResult) extends Coale
   override def getDataSize: Long = hostConcatResult.getTableHeader.getDataLen
 }
 
+object JCudfTableOperator {
+  private[rapids] final val NO_TABLES_TO_CONCAT_MSG = "no tables to be concatenated"
+}
+
 class JCudfTableOperator
   extends SerializedTableOperator[SerializedTableColumn, CoalescedHostResult] {
   override def getDataLen(table: SerializedTableColumn): Long = table.header.getDataLen
@@ -315,7 +319,7 @@ class JCudfTableOperator
   override def getNumRows(table: SerializedTableColumn): Int = table.header.getNumRows
 
   override def concat(tables: Array[SerializedTableColumn]): CoalescedHostResult = {
-    assert(tables.nonEmpty, "no tables to be concatenated")
+    assert(tables.nonEmpty, JCudfTableOperator.NO_TABLES_TO_CONCAT_MSG)
     val numCols = tables.head.header.getNumColumns
     val ret = if (numCols == 0) {
       val totalRowsNum = tables.map(getNumRows).sum
@@ -351,7 +355,7 @@ class KudoTableOperator(kudo: Option[KudoSerializer])
     .getNumRows
 
   override def concat(columns: Array[KudoSerializedTableColumn]): CoalescedHostResult = {
-    require(columns.nonEmpty, "no tables to be concatenated")
+    require(columns.nonEmpty, JCudfTableOperator.NO_TABLES_TO_CONCAT_MSG)
     val numCols = columns.head.spillableKudoTable.header.getNumColumns
     if (numCols == 0) {
       val totalRowsNum = columns.map(getNumRows).sum
@@ -379,7 +383,7 @@ class KudoGpuTableOperator(dataTypes: Array[DataType])
       .getNumRows
 
   override def concat(columns: Array[KudoSerializedTableColumn]): ColumnarBatch = {
-    require(columns.nonEmpty, "no tables to be concatenated")
+    require(columns.nonEmpty, JCudfTableOperator.NO_TABLES_TO_CONCAT_MSG)
     val numCols = columns.head.spillableKudoTable.header.getNumColumns
     if (numCols == 0) {
       val totalRowsNum = columns.map(getNumRows).sum

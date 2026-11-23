@@ -318,10 +318,10 @@ object GpuTextBasedPartitionReader {
         .replace("[:ss]", optionalSeconds)
         .replace(":ss", optionalSeconds) // Spark always treats seconds portion as optional
         .replace("[.SSSXXX]", optionalMicros)
-        .replace("[.SSS][XXX]", optionalMicros)
-        .replace("[.SSS]", optionalMicros)
-        .replace("[.SSSSSS]", optionalMicros)
-        .replace(".SSSXXX", optionalMicros)
+        .replace(GpuTextBasedDateUtils.OPT_MILLIS_TZ_SUFFIX, optionalMicros)
+        .replace(GpuTextBasedDateUtils.OPT_MILLIS_SUFFIX, optionalMicros)
+        .replace(GpuTextBasedDateUtils.OPT_MICROS_SUFFIX, optionalMicros)
+        .replace(GpuTextBasedDateUtils.MILLIS_TZ_SUFFIX, optionalMicros)
         .replace(".SSSSSS", optionalMicros)
         .replace(".SSS", optionalMicros)
 
@@ -879,6 +879,11 @@ object GpuTextBasedDateUtils {
     }
   }
 
+  private[rapids] final val OPT_MILLIS_TZ_SUFFIX = "[.SSS][XXX]"
+  private[rapids] final val OPT_MILLIS_SUFFIX = "[.SSS]"
+  private[rapids] final val OPT_MICROS_SUFFIX = "[.SSSSSS]"
+  private[rapids] final val MILLIS_TZ_SUFFIX = ".SSSXXX"
+
   /**
    * Get the list of all cuDF formats that need to be checked for when parsing timestamps. The
    * returned formats must be ordered such that the first format is the most lenient and the
@@ -904,18 +909,18 @@ object GpuTextBasedDateUtils {
     val cudfSupportedFormat = formatRoot
       .replace("'T'", "T")
       .replace("[.SSSXXX]", "")
-      .replace("[.SSS][XXX]", "")
-      .replace("[.SSS]", "")
-      .replace("[.SSSSSS]", "")
-      .replace(".SSSXXX", "")
+      .replace(OPT_MILLIS_TZ_SUFFIX, "")
+      .replace(OPT_MILLIS_SUFFIX, "")
+      .replace(OPT_MICROS_SUFFIX, "")
+      .replace(MILLIS_TZ_SUFFIX, "")
       .replace(".SSS", "")
       .replace("[:ss]", "")
 
     val cudfFormat = toStrf(cudfSupportedFormat, parseString)
     val suffix = if (hasZsuffix) "Z" else ""
 
-    val optionalFractional = Seq("[.SSS][XXX]", "[.SSS]", "[.SSSSSS]", "[.SSS][XXX]",
-      ".SSSXXX", ".SSS")
+    val optionalFractional = Seq(OPT_MILLIS_TZ_SUFFIX, OPT_MILLIS_SUFFIX, OPT_MICROS_SUFFIX,
+      OPT_MILLIS_TZ_SUFFIX, MILLIS_TZ_SUFFIX, ".SSS")
     val baseFormats = if (optionalFractional.exists(formatRoot.endsWith)) {
       val cudfFormat1 = cudfFormat + suffix
       val cudfFormat2 = cudfFormat + ".%f" + suffix

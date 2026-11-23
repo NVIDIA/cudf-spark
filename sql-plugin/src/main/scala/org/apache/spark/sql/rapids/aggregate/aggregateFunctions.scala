@@ -196,6 +196,7 @@ class CudfNthLikeAggregate(opName: String, override val dataType: DataType, offs
 }
 
 object CudfNthLikeAggregate {
+  private[aggregate] final val IGNORE_NULLS_SUFFIX = " ignore nulls"
   def newFirstExcludeNulls(dataType: DataType): CudfAggregate =
     new CudfNthLikeAggregate("CudfFirst", dataType, 0, NullPolicy.EXCLUDE)
 
@@ -1777,7 +1778,8 @@ case class GpuFirst(child: Expression, ignoreNulls: Boolean)
   override def children: Seq[Expression] = child :: Nil
   override def nullable: Boolean = true
   override def dataType: DataType = child.dataType
-  override def toString: String = s"gpufirst($child)${if (ignoreNulls) " ignore nulls"}"
+  override def toString: String =
+    s"gpufirst($child)${if (ignoreNulls) CudfNthLikeAggregate.IGNORE_NULLS_SUFFIX}"
 
   override def checkInputDataTypes(): TypeCheckResult = {
     val defaultCheck = super.checkInputDataTypes()
@@ -1834,7 +1836,8 @@ case class GpuLast(child: Expression, ignoreNulls: Boolean)
   override def children: Seq[Expression] = child :: Nil
   override def nullable: Boolean = true
   override def dataType: DataType = child.dataType
-  override def toString: String = s"gpulast($child)${if (ignoreNulls) " ignore nulls"}"
+  override def toString: String =
+    s"gpulast($child)${if (ignoreNulls) CudfNthLikeAggregate.IGNORE_NULLS_SUFFIX}"
 
   override def checkInputDataTypes(): TypeCheckResult = {
     val defaultCheck = super.checkInputDataTypes()
@@ -1870,7 +1873,7 @@ case class GpuNthValue(child: Expression, offset: Expression, ignoreNulls: Boole
   override def nullable: Boolean = true
   override def dataType: DataType = child.dataType
   override def toString: String = s"gpu_nth_value($child, $offset)" +
-      s"${if (ignoreNulls) " ignore nulls"}"
+      s"${if (ignoreNulls) CudfNthLikeAggregate.IGNORE_NULLS_SUFFIX}"
 
   override def checkInputDataTypes(): TypeCheckResult = {
     val defaultCheck = super.checkInputDataTypes()

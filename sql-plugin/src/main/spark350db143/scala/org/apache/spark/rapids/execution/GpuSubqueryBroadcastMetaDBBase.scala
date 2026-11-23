@@ -52,7 +52,7 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
       if (exMeta.canThisBeReplaced) {
         broadcastBuilder = () => exMeta.convertToGpu()
       } else {
-        willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
+        willNotWorkOnGpu(UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU)
       }
     // DPP: For AQE on, we have an almost completely different scenario then before,
     // Databricks uses a BroadcastQueryStageExec and either:
@@ -69,7 +69,7 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
           if (exMeta.canThisBeReplaced) {
             broadcastBuilder = () => exMeta.convertToGpu()
           } else {
-            willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
+            willNotWorkOnGpu(UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU)
           }
         case reuse: ReusedExchangeExec =>
           reuse.child match {
@@ -77,12 +77,15 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
               // A BroadcastExchange has already been replaced, so it can run on the GPU
               broadcastBuilder = () => reuse
             case _ =>
-              willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
+              willNotWorkOnGpu(UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU)
           }
       }
     case _ =>
       willNotWorkOnGpu("the subquery to broadcast can not entirely run in the GPU.")
   }
+
+  private final val UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU =
+    "underlying BroadcastExchange can not run in the GPU."
   /**
    * Simply returns the original plan. Because its only child, BroadcastExchange, doesn't
    * need to change if SubqueryBroadcastExec falls back to the CPU.

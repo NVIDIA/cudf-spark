@@ -279,19 +279,21 @@ object SchemaUtils {
         // cuDF types do not carry precision, so narrowing can require bounds checks even
         // when the storage width and scale are unchanged. Keep casting format-specific.
         castFunc.map(f => f(col, targetType, colType))
-          .getOrElse(throw new QueryExecutionException("Casting function is missing for " +
+          .getOrElse(throw new QueryExecutionException(CASTING_FUNCTION_MISSING_PREFIX +
             s"type conversion from $colType to $targetType"))
       case (fromChar: CharType, StringType) =>
         castFunc.map(f => f(col, StringType, fromChar))
-          .getOrElse(throw new QueryExecutionException("Casting function is missing for " +
+          .getOrElse(throw new QueryExecutionException(CASTING_FUNCTION_MISSING_PREFIX +
             s"type conversion from $colType to $targetType"))
       case _ if !GpuColumnVector.getNonNestedRapidsType(targetType).equals(col.getType) =>
         castFunc.map(f => f(col, targetType, colType))
-          .getOrElse(throw new QueryExecutionException("Casting function is missing for " +
+          .getOrElse(throw new QueryExecutionException(CASTING_FUNCTION_MISSING_PREFIX +
             s"type conversion from $colType to $targetType"))
       case _ => col
     }
   }
+
+  private final val CASTING_FUNCTION_MISSING_PREFIX = "Casting function is missing for "
 
   private def writerOptionsFromField[T <: NestedBuilder[T, V], V <: ColumnWriterOptions](
       builder: NestedBuilder[T, V],

@@ -166,6 +166,11 @@ case class GpuParquetScan(
 }
 
 object GpuParquetScan {
+  private[parquet] final val EOF_PREFIX = "Reached the end of stream with "
+  private[parquet] final val EOF_SUFFIX = " bytes left to read"
+  private[parquet] final val DEPRECATED_HONORED_SUFFIX =
+    "the deprecated one will be honored if both are set."
+  private[parquet] final val PARQUET_SUFFIX = ".parquet"
   private def hasPotentiallyShreddedVariant(
       dataTypes: Iterable[DataType], sqlConf: SQLConf): Boolean = {
     dataTypes.exists { dataType =>
@@ -508,7 +513,7 @@ class HMBSeekableInputStream(
     val amountRead = read(buffer)
     val remaining = buffer.length - amountRead
     if (remaining > 0) {
-      throw new EOFException("Reached the end of stream with " + remaining + " bytes left to read")
+      throw new EOFException(GpuParquetScan.EOF_PREFIX + remaining + GpuParquetScan.EOF_SUFFIX)
     }
   }
 
@@ -517,7 +522,7 @@ class HMBSeekableInputStream(
     val amountRead = read(buffer, offset, length)
     val remaining = length - amountRead
     if (remaining > 0) {
-      throw new EOFException("Reached the end of stream with " + remaining + " bytes left to read")
+      throw new EOFException(GpuParquetScan.EOF_PREFIX + remaining + GpuParquetScan.EOF_SUFFIX)
     }
   }
 
@@ -591,8 +596,8 @@ class HMBSeekableInputStream(
       bytesRead = read(temp, 0, nextReadLength)
     }
     if (bytesRead < 0 && buf.remaining > 0) {
-      throw new EOFException("Reached the end of stream with " +
-          buf.remaining + " bytes left to read")
+      throw new EOFException(GpuParquetScan.EOF_PREFIX +
+          buf.remaining + GpuParquetScan.EOF_SUFFIX)
     }
   }
 }
@@ -1331,7 +1336,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       .map { deprecatedVal =>
         logWarning(s"${RapidsConf.PARQUET_MULTITHREADED_COMBINE_THRESHOLD} is deprecated, " +
           s"use ${RapidsConf.READER_MULTITHREADED_COMBINE_THRESHOLD} instead. But for now " +
-          "the deprecated one will be honored if both are set.")
+          GpuParquetScan.DEPRECATED_HONORED_SUFFIX)
         deprecatedVal
       }.getOrElse(rapidsConf.getMultithreadedCombineThreshold)
   protected val combineWaitTime =
@@ -1339,7 +1344,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       .map { f =>
         logWarning(s"${RapidsConf.PARQUET_MULTITHREADED_COMBINE_WAIT_TIME} is deprecated, " +
           s"use ${RapidsConf.READER_MULTITHREADED_COMBINE_WAIT_TIME} instead. But for now " +
-          "the deprecated one will be honored if both are set.")
+          GpuParquetScan.DEPRECATED_HONORED_SUFFIX)
         f.intValue()
       }.getOrElse(rapidsConf.getMultithreadedCombineWaitTime)
   protected val keepReadsInOrderFromConf =
@@ -1347,7 +1352,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       .map { deprecatedVal =>
         logWarning(s"${RapidsConf.PARQUET_MULTITHREADED_READ_KEEP_ORDER} is deprecated, " +
           s"use ${RapidsConf.READER_MULTITHREADED_READ_KEEP_ORDER} instead. But for now " +
-          "the deprecated one will be honored if both are set.")
+          GpuParquetScan.DEPRECATED_HONORED_SUFFIX)
         deprecatedVal
       }.getOrElse(rapidsConf.getMultithreadedReaderKeepOrder)
   protected val compressCfg = CpuCompressionConfig.forParquet(rapidsConf)
@@ -3754,7 +3759,7 @@ object MakeParquetTableProducer extends Logging {
   ): GpuDataProducer[Table] = {
     debugDumpPrefix.foreach { prefix =>
       if (debugDumpAlways) {
-        val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+        val p = DumpUtils.dumpBuffer(conf, buffers, prefix, GpuParquetScan.PARQUET_SUFFIX)
         logWarning(s"Wrote data for ${splits.mkString(", ")} to $p")
       }
     }
@@ -3775,7 +3780,7 @@ object MakeParquetTableProducer extends Logging {
           case e: Exception =>
             val dumpMsg = debugDumpPrefix.map { prefix =>
               if (!debugDumpAlways) {
-                val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+                val p = DumpUtils.dumpBuffer(conf, buffers, prefix, GpuParquetScan.PARQUET_SUFFIX)
                 s", data dumped to $p"
               } else {
                 ""
@@ -3862,7 +3867,7 @@ abstract class AbstractParquetTableReader(
         case e: Exception =>
           val dumpMsg = debugDumpPrefix.map { prefix =>
             if (!debugDumpAlways) {
-              val p = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+              val p = DumpUtils.dumpBuffer(conf, buffers, prefix, GpuParquetScan.PARQUET_SUFFIX)
               s", data dumped to $p"
             } else {
               ""

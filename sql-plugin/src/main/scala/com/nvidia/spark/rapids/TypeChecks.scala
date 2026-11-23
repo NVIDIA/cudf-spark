@@ -363,7 +363,7 @@ final class TypeSig private(
         note = if (note.isEmpty) {
           Some(msg)
         } else {
-          Some(note.get + ";<br/>" + msg)
+          Some(note.get + SupportedOpsDocs.HTML_NOTE_SEP + msg)
         }
       }
 
@@ -372,7 +372,7 @@ final class TypeSig private(
         note = if (note.isEmpty) {
           Some(msg)
         } else {
-          Some(note.get + ";<br/>" + msg)
+          Some(note.get + SupportedOpsDocs.HTML_NOTE_SEP + msg)
         }
       }
 
@@ -385,7 +385,7 @@ final class TypeSig private(
             note = if (note.isEmpty) {
               Some(msg)
             } else {
-              Some(note.get + ";<br/>" + msg)
+              Some(note.get + SupportedOpsDocs.HTML_NOTE_SEP + msg)
             }
           }
 
@@ -394,7 +394,7 @@ final class TypeSig private(
             note = if (note.isEmpty) {
               Some(msg)
             } else {
-              Some(note.get + ";<br/>" + msg)
+              Some(note.get + SupportedOpsDocs.HTML_NOTE_SEP + msg)
             }
           }
 
@@ -849,7 +849,7 @@ class ExecChecks private(
     val groups = namedChecks.map { case (name, pc) =>
       (name, pc.cudf.getSupportLevel(dataType, pc.spark))
     }
-    groups ++ Map("Input/Output" -> check.getSupportLevel(dataType, sparkSig))
+    groups ++ Map(SupportedOpsDocs.INPUT_OUTPUT_LABEL -> check.getSupportLevel(dataType, sparkSig))
   }
 
   def supportNotes: Map[String, List[String]] = {
@@ -1670,14 +1670,22 @@ object ExprChecks {
  * Used for generating the support docs.
  */
 object SupportedOpsDocs {
+  private[rapids] final val HTML_NOTE_SEP = ";<br/>"
+  private[rapids] final val INPUT_OUTPUT_LABEL = "Input/Output"
+  private final val TH_DESCRIPTION = "<th>Description</th>"
+  private final val TH_NOTES = "<th>Notes</th>"
+  private final val TABLE_OPEN = "<table>"
+  private final val TABLE_CLOSE = "</table>"
+  private final val TD_ROWSPAN_PREFIX = "<td rowSpan=\""
+
   private lazy val allSupportedTypes: TypeEnum.ValueSet =
     if (GpuTypeShims.supportsVariantType) TypeEnum.values else TypeEnum.values - TypeEnum.VARIANT
 
   private def execChecksHeaderLine(): Unit = {
     ConsoleOutput.writeLine("<tr>")
     ConsoleOutput.writeLine("<th>Executor</th>")
-    ConsoleOutput.writeLine("<th>Description</th>")
-    ConsoleOutput.writeLine("<th>Notes</th>")
+    ConsoleOutput.writeLine(TH_DESCRIPTION)
+    ConsoleOutput.writeLine(TH_NOTES)
     ConsoleOutput.writeLine("<th>Param(s)</th>")
     allSupportedTypes.foreach { t =>
       ConsoleOutput.writeLine(s"<th>$t</th>")
@@ -1710,7 +1718,7 @@ object SupportedOpsDocs {
     var count = 0
     inputs.foreach { input =>
       val named = supportNotes.get(input)
-          .map(notes => input + "<br/>(" + notes.mkString(";<br/>") + ")")
+          .map(notes => input + "<br/>(" + notes.mkString(HTML_NOTE_SEP) + ")")
           .getOrElse(input)
       ConsoleOutput.writeLine(s"<td>$named</td>")
       allSupportedTypes.foreach { dataType =>
@@ -1729,8 +1737,8 @@ object SupportedOpsDocs {
     ConsoleOutput.writeLine("<tr>")
     ConsoleOutput.writeLine("<th>Expression</th>")
     ConsoleOutput.writeLine("<th>SQL Functions(s)</th>")
-    ConsoleOutput.writeLine("<th>Description</th>")
-    ConsoleOutput.writeLine("<th>Notes</th>")
+    ConsoleOutput.writeLine(TH_DESCRIPTION)
+    ConsoleOutput.writeLine(TH_NOTES)
     ConsoleOutput.writeLine("<th>Context</th>")
     ConsoleOutput.writeLine("<th>Param/Output</th>")
     allSupportedTypes.foreach { t =>
@@ -1742,8 +1750,8 @@ object SupportedOpsDocs {
   private def partChecksHeaderLine(): Unit = {
     ConsoleOutput.writeLine("<tr>")
     ConsoleOutput.writeLine("<th>Partition</th>")
-    ConsoleOutput.writeLine("<th>Description</th>")
-    ConsoleOutput.writeLine("<th>Notes</th>")
+    ConsoleOutput.writeLine(TH_DESCRIPTION)
+    ConsoleOutput.writeLine(TH_NOTES)
     ConsoleOutput.writeLine("<th>Param</th>")
     allSupportedTypes.foreach { t =>
       ConsoleOutput.writeLine(s"<th>$t</th>")
@@ -1870,7 +1878,7 @@ object SupportedOpsDocs {
     ConsoleOutput.writeLine("The nodes in this graph are instances of `SparkPlan` and represent various high")
     ConsoleOutput.writeLine("level operations like doing a filter or project. The operations that the cuDF ")
     ConsoleOutput.writeLine("plugin supports are described below.")
-    ConsoleOutput.writeLine("<table>")
+    ConsoleOutput.writeLine(TABLE_OPEN)
     execChecksHeaderLine()
     var totalCount = 0
     var nextOutputAt = headerEveryNLines
@@ -1913,7 +1921,7 @@ object SupportedOpsDocs {
       totalCount += outputExecSupport(
         exec.execName, exec.description, exec.notes, exec.checks)
     }
-    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine(TABLE_CLOSE)
     ConsoleOutput.writeLine()
     ConsoleOutput.writeLine("# Expression and SQL Functions")
     ConsoleOutput.writeLine("Inside each node in the DAG there can be one or more trees of expressions")
@@ -1949,7 +1957,7 @@ object SupportedOpsDocs {
     ConsoleOutput.writeLine("plan that Spark developed is turned into an abstract syntax tree and sent to the GPU")
     ConsoleOutput.writeLine("where it can be interpreted. The number and types of operations supported in this")
     ConsoleOutput.writeLine("are limited.")
-    ConsoleOutput.writeLine("<table>")
+    ConsoleOutput.writeLine(TABLE_OPEN)
     exprChecksHeaderLine()
     totalCount = 0
     nextOutputAt = headerEveryNLines
@@ -1974,16 +1982,16 @@ object SupportedOpsDocs {
         }.sum
         val representative = allData.values.head
         ConsoleOutput.writeLine("<tr>")
-        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" +
+        ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" +
             s"${rule.tag.runtimeClass.getSimpleName}</td>")
-        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${sqlFunctions.getOrElse(" ")}</td>")
-        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.description}</td>")
-        ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
+        ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" + s"${sqlFunctions.getOrElse(" ")}</td>")
+        ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" + s"${rule.description}</td>")
+        ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
         var count = 0
         representative.foreach {
           case (context, data) =>
             val contextSpan = data.size
-            ConsoleOutput.writeLine("<td rowSpan=\"" + contextSpan + "\">" + s"$context</td>")
+            ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + contextSpan + "\">" + s"$context</td>")
             data.keys.foreach { param =>
               ConsoleOutput.writeLine(s"<td>$param</td>")
               allSupportedTypes.foreach { t =>
@@ -1999,7 +2007,7 @@ object SupportedOpsDocs {
         totalCount += totalSpan
       }
     }
-    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine(TABLE_CLOSE)
     ConsoleOutput.writeLine()
     ConsoleOutput.writeLine("## Casting")
     ConsoleOutput.writeLine("The above table does not show what is and is not supported for cast.")
@@ -2020,7 +2028,7 @@ object SupportedOpsDocs {
         case Some(cc: CastChecks) =>
           ConsoleOutput.writeLine(s"### `${rule.tag.runtimeClass.getSimpleName}`")
           ConsoleOutput.writeLine()
-          ConsoleOutput.writeLine("<table>")
+          ConsoleOutput.writeLine(TABLE_OPEN)
           val numTypes = allSupportedTypes.size
           ConsoleOutput.writeLine("<tr><th rowSpan=\"2\" colSpan=\"2\"></th><th colSpan=\"" + numTypes + "\">TO</th></tr>")
           ConsoleOutput.writeLine("<tr>")
@@ -2042,7 +2050,7 @@ object SupportedOpsDocs {
               ConsoleOutput.writeLine("<tr>")
             }
           }
-          ConsoleOutput.writeLine("</table>")
+          ConsoleOutput.writeLine(TABLE_CLOSE)
           ConsoleOutput.writeLine()
         case _ => // Nothing
       }
@@ -2056,7 +2064,7 @@ object SupportedOpsDocs {
     ConsoleOutput.writeLine("hash partitioned on `a`, but all of the other columns in the same data frame")
     ConsoleOutput.writeLine("as `a` don't show up in the table. They are controlled by the rules for")
     ConsoleOutput.writeLine("`ShuffleExchangeExec` which uses the `Partitioning`.")
-    ConsoleOutput.writeLine("<table>")
+    ConsoleOutput.writeLine(TABLE_OPEN)
     partChecksHeaderLine()
     totalCount = 0
     nextOutputAt = headerEveryNLines
@@ -2077,10 +2085,10 @@ object SupportedOpsDocs {
         if (totalSpan > 0) {
           val representative = allData.values.head
           ConsoleOutput.writeLine("<tr>")
-          ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" +
+          ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" +
               s"${rule.tag.runtimeClass.getSimpleName}</td>")
-          ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.description}</td>")
-          ConsoleOutput.writeLine("<td rowSpan=\"" + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
+          ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" + s"${rule.description}</td>")
+          ConsoleOutput.writeLine(TD_ROWSPAN_PREFIX + totalSpan + "\">" + s"${rule.notes().getOrElse("None")}</td>")
           var count = 0
           representative.keys.foreach { param =>
             ConsoleOutput.writeLine(s"<td>$param</td>")
@@ -2109,14 +2117,14 @@ object SupportedOpsDocs {
         }
       }
     }
-    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine(TABLE_CLOSE)
     ConsoleOutput.writeLine()
     ConsoleOutput.writeLine("## Input/Output")
     ConsoleOutput.writeLine("For Input and Output it is not cleanly exposed what types are supported and which are not.")
     ConsoleOutput.writeLine("This table tries to clarify that. Be aware that some types may be disabled in some")
     ConsoleOutput.writeLine("cases for either reads or writes because of processing limitations, like rebasing")
     ConsoleOutput.writeLine("dates or timestamps, or for a lack of type coercion support.")
-    ConsoleOutput.writeLine("<table>")
+    ConsoleOutput.writeLine(TABLE_OPEN)
     ioChecksHeaderLine()
     totalCount = 0
     nextOutputAt = headerEveryNLines
@@ -2143,7 +2151,7 @@ object SupportedOpsDocs {
         ConsoleOutput.writeLine("</tr>")
         totalCount += 2
     }
-    ConsoleOutput.writeLine("</table>")
+    ConsoleOutput.writeLine(TABLE_CLOSE)
     ConsoleOutput.writeLine()
     ConsoleOutput.writeLine("### Apache Iceberg Support")
     ConsoleOutput.writeLine("Support for Apache Iceberg has additional limitations. See the")
@@ -2312,14 +2320,15 @@ object SupportedOpsForTools {
       registeredRule.foreach { rule =>
         V2WriteCommandRecognizers.all.filter(_.supports(command)).foreach { recognizer =>
           val typeSupport = types.map { dataType =>
-            recognizer.checksFor(command).support(dataType)("Input/Output").text
+            recognizer.checksFor(command).support(dataType)(SupportedOpsDocs.INPUT_OUTPUT_LABEL)
+              .text
           }
           val isConfigDisabled = rule.disabledMsg.isDefined
           val supported =
             if (typeSupport.forall(_.equals("NS")) || isConfigDisabled) "NS" else "S"
           val notes = Seq(Some(s"Source: ${recognizer.name}"), rule.notes()).flatten.mkString("; ")
-          val allCols =
-            Seq(command.execName, supported, notes, "Input/Output") ++ typeSupport
+          val allCols = Seq(
+            command.execName, supported, notes, SupportedOpsDocs.INPUT_OUTPUT_LABEL) ++ typeSupport
           ConsoleOutput.writeLine(s"${allCols.map(replaceDelimiter(_, ",")).mkString(",")}")
         }
       }

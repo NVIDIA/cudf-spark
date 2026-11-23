@@ -67,8 +67,10 @@ case class GpuBatchScanExec(
 
       originalPartitioning match {
         case p: KeyGroupedPartitioning =>
+          val partitionPreservationPrefix =
+            "Data source must have preserved the original partitioning "
           if (newPartitions.exists(!_.isInstanceOf[HasPartitionKey])) {
-            throw new SparkException("Data source must have preserved the original partitioning " +
+            throw new SparkException(partitionPreservationPrefix +
               "during runtime filtering: not all partitions implement HasPartitionKey after " +
               "filtering")
           }
@@ -78,13 +80,13 @@ case class GpuBatchScanExec(
           val oldRows = p.partitionValuesOpt.get
 
           if (oldRows.size != newRows.size) {
-            throw new SparkException("Data source must have preserved the original partitioning " +
+            throw new SparkException(partitionPreservationPrefix +
               "during runtime filtering: the number of unique partition values obtained " +
               s"through HasPartitionKey changed: before ${oldRows.size}, after ${newRows.size}")
           }
 
           if (!oldRows.forall(newRows.contains)) {
-            throw new SparkException("Data source must have preserved the original partitioning " +
+            throw new SparkException(partitionPreservationPrefix +
               "during runtime filtering: the number of unique partition values obtained " +
               s"through HasPartitionKey remain the same but do not exactly match")
           }

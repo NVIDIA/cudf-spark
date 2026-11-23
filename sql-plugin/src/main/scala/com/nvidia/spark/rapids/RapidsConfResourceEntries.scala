@@ -23,6 +23,9 @@ import org.apache.spark.sql.rapids.execution.{JoinBuildSideSelection, JoinStrate
 private[rapids] trait RapidsConfResourceEntries {
   def conf(key: String): ConfBuilder
 
+  private final val FRACTION_RANGE_ERROR = "The fraction value must be in [0, 1]."
+  private final val PROFILE_ENABLED_DOC_SUFFIX = "profile when profiling is enabled"
+
   val MULTITHREAD_READ_NUM_THREADS_DEFAULT = 20
 
   // Resource Configuration
@@ -245,7 +248,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       s"via $RMM_ALLOC_MIN_FRACTION_KEY.")
     .startupOnly()
     .doubleConf
-    .checkValue(v => v >= 0 && v <= 1, "The fraction value must be in [0, 1].")
+    .checkValue(v => v >= 0 && v <= 1, FRACTION_RANGE_ERROR)
     .createWithDefault(1)
 
   val RMM_EXACT_ALLOC = conf("spark.rapids.memory.gpu.allocSize")
@@ -264,7 +267,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .startupOnly()
     .commonlyUsed()
     .doubleConf
-    .checkValue(v => v >= 0 && v <= 1, "The fraction value must be in [0, 1].")
+    .checkValue(v => v >= 0 && v <= 1, FRACTION_RANGE_ERROR)
     .createWithDefault(1)
 
   val RMM_ALLOC_MIN_FRACTION = conf(RMM_ALLOC_MIN_FRACTION_KEY)
@@ -273,7 +276,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .startupOnly()
     .commonlyUsed()
     .doubleConf
-    .checkValue(v => v >= 0 && v <= 1, "The fraction value must be in [0, 1].")
+    .checkValue(v => v >= 0 && v <= 1, FRACTION_RANGE_ERROR)
     .createWithDefault(0.25)
 
   val RMM_ALLOC_RESERVE = conf(RMM_ALLOC_RESERVE_KEY)
@@ -293,7 +296,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .internal()
     .startupOnly()
     .doubleConf
-    .checkValue(v => v >= 0 && v <= 1, "The fraction value must be in [0, 1].")
+    .checkValue(v => v >= 0 && v <= 1, FRACTION_RANGE_ERROR)
     .createWithDefault(0.6)
 
   val HOST_SPILL_STORAGE_SIZE = conf("spark.rapids.memory.host.spillStorageSize")
@@ -730,7 +733,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val PROFILE_EXECUTORS = conf("spark.rapids.profile.executors")
     .doc("Comma-separated list of executors IDs and hyphenated ranges of executor IDs to " +
-      "profile when profiling is enabled")
+      PROFILE_ENABLED_DOC_SUFFIX)
     .internal()
     .stringConf
     .createWithDefault("0")
@@ -746,14 +749,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val PROFILE_JOBS = conf("spark.rapids.profile.jobs")
     .doc("Comma-separated list of job IDs and hyphenated ranges of job IDs to " +
-      "profile when profiling is enabled")
+      PROFILE_ENABLED_DOC_SUFFIX)
     .internal()
     .stringConf
     .createOptional
 
   val PROFILE_STAGES = conf("spark.rapids.profile.stages")
     .doc("Comma-separated list of stage IDs and hyphenated ranges of stage IDs to " +
-      "profile when profiling is enabled")
+      PROFILE_ENABLED_DOC_SUFFIX)
     .internal()
     .stringConf
     .createOptional

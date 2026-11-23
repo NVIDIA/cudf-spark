@@ -513,16 +513,18 @@ class JsonPartitionReader(
     }
   }
 
+  private final val SHOULD_NOT_BE_CALLED_MSG = "THIS SHOULD NOT BE CALLED"
+
   // TODO need to rethink how we want to handle casting data from one type to another, but probably
   //  only after we have nested support added in.
   //  https://github.com/NVIDIA/spark-rapids/issues/10539
   override def castStringToBool(input: cudf.ColumnVector): cudf.ColumnVector =
-    throw new IllegalStateException("THIS SHOULD NOT BE CALLED")
+    throw new IllegalStateException(SHOULD_NOT_BE_CALLED_MSG)
 
   override def dateFormat: Option[String] =
-    throw new IllegalStateException("THIS SHOULD NOT BE CALLED")
+    throw new IllegalStateException(SHOULD_NOT_BE_CALLED_MSG)
 
   override def timestampFormat: String =
-    throw new IllegalStateException("THIS SHOULD NOT BE CALLED")
+    throw new IllegalStateException(SHOULD_NOT_BE_CALLED_MSG)
 
 }

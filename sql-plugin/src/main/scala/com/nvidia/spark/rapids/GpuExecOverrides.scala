@@ -33,6 +33,14 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution._
 
 private[rapids] object GpuExecOverrides {
+  private final val NOT_ALLOWED_FOR_GROUPING = "not allowed for grouping expressions"
+  private final val NOT_ALLOWED_FOR_GROUPING_NESTED =
+    "not allowed for grouping expressions if containing Array, Map, or Binary as child"
+  private final val PANDAS_TRANSFER_DESC_PART =
+    " Java process and the Python process. It also supports scheduling GPU resources"
+  private final val NAMESPACE_METADATA_OP = "Namespace metadata operation"
+  private final val TABLE_METADATA_OP = "Table metadata operation"
+
   val rules: Seq[ExecRule[_ <: SparkPlan]] = Seq(
     exec[GenerateExec] (
       "The backend for operations that generate more output rows than input rows like explode",
@@ -165,13 +173,13 @@ private[rapids] object GpuExecOverrides {
           TypeSig.MAP + TypeSig.ARRAY + TypeSig.STRUCT)
             .nested() + TypeSig.ansiIntervals)
             .withPsNote(Seq(TypeEnum.DAYTIME, TypeEnum.YEARMONTH),
-              "not allowed for grouping expressions")
+              NOT_ALLOWED_FOR_GROUPING)
             .withPsNote(TypeEnum.MAP,
-              "not allowed for grouping expressions")
+              NOT_ALLOWED_FOR_GROUPING)
             .withPsNote(TypeEnum.ARRAY,
               "not allowed for grouping expressions if containing Struct as child")
             .withPsNote(TypeEnum.STRUCT,
-              "not allowed for grouping expressions if containing Array, Map, or Binary as child"),
+              NOT_ALLOWED_FOR_GROUPING_NESTED),
         TypeSig.all),
       HashAggregateExecConstructorRuleMeta),
     exec[ObjectHashAggregateExec](
@@ -185,9 +193,9 @@ private[rapids] object GpuExecOverrides {
             .withPsNote(TypeEnum.BINARY, "not allowed for grouping expressions and " +
               "only allowed when aggregate buffers can be converted between CPU and GPU")
             .withPsNote(Seq(TypeEnum.ARRAY, TypeEnum.MAP),
-              "not allowed for grouping expressions")
+              NOT_ALLOWED_FOR_GROUPING)
             .withPsNote(TypeEnum.STRUCT,
-              "not allowed for grouping expressions if containing Array, Map, or Binary as child"),
+              NOT_ALLOWED_FOR_GROUPING_NESTED),
         TypeSig.all),
       ObjectHashAggregateExecConstructorRuleMeta),
     exec[ShuffledHashJoinExec](
@@ -201,9 +209,9 @@ private[rapids] object GpuExecOverrides {
             TypeSig.MAP + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.BINARY)
             .nested()
             .withPsNote(Seq(TypeEnum.ARRAY, TypeEnum.MAP),
-              "not allowed for grouping expressions")
+              NOT_ALLOWED_FOR_GROUPING)
             .withPsNote(TypeEnum.STRUCT,
-              "not allowed for grouping expressions if containing Array, Map, or Binary as child"),
+              NOT_ALLOWED_FOR_GROUPING_NESTED),
         TypeSig.all),
       SortAggregateExecConstructorRuleMeta),
     exec[SortExec](
@@ -253,7 +261,7 @@ private[rapids] object GpuExecOverrides {
     AggregateInPandasExecShims.execRule.orNull,
     exec[ArrowEvalPythonExec](
       "The backend of the Scalar Pandas UDFs. Accelerates the data transfer between the" +
-        " Java process and the Python process. It also supports scheduling GPU resources" +
+        PANDAS_TRANSFER_DESC_PART +
         " for the Python process when enabled",
       ExecChecks(
         (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
@@ -268,13 +276,13 @@ private[rapids] object GpuExecOverrides {
         .disabledByDefault("Performance is not ideal with many small groups"),
     exec[FlatMapGroupsInPandasExec](
       "The backend for Flat Map Groups Pandas UDF, Accelerates the data transfer between the" +
-        " Java process and the Python process. It also supports scheduling GPU resources" +
+        PANDAS_TRANSFER_DESC_PART +
         " for the Python process when enabled.",
       ExecChecks(TypeSig.commonCudfTypes, TypeSig.all),
       FlatMapGroupsInPandasExecConstructorRuleMeta),
     exec[MapInPandasExec](
       "The backend for Map Pandas Iterator UDF. Accelerates the data transfer between the" +
-        " Java process and the Python process. It also supports scheduling GPU resources" +
+        PANDAS_TRANSFER_DESC_PART +
         " for the Python process when enabled.",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
         TypeSig.all),
@@ -286,24 +294,24 @@ private[rapids] object GpuExecOverrides {
           GpuTypeShims.additionalCommonOperatorSupportedTypes)
           .nested(), TypeSig.all),
       InMemoryTableScanExecConstructorRuleMeta),
-    neverReplaceExec[AlterNamespaceSetPropertiesExec]("Namespace metadata operation"),
-    neverReplaceExec[CreateNamespaceExec]("Namespace metadata operation"),
-    neverReplaceExec[DescribeNamespaceExec]("Namespace metadata operation"),
-    neverReplaceExec[DropNamespaceExec]("Namespace metadata operation"),
-    neverReplaceExec[SetCatalogAndNamespaceExec]("Namespace metadata operation"),
+    neverReplaceExec[AlterNamespaceSetPropertiesExec](NAMESPACE_METADATA_OP),
+    neverReplaceExec[CreateNamespaceExec](NAMESPACE_METADATA_OP),
+    neverReplaceExec[DescribeNamespaceExec](NAMESPACE_METADATA_OP),
+    neverReplaceExec[DropNamespaceExec](NAMESPACE_METADATA_OP),
+    neverReplaceExec[SetCatalogAndNamespaceExec](NAMESPACE_METADATA_OP),
     SparkShimImpl.neverReplaceShowCurrentNamespaceCommand,
     ShowNamespacesExecShims.neverReplaceExec.orNull,
-    neverReplaceExec[AlterTableExec]("Table metadata operation"),
-    neverReplaceExec[CreateTableExec]("Table metadata operation"),
-    neverReplaceExec[DeleteFromTableExec]("Table metadata operation"),
-    neverReplaceExec[DescribeTableExec]("Table metadata operation"),
-    neverReplaceExec[DropTableExec]("Table metadata operation"),
-    neverReplaceExec[AtomicReplaceTableExec]("Table metadata operation"),
-    neverReplaceExec[RefreshTableExec]("Table metadata operation"),
-    neverReplaceExec[RenameTableExec]("Table metadata operation"),
-    neverReplaceExec[ReplaceTableExec]("Table metadata operation"),
-    neverReplaceExec[ShowTablePropertiesExec]("Table metadata operation"),
-    neverReplaceExec[ShowTablesExec]("Table metadata operation"),
+    neverReplaceExec[AlterTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[CreateTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[DeleteFromTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[DescribeTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[DropTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[AtomicReplaceTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[RefreshTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[RenameTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[ReplaceTableExec](TABLE_METADATA_OP),
+    neverReplaceExec[ShowTablePropertiesExec](TABLE_METADATA_OP),
+    neverReplaceExec[ShowTablesExec](TABLE_METADATA_OP),
     neverReplaceExec[AdaptiveSparkPlanExec]("Wrapper for adaptive query plan"),
     neverReplaceExec[BroadcastQueryStageExec]("Broadcast query stage"),
     neverReplaceExec[ShuffleQueryStageExec]("Shuffle query stage")

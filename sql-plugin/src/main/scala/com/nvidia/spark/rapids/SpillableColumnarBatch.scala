@@ -123,7 +123,7 @@ class SpillableColumnarBatchImpl (
 
   override def incRefCount(): SpillableColumnarBatch = {
     if (refCount <= 0) {
-      throw new IllegalStateException("Use after free on SpillableColumnarBatchImpl")
+      throw new IllegalStateException(SpillableColumnarBatch.USE_AFTER_FREE_MSG)
     }
     refCount += 1
     this
@@ -177,7 +177,7 @@ class SpillableCompressedColumnarBatchImpl(
 
   override def incRefCount(): SpillableColumnarBatch = {
     if (refCount <= 0) {
-      throw new IllegalStateException("Use after free on SpillableColumnarBatchImpl")
+      throw new IllegalStateException(SpillableColumnarBatch.USE_AFTER_FREE_MSG)
     }
     refCount += 1
     this
@@ -234,7 +234,7 @@ class SpillableColumnarBatchFromBufferImpl(
 
   override def incRefCount(): SpillableColumnarBatch = {
     if (refCount <= 0) {
-      throw new IllegalStateException("Use after free on SpillableColumnarBatchImpl")
+      throw new IllegalStateException(SpillableColumnarBatch.USE_AFTER_FREE_MSG)
     }
     refCount += 1
     this
@@ -341,6 +341,8 @@ class SpillableHostColumnarBatchImpl (
 }
 
 object SpillableColumnarBatch {
+  private[rapids] final val USE_AFTER_FREE_MSG = "Use after free on SpillableColumnarBatchImpl"
+
   /**
    * Create a new SpillableColumnarBatch.
    *

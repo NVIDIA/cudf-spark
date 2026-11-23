@@ -518,7 +518,7 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     // All threads decide whether to build, wait, or reuse under the lock.
     val action: AcquireAction[T] = synchronized {
       if (closed) {
-        throw new IllegalStateException("attempting to materialize a closed handle")
+        throw new IllegalStateException(SpillFramework.CLOSED_HANDLE_MSG)
       }
       dev match {
         case Some(resource) =>
@@ -557,7 +557,7 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
       val lease = new Lease(this, candidate.get, rebuilt = true)
       synchronized {
         if (closed) {
-          throw new IllegalStateException("attempting to materialize a closed handle")
+          throw new IllegalStateException(SpillFramework.CLOSED_HANDLE_MSG)
         }
         SpillFramework.stores.deviceStore.track(this)
         dev = candidate
@@ -780,7 +780,7 @@ class SpillableHostBufferHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       // after spilling, the host can get removed asynchronously, so let's
       // use disk if it's defined even if host is still present
       } else if (disk.isDefined) {
@@ -790,7 +790,7 @@ class SpillableHostBufferHandle private (
         materialized.incRefCount()
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     if (materialized == null) {
@@ -826,7 +826,7 @@ class SpillableHostBufferHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       // after spilling, the host can get removed asynchronously, so let's
       // use disk if it's defined even if host is still present
       } else if (disk.isDefined) {
@@ -836,7 +836,7 @@ class SpillableHostBufferHandle private (
         hostBuf.incRefCount()
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     if (hostBuf != null) {
@@ -930,7 +930,7 @@ class SpillableHostBufferHandle private (
         diskHandle = disk.get
       } else {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       }
     }
     if (hostBuffer != null) {
@@ -1000,7 +1000,7 @@ class SpillableDeviceBufferHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       } else if (host.isDefined) {
         // since we spilled, host must be set.
         hostHandle = host.get
@@ -1009,7 +1009,7 @@ class SpillableDeviceBufferHandle private (
         materialized.incRefCount()
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     // if `materialized` is null, we spilled. This is a terminal
@@ -1109,14 +1109,14 @@ class SpillableColumnarBatchHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       } else if (host.isDefined) {
         hostHandle = host.get
       } else if (dev.isDefined) {
         materialized = GpuColumnVector.incRefCounts(dev.get)
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     if (materialized == null) {
@@ -1260,14 +1260,14 @@ class SpillableColumnarBatchFromBufferHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       } else if (host.isDefined) {
         hostHandle = host.get
       } else if (dev.isDefined) {
         materialized = GpuColumnVector.incRefCounts(dev.get)
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     if (materialized == null) {
@@ -1378,14 +1378,14 @@ class SpillableCompressedColumnarBatchHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       } else if (host.isDefined) {
         hostHandle = host.get
       } else if (dev.isDefined) {
         materialized = GpuCompressedColumnVector.incRefCounts(dev.get)
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     if (materialized == null) {
@@ -1493,7 +1493,7 @@ class SpillableHostColumnarBatchHandle private (
     synchronized {
       if (closed) {
         throw new IllegalStateException(
-          "attempting to materialize a closed handle")
+          SpillFramework.CLOSED_HANDLE_MSG)
       // after spilling, the host can get removed asynchronously, so let's
       // use disk if it's defined even if host is still present
       } else if (disk.isDefined) {
@@ -1502,7 +1502,7 @@ class SpillableHostColumnarBatchHandle private (
         materialized = RapidsHostColumnVector.incRefCounts(host.get)
       } else {
         throw new IllegalStateException(
-          "open handle has no underlying buffer")
+          SpillFramework.OPEN_HANDLE_NO_BUFFER_MSG)
       }
     }
     if (materialized == null) {
@@ -2382,7 +2382,7 @@ class SpillableTableHandle private (
     var hostHandle: SpillableHostBufferHandle = null
     synchronized {
       if (closed) {
-        throw new IllegalStateException("attempting to materialize a closed handle")
+        throw new IllegalStateException(SpillFramework.CLOSED_HANDLE_MSG)
       } else if (host.isDefined) {
         hostHandle = host.get
       } else if (dev.isDefined) {
@@ -2486,6 +2486,8 @@ object SpillableTableHandle {
 }
 
 object SpillFramework extends Logging {
+  private[spill] final val CLOSED_HANDLE_MSG = "attempting to materialize a closed handle"
+  private[spill] final val OPEN_HANDLE_NO_BUFFER_MSG = "open handle has no underlying buffer"
   /**
    * Returns the first failure, recording `t` as suppressed unless it is that same failure.
    */

@@ -230,6 +230,11 @@ object ParquetSchemaUtils {
    * of the ArrayType should also be a nested type, namely an ArrayType, a MapType, or a
    * StructType.
    */
+  private final val INVALID_PARQUET_SCHEMA_PREFIX = "Invalid Parquet schema. "
+
+  /**
+   * Recursively clips a Parquet list type.
+   */
   @scala.annotation.nowarn("msg=method as in class Builder is deprecated")
   private def clipParquetListType(
       parquetList: GroupType,
@@ -254,13 +259,13 @@ object ParquetSchemaUtils {
         // TODO: When we drop Spark 3.1.x, this should use Parquet's LogicalTypeAnnotation
         //parquetList.getLogicalTypeAnnotation.isInstanceOf[ListLogicalTypeAnnotation],
         parquetList.getOriginalType == OriginalType.LIST,
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "Logical type annotation of annotated Parquet lists must be " +
             "ListLogicalTypeAnnotation: " + parquetList.toString)
 
       assert(
         parquetList.getFieldCount == 1 && parquetList.getType(0).isRepetition(Repetition.REPEATED),
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "LIST-annotated group should only have exactly one repeated field: " +
             parquetList)
 
@@ -617,14 +622,14 @@ object ParquetSchemaUtils {
         // TODO: When we drop Spark 3.1.x, this should use Parquet's LogicalTypeAnnotation
         //parquetList.getLogicalTypeAnnotation.isInstanceOf[ListLogicalTypeAnnotation],
         parquetList.getOriginalType == OriginalType.LIST,
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "Logical type annotation of annotated Parquet lists must be " +
             "ListLogicalTypeAnnotation: " + parquetList.toString)
 
       assert(
         parquetListGroup.getFieldCount == 1 &&
             parquetListGroup.getType(0).isRepetition(Repetition.REPEATED),
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "LIST-annotated group should only have exactly one repeated field: " +
             parquetList)
 

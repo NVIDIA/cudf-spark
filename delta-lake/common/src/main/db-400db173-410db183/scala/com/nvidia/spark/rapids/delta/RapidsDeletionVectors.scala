@@ -294,7 +294,7 @@ object RapidsDeletionVectors extends Logging {
             loadStandardSerializedBitmap(storedBitmap.loadSerialized(dvStore).buffer)
           }
         case unexpectedFilterType => throw new IllegalStateException(
-          s"Unexpected row index filter type for Deletion Vectors. " +
+          UNEXPECTED_ROW_INDEX_FILTER_TYPE +
             s"Expected: ${RowIndexFilterType.IF_CONTAINED}; Actual: ${unexpectedFilterType}")
       }
     } else if (dvDescriptorOpt.isDefined || filterTypeOpt.isDefined) {
@@ -306,11 +306,14 @@ object RapidsDeletionVectors extends Logging {
     }
   }
 
+  private final val UNEXPECTED_ROW_INDEX_FILTER_TYPE =
+    "Unexpected row index filter type for Deletion Vectors. "
+
   private def loadDeletionVector(
       conf: Configuration,
       rowIndexFilterProvider: RowIndexFilterProvider): HostMemoryBuffer = {
     require(rowIndexFilterProvider.getRowIndexFilterType == RowIndexFilterType.IF_CONTAINED,
-      s"Unexpected row index filter type for Deletion Vectors. " +
+      UNEXPECTED_ROW_INDEX_FILTER_TYPE +
         s"Expected: ${RowIndexFilterType.IF_CONTAINED}; " +
         s"Actual: ${rowIndexFilterProvider.getRowIndexFilterType}")
     if (rowIndexFilterProvider.getCardinality == 0) {
@@ -369,7 +372,7 @@ object RapidsDeletionVectors extends Logging {
             conf)
           StoredBitmap.create(dvDesc, new Path(tablePath)).load(dvStore)
         case unexpectedFilterType => throw new IllegalStateException(
-          s"Unexpected row index filter type for Deletion Vectors. " +
+          UNEXPECTED_ROW_INDEX_FILTER_TYPE +
             s"Expected: ${RowIndexFilterType.IF_CONTAINED}; Actual: ${unexpectedFilterType}")
       }
     } else if (dvDescriptorOpt.isDefined || filterTypeOpt.isDefined) {
@@ -378,7 +381,7 @@ object RapidsDeletionVectors extends Logging {
     } else {
       rowIndexFilterProviderOpt.map { provider =>
         require(provider.getRowIndexFilterType == RowIndexFilterType.IF_CONTAINED,
-          s"Unexpected row index filter type for Deletion Vectors. " +
+          UNEXPECTED_ROW_INDEX_FILTER_TYPE +
             s"Expected: ${RowIndexFilterType.IF_CONTAINED}; " +
             s"Actual: ${provider.getRowIndexFilterType}")
         RoaringBitmapArray.readFrom(provider.retrieveSerialized(conf).buffer)

@@ -695,27 +695,29 @@ object InternalColumnarRddConverter extends Logging {
                       case c2rRdd: GpuColumnToRowMapPartitionsRDD =>
                         batch = Some(c2rRdd.prev)
                       case rdd =>
-                        logDebug("Cannot extract columnar RDD directly. " +
+                        logDebug(CANNOT_EXTRACT_COLUMNAR_RDD_PREFIX +
                           s"(column to row not found $rdd)")
                     }
                   case rdd =>
-                    logDebug("Cannot extract columnar RDD directly. " +
+                    logDebug(CANNOT_EXTRACT_COLUMNAR_RDD_PREFIX +
                       s"(column to row not found $rdd)")
                 }
               case rdd =>
-                logDebug("Cannot extract columnar RDD directly. " +
+                logDebug(CANNOT_EXTRACT_COLUMNAR_RDD_PREFIX +
                   s"(Internal row to row rdd not found $rdd)")
             }
           case rdd =>
-            logDebug("Cannot extract columnar RDD directly. " +
+            logDebug(CANNOT_EXTRACT_COLUMNAR_RDD_PREFIX +
               s"(SQLExecutionRDD not found $rdd)")
         }
       case rdd =>
-        logDebug(s"Cannot extract columnar RDD directly. " +
+        logDebug(CANNOT_EXTRACT_COLUMNAR_RDD_PREFIX +
           s"(First MapPartitionsRDD not found $rdd)")
     }
     (batch, input)
   }
+
+  private final val CANNOT_EXTRACT_COLUMNAR_RDD_PREFIX = "Cannot extract columnar RDD directly. "
 
   def convert(df: DataFrame): RDD[Table] = {
     val schema = df.schema

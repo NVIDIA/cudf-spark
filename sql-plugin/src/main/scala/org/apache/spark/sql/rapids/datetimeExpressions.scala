@@ -609,11 +609,13 @@ object ExceptionTimeParserPolicy extends TimeParserPolicy
 object CorrectedTimeParserPolicy extends TimeParserPolicy
 
 object GpuToTimestamp {
+  private[rapids] final val ISO_DATE_FORMAT = "yyyy-MM-dd"
+
   // We are compatible with Spark for these formats when the timeParserPolicy is CORRECTED
   // or EXCEPTION. It is possible that other formats may be supported but these are the only
   // ones that we have tests for.
   val CORRECTED_COMPATIBLE_FORMATS = Set(
-    "yyyy-MM-dd",
+    ISO_DATE_FORMAT,
     "yyyy/MM/dd",
     "yyyy-MM",
     "yyyy/MM",
@@ -647,7 +649,7 @@ object GpuToTimestamp {
   // is possible that other formats may be supported but these are the only ones that we have
   // tests for.
   val LEGACY_COMPATIBLE_FORMATS = Set(
-    "yyyy-MM-dd",
+    ISO_DATE_FORMAT,
     "yyyy-mm-dd",
     "yyyy/MM/dd",
     "dd-MM-yyyy",
@@ -979,7 +981,7 @@ class FromUnixTimeMeta(a: FromUnixTime,
    */
   private val FORMATS_BY_CONVERSION: Map[String, (String, FmtConverter)] = Map(
     // spark format -> (intermediate format, converter)
-    "yyyyMMdd" -> (("yyyy-MM-dd",
+    "yyyyMMdd" -> ((GpuToTimestamp.ISO_DATE_FORMAT,
       col => {
         withResource(Scalar.fromString("-")) { dashStr =>
           withResource(Scalar.fromString("")) { emptyStr =>

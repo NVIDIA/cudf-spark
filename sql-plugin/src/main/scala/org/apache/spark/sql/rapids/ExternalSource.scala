@@ -260,6 +260,8 @@ trait ExternalSourceBase extends Logging {
     }
   }
 
+  private final val NO_GPU_CONVERSION_MSG = "No GPU conversion"
+
   def convertToGpu(
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
@@ -269,7 +271,7 @@ trait ExternalSourceBase extends Logging {
     } else if (hasIcebergJar && icebergProvider.isSupportedCatalog(catalogClass)) {
       icebergProvider.convertToGpuPlan(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -295,7 +297,7 @@ trait ExternalSourceBase extends Logging {
     } else if (hasIcebergJar && icebergProvider.isSupportedCatalog(catalogClass)) {
       icebergProvider.convertToGpuPlan(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -317,7 +319,7 @@ trait ExternalSourceBase extends Logging {
     if (deltaProvider.isSupportedWrite(writeClass)) {
       deltaProvider.convertToGpu(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -339,7 +341,7 @@ trait ExternalSourceBase extends Logging {
     if (deltaProvider.isSupportedWrite(writeClass)) {
       deltaProvider.convertToGpu(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -381,7 +383,7 @@ trait ExternalSourceBase extends Logging {
     if (hasIcebergJar && icebergProvider.isSupportedWrite(writeClass)) {
       icebergProvider.convertToGpuPlan(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 

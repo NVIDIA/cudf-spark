@@ -66,6 +66,8 @@ final class NoRuleDataFromReplacementRule extends DataFromReplacementRule {
 
 object RapidsMeta {
   val gpuSupportedTag = TreeNodeTag[Set[String]]("rapids.gpu.supported")
+  private[rapids] final val NOT_ALL_EXPRS_REPLACEABLE_MSG = "not all expressions can be replaced"
+  private[rapids] final val CANNOT_CONVERT_TO_GPU_MSG = "Cannot be converted to GPU"
 
   def noNeedToReplaceReason(klass: Class[_]) = s"there is no need to replace $klass"
 }
@@ -512,7 +514,7 @@ abstract class PartMeta[INPUT <: Partitioning](part: INPUT,
   override final def tagSelfForGpu(): Unit = {
     rule.getChecks.foreach(_.tag(this))
     if (!canExprTreeBeReplaced) {
-      willNotWorkOnGpu("not all expressions can be replaced")
+      willNotWorkOnGpu(RapidsMeta.NOT_ALL_EXPRS_REPLACEABLE_MSG)
     }
     tagPartForGpu()
   }
@@ -538,7 +540,7 @@ final class RuleNotFoundPartMeta[INPUT <: Partitioning](
   }
 
   override def convertToGpu(): GpuPartitioning =
-    throw new IllegalStateException("Cannot be converted to GPU")
+    throw new IllegalStateException(RapidsMeta.CANNOT_CONVERT_TO_GPU_MSG)
 }
 
 /**
@@ -575,7 +577,7 @@ final class RuleNotFoundScanMeta[INPUT <: Scan](
   }
 
   override def convertToGpu(): GpuScan =
-    throw new IllegalStateException("Cannot be converted to GPU")
+    throw new IllegalStateException(RapidsMeta.CANNOT_CONVERT_TO_GPU_MSG)
 }
 
 /**
@@ -637,7 +639,7 @@ final class RuleNotFoundDataWritingCommandMeta[INPUT <: DataWritingCommand](
   }
 
   override def convertToGpu(): GpuDataWritingCommand =
-    throw new IllegalStateException("Cannot be converted to GPU")
+    throw new IllegalStateException(RapidsMeta.CANNOT_CONVERT_TO_GPU_MSG)
 }
 
 /**
@@ -683,7 +685,7 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
     val newExprReplaceVal = canExprTreeBeReplaced
     if (previousExprReplaceVal != newExprReplaceVal &&
         !newExprReplaceVal) {
-      willNotWorkOnGpu("not all expressions can be replaced")
+      willNotWorkOnGpu(RapidsMeta.NOT_ALL_EXPRS_REPLACEABLE_MSG)
     }
   }
 
@@ -823,7 +825,7 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
     rule.getChecks.foreach(_.tag(this))
 
     if (!canExprTreeBeReplaced) {
-      willNotWorkOnGpu("not all expressions can be replaced")
+      willNotWorkOnGpu(RapidsMeta.NOT_ALL_EXPRS_REPLACEABLE_MSG)
     }
 
     if (!canScansBeReplaced) {
@@ -971,7 +973,7 @@ final class RuleNotFoundSparkPlanMeta[INPUT <: SparkPlan](
     willNotWorkOnGpu(s"GPU does not currently support the operator ${plan.getClass}")
 
   override def convertToGpu(): GpuExec =
-    throw new IllegalStateException("Cannot be converted to GPU")
+    throw new IllegalStateException(RapidsMeta.CANNOT_CONVERT_TO_GPU_MSG)
 }
 
 /**
@@ -990,7 +992,7 @@ final class DoNotReplaceOrWarnSparkPlanMeta[INPUT <: SparkPlan](
     willNotWorkOnGpu(noNeedToReplaceReason(plan.getClass))
 
   override def convertToGpu(): GpuExec =
-    throw new IllegalStateException("Cannot be converted to GPU")
+    throw new IllegalStateException(RapidsMeta.CANNOT_CONVERT_TO_GPU_MSG)
 }
 
 sealed abstract class ExpressionContext
@@ -2031,5 +2033,5 @@ final class RuleNotFoundRunnableCommandMeta[INPUT <: RunnableCommand](
     willNotWorkOnGpu(s"GPU does not currently support the command ${cmd.getClass}")
 
   override def convertToGpu(): RunnableCommand =
-    throw new IllegalStateException("Cannot be converted to GPU")
+    throw new IllegalStateException(RapidsMeta.CANNOT_CONVERT_TO_GPU_MSG)
 }

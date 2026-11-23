@@ -191,24 +191,26 @@ abstract class CudfUnsafeRowBase(
     throw new UnsupportedOperationException("GeometryVal is not supported")
   }
 
+  private final val NOT_IMPLEMENTED_YET = "NOT IMPLEMENTED YET"
+
   override def getInterval(ordinal: Int): CalendarInterval = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def getStruct(ordinal: Int, numFields: Int): CudfUnsafeRow = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def getArray(ordinal: Int): ArrayData = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def getMap(ordinal: Int): MapData = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def copy(): CudfUnsafeRow = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def hashCode(): Int = {
@@ -235,7 +237,7 @@ abstract class CudfUnsafeRowBase(
     build.toString()
   }
 
-  override def anyNull: Boolean = throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+  override def anyNull: Boolean = throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
 
   private def getFieldAddressFromOrdinal(ordinal: Int): Long = {
     assertIndexIsValid(ordinal)
