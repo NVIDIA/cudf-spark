@@ -1,6 +1,8 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Check which Docker images each event selects and which tags and caches each build uses."""
+
 import json
 import os
 from pathlib import Path

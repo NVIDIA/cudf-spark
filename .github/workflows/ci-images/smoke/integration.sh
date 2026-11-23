@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Check the integration image's Python dependencies, Maven, and opt-in JDK 21.
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}

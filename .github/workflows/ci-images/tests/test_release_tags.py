@@ -1,6 +1,8 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Verify release tag ownership and digest preservation when main seeds a release."""
+
 import json
 import os
 from pathlib import Path

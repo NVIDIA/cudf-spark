@@ -2,6 +2,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Point the release tag at the verified main image until the release branch exists.
 set -euo pipefail
 die() { echo "Image release tag: $*" >&2; exit 1; }
 [[ $# == 4 ]] || die 'expected PACKAGE MAIN_TAG RELEASE_TAG VERIFIED_DIGEST'

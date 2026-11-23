@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Check the Skills build toolchain and compile a CUDA kernel without a GPU.
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}

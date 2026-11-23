@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Check the shuffle image's UCX self transport and the libraries required by its variant.
 set -euo pipefail
 if [[ $# -ne 3 || ( $3 != rdma && $3 != no-rdma ) ]]; then
   echo "Usage: $0 IMAGE PLATFORM {rdma|no-rdma}" >&2

@@ -1,7 +1,8 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Select Docker recipes from the complete event diff; run from the repository root."""
+"""Select affected Docker images and compute their validation or publication settings."""
+
 import json
 import os
 import re

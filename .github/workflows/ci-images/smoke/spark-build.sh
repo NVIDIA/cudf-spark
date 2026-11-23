@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Verify the Spark builder's native architecture, Java toolchains, and Spark build dependencies.
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}

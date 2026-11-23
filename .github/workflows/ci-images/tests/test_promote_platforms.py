@@ -1,6 +1,8 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Check that only the verified pair of native images can update the multi-platform tag."""
+
 import json
 import os
 from pathlib import Path

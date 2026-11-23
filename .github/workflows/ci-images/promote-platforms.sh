@@ -2,6 +2,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Publish one Spark image tag from the verified AMD64 and ARM64 image digests.
 set -euo pipefail
 die() { echo "Image promotion failed: $*" >&2; exit 1; }
 [[ $# == 3 ]] || die 'expected BASENAME TAG RECORD_DIR'

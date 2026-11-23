@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Verify that the UDF template can compile CUDA code using its default login shell.
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}
