@@ -66,10 +66,14 @@ class HybridScanGdsSuite extends HybridScanNativeFileSuite with BeforeAndAfterAl
         val openedForCuFile = metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_SPLITS).value == 0
         info(s"KvikIO opened $path for cuFile: $openedForCuFile; 5 MiB read direct: $direct")
         val message = s"KvikIO is not reading $path through cuFile"
+        val stagedMessage = s"KvikIO would stage the 5 MiB read of $path through host memory; " +
+          "is KVIKIO_GDS_THRESHOLD above 5 MiB?"
         if (gdsRequired) {
           assert(openedForCuFile, message)
+          assert(direct, stagedMessage)
         } else {
           assume(openedForCuFile, message)
+          assume(direct, stagedMessage)
         }
         // cuFile can open a file on a machine that cannot read it through GDS.
         try {
