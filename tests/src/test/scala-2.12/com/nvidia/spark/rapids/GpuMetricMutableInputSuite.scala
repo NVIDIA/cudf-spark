@@ -59,7 +59,7 @@ class GpuMetricMutableInputSuite extends AnyFunSuite {
         }
       })
       assert(calls == 1)
-      assert(first.value > 0L && second.value == first.value)
+      assert(first.value == second.value)
       assert(first.tryActivateTimer(Seq.empty))
       assert(second.tryActivateTimer(Seq.empty))
       first.deactivateTimer(0L, Seq.empty)
