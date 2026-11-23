@@ -6,6 +6,7 @@ build. A Markdown-only PR passes after selection. Add `[skip ci]` to a PR title
 to skip image builds and pass the gate. Title and description edits do not start
 CPU CI. Choose **Re-run all jobs** on the latest commit to apply the current title.
 
+Follow the [image maintenance guide](AGENTS.md) when changing a recipe or workflow.
 Register each Dockerfile in [suites.json](suites.json). List local `COPY` and
 `ADD` inputs in `recipe-inputs` so changes to them trigger the build and update
 its fingerprint. Changing a shuffle Dockerfile selects just that example.
