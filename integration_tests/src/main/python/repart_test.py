@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect, collect_plan_nodes, plan_metric
-from spark_session import is_before_spark_320, with_cpu_session
+from spark_session import is_before_spark_320, is_spark_411_or_later, with_cpu_session
 from conftest import is_not_utc
 from data_gen import *
 from marks import ignore_order, allow_non_gpu
@@ -358,6 +358,66 @@ def test_union_with_filter():
         return dfc.union(dfc)
     conf = { "spark.sql.adaptive.enabled": "true"}
     assert_gpu_and_cpu_are_equal_collect(doit, conf)
+
+
+def _assert_union_attribute_map_partitioning(cpu_plan, gpu_plan):
+    gpu_unions = [
+        node for node in collect_plan_nodes(gpu_plan)
+        if node.getClass().getSimpleName() == "GpuUnionExec"
+    ]
+    assert len(gpu_unions) == 1, "Expected one GpuUnionExec in:\n{}".format(gpu_plan)
+    partitioning = gpu_unions[0].outputPartitioning()
+    assert partitioning.getClass().getSimpleName() == "HashPartitioning"
+    assert partitioning.numPartitions() == 4
+
+
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="SPARK-52921 union output partitioning requires Spark 4.1.1+")
+@ignore_order
+def test_union_partitioning_attribute_map():
+    def do_it(spark):
+        num_parts = 4
+        base = spark.range(0, 40).select(
+            (f.col("id") % num_parts).cast("int").alias("id"),
+            f.col("id").alias("v"))
+        base.createOrReplaceTempView("union_attribute_map_base")
+        spark.sql("""
+            CREATE OR REPLACE TEMP VIEW union_attribute_map_aggregate AS
+            SELECT id, sum(v) AS v
+            FROM union_attribute_map_base
+            GROUP BY id
+        """)
+        spark.sql("""
+            CREATE OR REPLACE TEMP VIEW union_attribute_map_joined AS
+            SELECT b.id, a.v
+            FROM union_attribute_map_base b
+            JOIN union_attribute_map_aggregate a ON b.id = a.id
+            GROUP BY b.id, a.v
+        """)
+        return spark.sql("""
+            WITH union4 AS (
+              SELECT * FROM union_attribute_map_aggregate
+              UNION ALL SELECT * FROM union_attribute_map_joined
+              UNION ALL SELECT * FROM union_attribute_map_joined
+              UNION ALL SELECT * FROM union_attribute_map_joined
+            )
+            SELECT u.id, count(*) AS cnt
+            FROM union4 u
+            JOIN union_attribute_map_aggregate a ON u.id = a.id
+            GROUP BY u.id
+        """)
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes="GpuUnionExec",
+        conf={
+            "spark.sql.adaptive.enabled": False,
+            "spark.sql.autoBroadcastJoinThreshold": -1,
+            "spark.sql.shuffle.partitions": 4,
+            "spark.sql.unionOutputPartitioning": True,
+        },
+        require_non_empty=True,
+        gpu_plan_assertion=_assert_union_attribute_map_partitioning)
 
 
 # AQE off: collect_plan_nodes does not descend into AdaptiveSparkPlanExec.
