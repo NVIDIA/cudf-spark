@@ -520,10 +520,12 @@ class GpuVariantGetSuite extends AnyFunSuite {
   }
 
   test("only Spark's unknown-primitive error marks a type ID as unrecognized") {
-    // Spark's own exception class is private[spark], so stand in for it.
+    // Spark's own exception class is private[spark], so stand in for it. Apache Spark leaves only
+    // getCondition abstract, but Databricks 17.3 also leaves getErrorClass abstract.
     class ConditionError(condition: String) extends RuntimeException(condition)
         with SparkThrowable {
       override def getCondition: String = condition
+      override def getErrorClass: String = condition
     }
     // Unrelated failures are logged and treated as unrecognized, the conservative choice.
     val ids = GpuVariantGet.probeUnrecognizedIds { id =>
