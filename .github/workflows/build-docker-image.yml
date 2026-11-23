@@ -43,8 +43,8 @@ jobs:
           PUBLISH: ${{ inputs.publish }}
         run: |
           config=$(jq -c --argjson w "$WORKER" 'del(.workers) + $w' <<< "$CONFIG")
-          # Never promote a single architecture directly to the multi-platform tag.
-          if [[ "$PUBLISH" == true && $(jq -r .multi <<< "$config") == true ]]; then
+          # A native build must not move a consumer tag before the final recipe check.
+          if [[ "$PUBLISH" == true ]]; then
             tag="build-$(jq -r .tag <<< "$config")-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(jq -r .arch <<< "$WORKER")"
             config=$(jq -c --arg tag "$tag" '.tag = $tag' <<< "$config")
           fi
@@ -66,19 +66,27 @@ jobs:
           token: ${{ inputs.publish && github.token || '' }}
       # The shared builder removes its temporary registry credentials after promotion.
       - uses: docker/login-action@v4.7.0
-        if: inputs.publish && !fromJSON(inputs.config).multi && fromJSON(inputs.config).release_tag != '' && steps.guard.outputs.current == 'true'
+        if: inputs.publish && !fromJSON(inputs.config).multi && steps.guard.outputs.current == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Publish the verified single-platform image
+        id: single
+        if: inputs.publish && !fromJSON(inputs.config).multi && steps.guard.outputs.current == 'true'
+        env:
+          IMAGE: ${{ fromJSON(inputs.config).image }}
+          TAG: ${{ fromJSON(inputs.config).tag }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: bash .github/workflows/ci-images/publish-tag.sh "$IMAGE" "$TAG" "$TAG" "$DIGEST"
       - name: Seed the release tag from the verified single-platform image
-        if: inputs.publish && !fromJSON(inputs.config).multi && fromJSON(inputs.config).release_tag != '' && steps.guard.outputs.current == 'true'
+        if: steps.single.outputs.digest != '' && fromJSON(inputs.config).release_tag != ''
         env:
           IMAGE: ${{ fromJSON(inputs.config).image }}
           TAG: ${{ fromJSON(inputs.config).tag }}
           RELEASE_TAG: ${{ fromJSON(inputs.config).release_tag }}
-          DIGEST: ${{ steps.image.outputs.digest }}
-        run: bash .github/workflows/ci-images/seed-release-tag.sh "$IMAGE" "$TAG" "$RELEASE_TAG" "$DIGEST"
+          DIGEST: ${{ steps.single.outputs.digest }}
+        run: bash .github/workflows/ci-images/publish-tag.sh "$IMAGE" "$TAG" "$RELEASE_TAG" "$DIGEST"
       - name: Record verified platform digest
         if: inputs.publish && fromJSON(inputs.config).multi && steps.guard.outputs.current == 'true'
         env:
@@ -136,7 +144,7 @@ jobs:
         if: steps.guard.outputs.current == 'true'
         run: bash .github/workflows/ci-images/promote-platforms.sh "$IMAGE" "$TAG" "$RUNNER_TEMP/platforms"
       - name: Seed the release tag from the verified platform index
-        if: steps.guard.outputs.current == 'true' && env.RELEASE_TAG != ''
+        if: steps.publish.outputs.digest != '' && env.RELEASE_TAG != ''
         env:
           DIGEST: ${{ steps.publish.outputs.digest }}
-        run: bash .github/workflows/ci-images/seed-release-tag.sh "$IMAGE" "$TAG" "$RELEASE_TAG" "$DIGEST"
+        run: bash .github/workflows/ci-images/publish-tag.sh "$IMAGE" "$TAG" "$RELEASE_TAG" "$DIGEST"

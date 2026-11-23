@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify release tag ownership and digest preservation when main seeds a release."""
+"""Verify branch tag freshness, release ownership and digest preservation."""
 
 import json
 import os
@@ -33,7 +33,8 @@ class ReleaseTagTest(unittest.TestCase):
                         GIT_ALLOW_PROTOCOL="file", GIT_AUTHOR_NAME="CI", GIT_COMMITTER_NAME="CI",
                         GIT_AUTHOR_EMAIL="ci@example.invalid", GIT_COMMITTER_EMAIL="ci@example.invalid",
                         GITHUB_REF="refs/heads/main", GITHUB_REPOSITORY="NVIDIA/cudf-spark",
-                        GITHUB_STEP_SUMMARY=str(self.root / "summary"), DOCKER_ARGS=str(self.calls),
+                        GITHUB_STEP_SUMMARY=str(self.root / "summary"), GITHUB_OUTPUT=str(self.root / "output"),
+                        DOCKER_ARGS=str(self.calls),
                         PATH=str(self.root) + os.pathsep + os.environ["PATH"])
         (self.origin / CI_IMAGES).mkdir(parents=True)
         for name in ("select.py", "suites.json", "paths.json"):
@@ -61,10 +62,51 @@ metadata.write_text(json.dumps({"containerimage.descriptor": {"digest": digest}}
         program.write_text(script)
         program.chmod(0o755)
 
-    def seed(self, release_tag=RELEASE_LINE + SUFFIX):
-        return subprocess.run(["bash", str(SOURCE / "seed-release-tag.sh"), PACKAGE,
-                               "main" + SUFFIX, release_tag, DIGEST],
+    def publish(self, package, branch_tag, tag):
+        return subprocess.run(["bash", str(SOURCE / "publish-tag.sh"), package, branch_tag, tag, DIGEST],
                               cwd=self.worker, env=self.env, text=True, capture_output=True)
+
+    def seed(self, release_tag=RELEASE_LINE + SUFFIX):
+        return self.publish(PACKAGE, "main" + SUFFIX, release_tag)
+
+    def test_stable_skills_tag_checks_recipe_again_after_build(self):
+        package = "skills-build"
+        dockerfile = self.origin / "skills/ci/Dockerfile.pre-merge"
+        dockerfile.parent.mkdir(parents=True)
+        dockerfile.write_text("FROM scratch\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "new Skills recipe")
+        subprocess.run(["git", "pull", "--ff-only"], cwd=self.worker, env=self.env, check=True, capture_output=True)
+        subprocess.run(["python3", str(CI_IMAGES / "select.py"), "--current", package],
+                       cwd=self.worker, env=self.env, check=True, capture_output=True)
+        output = Path(self.env["GITHUB_OUTPUT"])
+        self.assertEqual(output.read_text().strip(), "current=true")
+        output.unlink()
+        self.git("revert", "--no-edit", "HEAD")
+        result = self.publish(package, "main", "main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Skipping main", result.stdout)
+        self.assertFalse(self.calls.exists())
+        self.assertFalse(output.exists())
+
+    def test_native_stable_tag_keeps_digest_on_main_and_release(self):
+        self.git("branch", RELEASE_BRANCH)
+        for ref, tag in (("main", "main"), (RELEASE_BRANCH, RELEASE_LINE)):
+            with self.subTest(ref=ref):
+                self.env["GITHUB_REF"] = "refs/heads/" + ref
+                result = self.publish("skills-build", tag, tag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads(self.calls.read_text())
+                image = "ghcr.io/nvidia/cudf-spark/skills-build"
+                self.assertIn("--prefer-index=false", args)
+                self.assertEqual(args[-3:], ["--tag", image + ":" + tag, image + "@" + DIGEST])
+                output = Path(self.env["GITHUB_OUTPUT"])
+                self.assertEqual(output.read_text().strip(), "digest=" + DIGEST)
+                output.unlink()
+                self.calls.unlink()
+        result = self.publish("skills-build", "main", "main")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
 
     def test_same_digest_pre_cut_and_release_ownership_after_cut(self):
         self.git("branch", f"{RELEASE_BRANCH}-rc")

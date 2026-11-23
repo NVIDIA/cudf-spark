@@ -57,6 +57,12 @@ on a detached commit. Development jobs can pass `--allow-main-fallback` and
 enable fallback in their registry resolver to try the matching main tag second.
 Use the digest returned after the platform and recipe label match.
 
+For an approved PR, a worker can build the catalog recipe locally if the image
+is missing or its fingerprint differs. The CPU validation image stays on its
+runner. Registry access errors are not a reason to rebuild. Keep PR-controlled
+code away from registry write and internal credentials. For nightly builds,
+pass the source SHA and each platform's resolved digest to downstream jobs.
+
 To select an alternate JDK, set `JAVA_HOME` and put its `bin` directory first on
 `PATH`.
 

@@ -55,16 +55,30 @@ plugins=${DOCKER_CONFIG:-"$HOME/.docker"}/cli-plugins
 printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$scratch/anonymous/config.json"
 (
   unset DOCKER_AUTH_CONFIG BUILDX_CONFIG BUILDX_BUILDER
-  docker --config "$scratch/anonymous" buildx imagetools inspect --raw "$reference"
-) > "$scratch/resolved.json" ||
-  die "anonymous index lookup failed for $reference; $image:$tag was not updated"
+  for attempt in 1 2 3; do
+    if timeout --kill-after=2s 15s docker --config "$scratch/anonymous" buildx imagetools inspect \
+        --raw "$reference" > "$scratch/resolved.json" 2> "$scratch/inspect.err"; then
+      break
+    else
+      status=$?
+    fi
+    # Buildx may report a bare "<image>@<digest>: not found" before GHCR serves the index.
+    sed -E 's#(https?://[^?[:space:]]+)\?[^[:space:]]+#\1?[redacted]#g' "$scratch/inspect.err" >&2
+    if [[ $status != 124 && $status != 137 ]] &&
+        ! grep -Fq "$reference: not found" "$scratch/inspect.err" &&
+        ! grep -Eiq -e 'manifest[ _]unknown|(^|[[:space:]])(404|408|429|5[0-9]{2})([[:space:]]|$)' \
+                    -e 'timed? ?out|context deadline exceeded|connection reset|unexpected EOF' "$scratch/inspect.err"; then
+      die "anonymous index lookup failed for $reference (exit $status, attempt $attempt/3); $image:$tag was not updated"
+    fi
+    (( attempt < 3 )) ||
+      die "anonymous index lookup failed for $reference after 3 attempts (exit $status); $image:$tag was not updated"
+    echo "Retrying anonymous index lookup for $reference after attempt $attempt/3 (exit $status)" >&2
+    sleep 3
+  done
+)
 jq -e --slurpfile planned "$scratch/index.json" '(.manifests | sort_by(.digest)) ==
   ($planned[0].manifests | sort_by(.digest))' "$scratch/resolved.json" >/dev/null ||
   die "published platform or attestation descriptors differ from the verified inputs: $reference"
 
-docker buildx imagetools create --prefer-index=false --tag "$image:$tag" "$reference"
-if [[ -n ${GITHUB_OUTPUT:-} ]]; then
-  printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-fi
-printf 'Published %s:%s\nDigest: %s\nSource: %s\nVerified platforms: linux/amd64, linux/arm64\n' \
-  "$image" "$tag" "$digest" "$GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+printf 'Verified linux/amd64 and linux/arm64 for %s at source %s\n' "$reference" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+bash "$(dirname "$0")/publish-tag.sh" "$base" "$tag" "$tag" "$digest"
