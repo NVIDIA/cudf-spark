@@ -755,6 +755,8 @@ To run iceberg tests against aws s3tables catalog, we need to setup several thin
 5. Set spark catalog implementation s3 tables: 
    `--conf spark.sql.catalog.spark_catalog.catalog-impl="software.amazon.s3tables.iceberg.S3TablesCatalog"`
 6. Set spark warehouse to table bucket arn in step 2: `--conf spark.sql.catalog.spark_catalog.warehouse=<table bucket arn>`
+7. To exercise the same S3 reader as CI, set `--conf spark.rapids.perfio.s3.enabled=true` at startup.
+   For a run using Iceberg's standard S3 streams, set it to `false` so the path tests check that backend.
 
 ### Enabling Delta Lake tests
 

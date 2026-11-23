@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import closing
 from decimal import Decimal
 import json
 
@@ -1131,10 +1132,15 @@ def _create_iceberg_table_from_schema(spark, table_name, fields, format_version)
 def _append_external_parquet(spark, table, path, row_count):
     jvm = spark_jvm()
     hpath = jvm.org.apache.hadoop.fs.Path(path)
-    size = hpath.getFileSystem(spark._jsc.hadoopConfiguration()).getFileStatus(hpath).getLen()
-    data_file = jvm.org.apache.iceberg.DataFiles.builder(table.spec()).withPath(path) \
-        .withFormat(jvm.org.apache.iceberg.FileFormat.PARQUET) \
-        .withFileSizeInBytes(size).withRecordCount(row_count).build()
+    conf = spark._jsc.hadoopConfiguration()
+    # The catalog's FileIO may only read its own storage (e.g. S3 Tables).
+    location = table.locationProvider().newDataLocation(hpath.getName())
+    output = table.io().newOutputFile(location)
+    with closing(hpath.getFileSystem(conf).open(hpath)) as src, closing(output.create()) as dst:
+        jvm.org.apache.hadoop.io.IOUtils.copyBytes(src, dst, conf, False)
+    data_file = (jvm.org.apache.iceberg.DataFiles.builder(table.spec())
+                 .withInputFile(output.toInputFile()).withFormat('PARQUET')
+                 .withRecordCount(row_count).build())
     mapping = jvm.org.apache.iceberg.mapping.MappingUtil.create(table.schema())
     table.updateProperties().set('schema.name-mapping.default',
         jvm.org.apache.iceberg.mapping.NameMappingParser.toJson(mapping)).commit()
