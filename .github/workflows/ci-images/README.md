@@ -1,10 +1,6 @@
 # CI images
 
-The **CPU CI** workflow builds and smoke-tests Docker images affected by a pull
-request. Its **CPU CI gate** requires successful selection and every selected
-build. A Markdown-only PR passes after selection. Add `[skip ci]` to a PR title
-to skip image builds and pass the gate. Title and description edits do not start
-CPU CI. Choose **Re-run all jobs** on the latest commit to apply the current title.
+For PR triggers, skips, and gate behavior, see [CPU CI](../README.md#cpu-ci).
 
 Follow the [image maintenance guide](AGENTS.md) when changing a recipe or workflow.
 Register each Dockerfile in [suites.json](suites.json). List local `COPY` and

@@ -20,3 +20,7 @@ Use synthetic release lines in test fixtures so a project version bump needs no 
 From the repository root, run `python3 -m unittest discover -s .github/workflows/ci-images/tests -v`.
 Check the selected variants and smoke results in **CPU CI**. Before switching
 a consumer, verify its tag and platform in the first post-merge publication.
+
+Title edits do not start CPU CI. Choose **Re-run all jobs** on the latest
+commit to apply the current title. After changing the target branch, push a
+commit or reopen the PR to validate against the new base.
