@@ -17,6 +17,8 @@
 package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.NvtxColor
+import org.mockito.ArgumentMatchers.{any, anyLong}
+import org.mockito.Mockito.{doThrow, mock, when}
 import org.scalatest.funsuite.AnyFunSuite
 
 class GpuMetricNvtxSuite extends AnyFunSuite {
@@ -35,6 +37,26 @@ class GpuMetricNvtxSuite extends AnyFunSuite {
       }
     }
     f(id)
+  }
+
+  test("NVTX closes its range when metric cleanup throws") {
+    val metric = mock(classOf[GpuMetric])
+    val failure = new IllegalStateException("metric cleanup failed")
+    when(metric.tryActivateTimer(Seq.empty)).thenReturn(true)
+    doThrow(failure).when(metric).deactivateTimer(anyLong(), any[Seq[GpuMetric]]())
+    var nvtxCloses = 0
+    val range = new NvtxWithMetrics("metric cleanup failure", NvtxColor.BLUE, Seq(metric)) {
+      override protected def closeNvtxRange(): Unit = {
+        super.closeNvtxRange()
+        nvtxCloses += 1
+      }
+    }
+
+    assert(nvtxCloses == 0)
+    assert(intercept[IllegalStateException] {
+      range.close()
+    } eq failure)
+    assert(nvtxCloses == 1)
   }
 
   test("NVTX remains active when every metric is disabled or already active") {

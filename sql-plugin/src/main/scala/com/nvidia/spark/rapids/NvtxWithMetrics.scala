@@ -43,11 +43,13 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
 
   def needTracks: Seq[Boolean] = metricRange.needTracks
 
+  protected def closeNvtxRange(): Unit = super.close()
+
   override def close(): Unit = {
     try {
       metricRange.close()
     } finally {
-      super.close()
+      closeNvtxRange()
     }
   }
 }
