@@ -144,15 +144,17 @@ class GpuMultiThreadIcebergParquetReader(
           readerConf.targetBatchSizeBytes))
       private val combineMetadata = !multiThreadConf.disableCombining &&
         multiThreadConf.combineConf.combineThresholdSize > 0
+      private val mixedConstantGroups =
+        readerConf.metrics.getOrElse("numMixedConstantMetadataGroups", NoopMetric)
 
-      private def metadataRow(meta: HostMemoryEmptyMetaData): Option[InternalRow] = {
+      private def canCombineMetadata(meta: HostMemoryEmptyMetaData): Boolean = {
         if (!combineMetadata || meta.numRows == 0) {
-          None
+          false
         } else {
           val file = findIcebergFile(meta.partitionedFile)
-          Option(postProcessors.get(file))
-            .filter(_ => !deletionVectors.containsKey(file) && deleteFilterProvider(file).isEmpty)
-            .flatMap(_.metadataOnlyOutputRow)
+          val processor = postProcessors.get(file)
+          processor != null && !deletionVectors.containsKey(file) &&
+            deleteFilterProvider(file).isEmpty && processor.canMaterializeMetadataOnly
         }
       }
 
@@ -165,9 +167,9 @@ class GpuMultiThreadIcebergParquetReader(
 
       override protected def checkIfNeedToSplitEmpty(current: HostMemoryEmptyMetaData,
           next: HostMemoryEmptyMetaData): Boolean = {
-        (metadataRow(current), metadataRow(next)) match {
-          case (Some(_), Some(_)) => false
-          case (None, None) => checkIfNeedToSplitIcebergFiles(current.partitionedFile,
+        (canCombineMetadata(current), canCombineMetadata(next)) match {
+          case (true, true) => false
+          case (false, false) => checkIfNeedToSplitIcebergFiles(current.partitionedFile,
             next.partitionedFile)
           case _ => true
         }
@@ -175,14 +177,15 @@ class GpuMultiThreadIcebergParquetReader(
 
       override protected def newCombinedHMEmptyMetadata(empty: CombinedEmptyMeta,
           selected: CombinedMeta): HostMemoryEmptyMetaData = {
-        if (metadataRow(empty.metaForEmpty).isEmpty) {
+        if (!canCombineMetadata(empty.metaForEmpty)) {
           super.newCombinedHMEmptyMetadata(empty, selected)
         } else {
           // Every positive-row split passed checkIfNeedToSplitEmpty. Save its exact footer
           // count and its projected values in the same order as the selected splits.
           val runs = ArrayBuffer.empty[(Long, InternalRow)]
           empty.emptyMetas.iterator.filter(_.numRows > 0).foreach { meta =>
-            val row = copyOutputRow(metadataRow(meta).get)
+            val processor = postProcessors.get(findIcebergFile(meta.partitionedFile))
+            val row = copyOutputRow(processor.metadataOnlyOutputRow)
             // UnsafeRow compares the encoded values, including the sign bit of nested floats.
             if (runs.nonEmpty && runs.last._2 == row) {
               runs(runs.length - 1) = (runs.last._1 + meta.numRows, runs.last._2)
@@ -191,7 +194,7 @@ class GpuMultiThreadIcebergParquetReader(
             }
           }
           if (runs.length > 1) {
-            readerConf.metrics.get(GpuMetric.NUM_MIXED_CONSTANT_METADATA_GROUPS).foreach(_ += 1)
+            mixedConstantGroups += 1
           }
           super.newCombinedHMEmptyMetadata(empty, selected.copy(allPartValues = runs.toArray))
         }
@@ -253,10 +256,10 @@ class GpuMultiThreadIcebergParquetReader(
           s"Iceberg parquet partition file post processor does not exist for $icebergFile")
 
         fileBufsAndMeta match {
-          case empty: HostMemoryEmptyMetaData if metadataRow(empty).isDefined =>
+          case empty: HostMemoryEmptyMetaData if canCombineMetadata(empty) =>
             withResource(empty) { _ =>
               val (rows, values) = empty.allPartValues.getOrElse(
-                Array((empty.numRows, postProcessor.metadataOnlyOutputRow.get))).unzip
+                Array((empty.numRows, postProcessor.metadataOnlyOutputRow))).unzip
               val counts = GpuNullBatchIterator(new StructType, empty.numRows, metadataBatchRows)
               val batches = new GpuColumnarBatchWithPartitionValuesIterator(counts, values,
                 rows, outputSchema, readerConf.maxGpuColumnSizeBytes)

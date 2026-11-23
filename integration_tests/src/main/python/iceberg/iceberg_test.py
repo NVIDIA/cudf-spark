@@ -23,7 +23,7 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
 from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, is_not_utc
 from data_gen import *
 from iceberg import (
-    iceberg_format_versions, iceberg_read_enabled_conf, iceberg_read_format_versions,
+    iceberg_format_versions, iceberg_mor_format_versions, iceberg_read_enabled_conf, iceberg_read_format_versions,
     iceberg_table_properties_sql, get_full_table_name, iceberg_unsupported_mark, _build_tblprops,
     _BASE_TBLPROPS_SQL, create_iceberg_table, iceberg_write_enabled_conf, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
@@ -59,62 +59,79 @@ _NO_FANOUT = _BASE_TBLPROPS_SQL
 pytestmark = iceberg_unsupported_mark
 
 
-def _create_metadata_only_table(spark_tmp_table_factory, format_version):
+def _create_metadata_only_table(spark_tmp_table_factory, format_version, with_deletes=False):
     table = get_full_table_name(spark_tmp_table_factory)
-    create_iceberg_table(table, partition_col_sql='p', format_version=format_version,
-                        df_gen=lambda spark: spark.createDataFrame([], 'id long, p string'))
+    props = {'read.split.open-file-cost': '0', 'read.split.target-size': '268435456'}
+    if with_deletes:
+        props['write.delete.mode'] = 'merge-on-read'
+
+    def file_data(spark, partition, rows):
+        return gen_df(spark, [('id', UniqueLongGen()), ('p', SetValuesGen(StringType(), [partition]))],
+                      length=rows, num_slices=1)
+
+    create_iceberg_table(table, partition_col_sql='p', table_prop=props, format_version=format_version,
+                         df_gen=lambda spark: file_data(spark, None, 0))
 
     def populate(spark):
-        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ("
-                  "'read.split.open-file-cost' = '0', 'read.split.target-size' = '268435456')")
-        for value, rows in [('alpha', 2), ('beta', 3), (None, 1), ('alpha', 7)]:
-            spark.createDataFrame([(i, value) for i in range(rows)], 'id long, p string') \
-                .coalesce(1).writeTo(table).append()
+        for partition, rows in [('alpha', 2), ('beta', 3), (None, 1), ('alpha', 7)]:
+            file_data(spark, partition, rows).writeTo(table).append()
+        if with_deletes:
+            spark.sql(f"DELETE FROM {table} WHERE id IN (2, 4)")
+            assert spark.table(f"{table}.delete_files").count() > 0
 
     with_cpu_session(populate)
     return table
 
 
-def _metadata_only_conf(reader_type):
-    return {**iceberg_read_enabled_conf,
+def _assert_metadata_only_reads(table, reader_type):
+    conf = {**iceberg_read_enabled_conf,
             'spark.sql.iceberg.aggregate-push-down.enabled': 'false',
             'spark.rapids.sql.format.parquet.reader.type': reader_type,
             'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
             'spark.rapids.sql.reader.batchSizeRows': '5'}
 
+    def metadata_columns(spark):
+        # Iceberg exposes different lineage fields depending on its version and the table format.
+        relation = spark.table(table)._jdf.queryExecution().analyzed().collectLeaves().head()
+        return [col.name() for col in relation.table().metadataColumns()]
+
+    columns = with_cpu_session(metadata_columns)
+    assert {'_spec_id', '_partition', '_file', '_pos', '_deleted'}.issubset(columns)
+    constant_columns = ['_spec_id', '_partition']
+    if '_last_updated_sequence_number' in columns:
+        constant_columns.append('_last_updated_sequence_number')
+    gpu_columns = [col for col in columns if col != '_deleted']
+    for query in [f"SELECT {', '.join(constant_columns)} FROM {table}",
+                  f"SELECT {', '.join(gpu_columns)} FROM {table}",
+                  f"SELECT count(*) FROM {table}", f"SELECT p, count(*) FROM {table} GROUP BY p"]:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.sql(query), exist_classes='GpuBatchScanExec', conf=conf,
+            require_non_empty=True)
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(f"SELECT {', '.join(columns)} FROM {table}"),
+        'BatchScanExec', conf=conf)
+
 
 @iceberg
 @ignore_order(local=True)
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec')
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('format_version', iceberg_read_format_versions)
 def test_iceberg_metadata_only_materialize_and_combine(
         spark_tmp_table_factory, format_version, reader_type):
     table = _create_metadata_only_table(spark_tmp_table_factory, format_version)
-    conf = _metadata_only_conf(reader_type)
-    for projection in ['_spec_id, _partition', 'p, _spec_id, _partition, _file',
-                       'count(*)', 'p, count(*)']:
-        group_by = ' GROUP BY p' if projection == 'p, count(*)' else ''
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: spark.sql(f"SELECT {projection} FROM {table}{group_by}"), conf=conf)
+    _assert_metadata_only_reads(table, reader_type)
 
 
 @iceberg
 @ignore_order(local=True)
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec')
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.parametrize('format_version', iceberg_format_versions)
+@pytest.mark.parametrize('format_version', iceberg_mor_format_versions)
 def test_iceberg_metadata_only_with_deletes(spark_tmp_table_factory, format_version, reader_type):
-    table = _create_metadata_only_table(spark_tmp_table_factory, format_version)
-
-    def delete_rows(spark):
-        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.delete.mode' = 'merge-on-read')")
-        spark.sql(f"DELETE FROM {table} WHERE id IN (1, 4)")
-        assert spark.sql(f"SELECT count(*) FROM {table}.delete_files").first()[0] > 0
-
-    with_cpu_session(delete_rows)
-    for projection in ['p, _spec_id, _partition', 'count(*)']:
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: spark.sql(f"SELECT {projection} FROM {table}"),
-            conf=_metadata_only_conf(reader_type))
+    table = _create_metadata_only_table(spark_tmp_table_factory, format_version, with_deletes=True)
+    _assert_metadata_only_reads(table, reader_type)
 
 
 def _is_spark_patch_at_least(version, minimum):

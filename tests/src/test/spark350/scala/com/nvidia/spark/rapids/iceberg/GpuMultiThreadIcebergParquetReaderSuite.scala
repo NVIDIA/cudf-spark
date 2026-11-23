@@ -24,7 +24,7 @@ import java.nio.file.Files
 import java.util.{HashMap => JHashMap}
 import java.util.concurrent.CompletableFuture
 
-import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, GpuMetric, LocalGpuMetric, PerfIO,
+import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, LocalGpuMetric, PerfIO,
   PerfIOConf, RmmSparkRetrySuiteBase, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
@@ -146,7 +146,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
             skipReadEstimate = true,
             parquetDebugDumpPrefix = None,
             parquetDebugDumpAlways = false,
-            metrics = Map(GpuMetric.NUM_MIXED_CONSTANT_METADATA_GROUPS -> mixedConstantGroups),
+            metrics = Map("numMixedConstantMetadataGroups" -> mixedConstantGroups),
             threadConf = MultiThread(
               new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false),
               maxNumFilesProcessed = files.size,

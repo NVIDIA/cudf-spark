@@ -162,7 +162,6 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
-  val NUM_MIXED_CONSTANT_METADATA_GROUPS = "numMixedConstantMetadataGroups"
   val GPU_OUTPUT_BATCH_BYTES = "gpuOutputBatchBytes"
   val ICEBERG_DICT_FILTER_TIME = "icebergDictFilterTime"
   val ICEBERG_DV_BYTES = "icebergDvBytes"
@@ -241,8 +240,6 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
-  val DESCRIPTION_NUM_MIXED_CONSTANT_METADATA_GROUPS =
-    "Iceberg metadata-only groups with different constants"
   val DESCRIPTION_ICEBERG_DICT_FILTER_TIME = "Iceberg dictionary filter time"
   val DESCRIPTION_ICEBERG_DV_BYTES = "Iceberg deletion vector bytes loaded"
   val DESCRIPTION_ICEBERG_DV_POSITIONS = "Iceberg deletion vector positions loaded"

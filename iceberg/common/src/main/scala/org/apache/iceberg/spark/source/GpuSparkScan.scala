@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
-import org.apache.iceberg.ScanTaskGroup
+import org.apache.iceberg.{MetadataColumns, ScanTaskGroup}
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
@@ -126,6 +126,10 @@ object GpuSparkScan {
 
     gpuScan match {
       case Success(_) =>
+        if (GpuSparkScanAccess.expectedSchema(meta.wrapped)
+            .findField(MetadataColumns.IS_DELETED.fieldId()) != null) {
+          meta.willNotWorkOnGpu("Iceberg _deleted metadata requires the CPU reader")
+        }
         IcebergEncryptionSupport.tagForScan(meta.wrapped, meta)
       case Failure(e) => meta.willNotWorkOnGpu(s"conversion to GPU scan failed: ${e.getMessage}")
     }

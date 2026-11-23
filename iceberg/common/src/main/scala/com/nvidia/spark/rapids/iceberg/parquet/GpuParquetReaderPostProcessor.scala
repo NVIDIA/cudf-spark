@@ -54,8 +54,11 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 private[iceberg] sealed trait ColumnAction {
   def execute(ctx: ColumnActionContext): CudfColumnVector
 
-  // Some(null) is a supported null constant; None means input columns or row positions are needed.
-  def constantValue(processor: GpuParquetReaderPostProcessor): Option[Any] = None
+  def supportsConstantValue: Boolean = false
+
+  /** The value to repeat when this action can generate its entire column without input. */
+  def constValue(idToConstant: JMap[Integer, _]): Any =
+    throw new IllegalStateException(s"$this cannot produce a constant output value")
 
   /**
    * Display this action as a tree structure for debugging and testing.
@@ -130,11 +133,11 @@ private[iceberg] case class FetchConstant(
     fieldId: Int,
     sparkType: DataType
 ) extends ColumnAction {
-  override def constantValue(processor: GpuParquetReaderPostProcessor): Option[Any] =
-    Some(processor.idToConstant.get(fieldId))
+  override def supportsConstantValue: Boolean = true
+  override def constValue(idToConstant: JMap[Integer, _]): Any = idToConstant.get(fieldId)
 
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
-    val value = ctx.processor.idToConstant.get(fieldId)
+    val value = constValue(ctx.processor.idToConstant)
     withResource(GpuScalar.from(value, sparkType)) { scalar =>
       CudfColumnVector.fromScalar(scalar, ctx.numRows)
     }
@@ -151,11 +154,12 @@ private[iceberg] case class FillDefault(
     value: Any,
     sparkType: DataType
 ) extends ColumnAction {
-  override def constantValue(processor: GpuParquetReaderPostProcessor): Option[Any] =
-    sparkType match {
-      case _: StructType | _: ArrayType | _: MapType => None
-      case _ => Some(value)
-    }
+  override def supportsConstantValue: Boolean = sparkType match {
+    case _: StructType | _: ArrayType | _: MapType => false
+    case _ => true
+  }
+  override def constValue(idToConstant: JMap[Integer, _]): Any =
+    if (supportsConstantValue) value else super.constValue(idToConstant)
 
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
     withResource(GpuScalar.from(value, sparkType)) { scalar =>
@@ -170,7 +174,8 @@ private[iceberg] case class FillDefault(
 
 /** Fill with null values for missing optional column. */
 private[iceberg] case class FillNull(sparkType: DataType) extends ColumnAction {
-  override def constantValue(processor: GpuParquetReaderPostProcessor): Option[Any] = Some(null)
+  override def supportsConstantValue: Boolean = true
+  override def constValue(idToConstant: JMap[Integer, _]): Any = null
 
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
     GpuColumnVector.columnVectorFromNull(ctx.numRows, sparkType)
@@ -237,13 +242,12 @@ private[iceberg] case object InheritRowId extends ColumnAction {
 
 /** Fill null lineage sequence numbers from the data file's sequence number. */
 private[iceberg] case class InheritLastUpdatedSequenceNumber(fieldId: Int) extends ColumnAction {
-  override def constantValue(processor: GpuParquetReaderPostProcessor): Option[Any] = {
-    val firstRowId = processor.idToConstant.get(ShimUtils.rowIdFieldId())
-    Some(if (firstRowId == null) null else processor.idToConstant.get(fieldId))
-  }
+  override def supportsConstantValue: Boolean = true
+  override def constValue(idToConstant: JMap[Integer, _]): Any =
+    if (idToConstant.get(ShimUtils.rowIdFieldId()) == null) null else idToConstant.get(fieldId)
 
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
-    val value = constantValue(ctx.processor).get
+    val value = constValue(ctx.processor.idToConstant)
     if (value == null) {
       GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
     } else {
@@ -811,16 +815,19 @@ class GpuParquetReaderPostProcessor(
   // Check if we can pass through the entire batch without any processing.
   private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough
 
+  private[iceberg] lazy val canMaterializeMetadataOnly: Boolean = rootAction match {
+    case ProcessStruct(actions, indices) =>
+      indices.forall(_.isEmpty) && actions.forall(_.supportsConstantValue)
+    case _ => false
+  }
+
   /** Output values for one file when every projected field can be generated without input. */
-  private[iceberg] lazy val metadataOnlyOutputRow: Option[InternalRow] = rootAction match {
-    case ProcessStruct(actions, indices) if indices.forall(_.isEmpty) =>
-      val values = actions.map(_.constantValue(this))
-      if (values.forall(_.isDefined)) {
-        Some(InternalRow.fromSeq(values.map(_.get)))
-      } else {
-        None
-      }
-    case _ => None
+  private[iceberg] lazy val metadataOnlyOutputRow: InternalRow = postProcessTimeMetric.ns {
+    rootAction match {
+      case ProcessStruct(actions, _) if canMaterializeMetadataOnly =>
+        InternalRow.fromSeq(actions.map(_.constValue(idToConstant)))
+      case _ => throw new IllegalStateException("Metadata-only output requires constant columns")
+    }
   }
 
   /** Account for output built from several files' constants instead of process(). */
