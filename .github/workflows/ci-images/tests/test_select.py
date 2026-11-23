@@ -48,6 +48,7 @@ class ImageSelectorTest(unittest.TestCase):
         self.write_pom(f"{RELEASE_LINE}.0-SNAPSHOT")
         catalog = (SOURCE / "suites.json").read_text()
         self.write(CI_IMAGES / "suites.json", catalog)
+        self.write(CI_IMAGES / "paths.json", (SOURCE / "paths.json").read_text())
         for entries in json.loads(catalog).values():
             for entry in entries.values():
                 self.write(entry["dockerfile"], "FROM scratch\n")
@@ -145,6 +146,7 @@ class ImageSelectorTest(unittest.TestCase):
         self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
         pr = self.invoke(event="pull_request", ref="17/merge")
         self.assertEqual(pr["publish"], [])
+        self.assertTrue(pr["run-tests"])
         published = self.invoke(event="workflow_dispatch")["publish"]
         expected = {(c["id"], w["arch"]): cache_scope(w["cache-to"][0])
                     for c in published for w in c["workers"]}
@@ -171,6 +173,7 @@ class ImageSelectorTest(unittest.TestCase):
         before = self.git("rev-parse", "HEAD")
         self.git("switch", "-qc", "topic")
         self.write("notes.md", "unrelated\n")
+        self.write(CI_IMAGES / "docs/notes.md", "image documentation only\n")
         self.commit("Docs only")
         self.git("switch", "-q", "main")
         self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
@@ -181,10 +184,59 @@ class ImageSelectorTest(unittest.TestCase):
             {"event": "push", "payload": {"created": False, "before": before}},
         ]:
             with self.subTest(event=event):
-                self.assertEqual(self.invoke(**event), {"validate": [], "publish": []})
+                expected = {"validate": [], "publish": []}
+                if event["event"] == "pull_request":
+                    expected["run-tests"] = False
+                self.assertEqual(self.invoke(**event), expected)
                 # The workflow uses the literal [] output to allow a skipped image job.
                 self.assertCountEqual((self.root / "output").read_text().splitlines(),
-                                      ["validate=[]", "publish=[]"])
+                                      [f"{key}={json.dumps(value)}" for key, value in expected.items()])
+
+    def test_test_only_path_from_configuration(self):
+        path = CI_IMAGES / "paths.json"
+        rules = json.loads((self.repo / path).read_text())
+        rules["unit-tests"]["include"].append("ci/probes/")
+        self.write(path, json.dumps(rules))
+        self.commit("Configure an additional test input")
+        self.git("switch", "-qc", "topic")
+        self.write("ci/probes/example.py", "# changed\n")
+        self.commit("Change the configured test input")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
+        self.assertEqual(self.invoke(event="pull_request", ref="17/merge"),
+                         {"validate": [], "publish": [], "run-tests": True})
+
+    def test_publisher_path_uses_the_same_config_for_push_and_freshness(self):
+        path = CI_IMAGES / "paths.json"
+        rules = json.loads((self.repo / path).read_text())
+        rules["multi-platform-publication"] = ["ci/promote-example.sh"]
+        self.write(path, json.dumps(rules))
+        self.commit("Configure the multi-platform promotion input")
+        before = self.git("rev-parse", "HEAD")
+        worker = self.root / "worker"
+        self.git("clone", "-q", "--depth=1", self.repo.as_uri(), str(worker))
+        self.write("ci/promote-example.sh", "# changed\n")
+        self.commit("Change the configured promotion input")
+        jobs = self.invoke(payload={"created": False, "before": before})
+        self.assertEqual([job["image"] for job in jobs["publish"]], ["spark-build"])
+        self.assertFalse(self.invoke("--current", "spark-build", checkout=worker)["current"])
+        self.assertTrue(self.invoke("--current", "skills-build", checkout=worker)["current"])
+
+    def test_moving_the_configured_version_file_supersedes_old_checkouts(self):
+        before = self.git("rev-parse", "HEAD")
+        worker = self.root / "worker"
+        self.git("clone", "-q", "--depth=1", self.repo.as_uri(), str(worker))
+        path = CI_IMAGES / "paths.json"
+        rules = json.loads((self.repo / path).read_text())
+        rules["release-version-file"] = "ci/version.xml"
+        self.write(path, json.dumps(rules))
+        self.write("ci/version.xml", (self.repo / "pom.xml").read_text())
+        self.git("rm", "pom.xml")
+        self.commit("Move the version source and update the policy together")
+        jobs = self.invoke(payload={"created": False, "before": before})
+        self.assert_versioned_images([row for row in jobs["publish"] if row["release_tag"]],
+                                     "main", alias_prefix=RELEASE_LINE)
+        self.assertFalse(self.invoke("--current", "spark-build", checkout=worker)["current"])
 
     def test_new_release_bootstraps_toolchains_only(self):
         self.git("switch", "-qc", RELEASE_BRANCH)

@@ -13,10 +13,7 @@ from xml.etree import ElementTree
 
 HERE = Path(".github/workflows/ci-images")
 CATALOG = HERE / "suites.json"
-SHARED = {
-    str(HERE / "select.py"),
-    ".github/workflows/build-docker-image.yml",
-}
+PATH_RULES = HERE / "paths.json"
 
 
 def git(*args):
@@ -53,24 +50,21 @@ def inputs_for(entry):
     return str(context), str(smoke), ignores
 
 
-def affected(entry, changed, *, publish):
+def affected(entry, changed, rules, *, publish):
     _, smoke, ignores = inputs_for(entry)
-    watched = SHARED | {entry["dockerfile"], smoke, *ignores, *entry.get("recipe-inputs", [])}
-    if publish:
-        watched.update({".github/workflows/docker-images.yml", str(HERE / "seed-release-tag.sh")})
-        if len(entry.get("platform-args", {})) > 1:
-            watched.add(str(HERE / "promote-platforms.sh"))
-    else:
-        watched.add(".github/workflows/cpu-ci.yml")
+    watched = {entry["dockerfile"], smoke, *ignores, *entry.get("recipe-inputs", []),
+               *rules["shared"], *rules["publication" if publish else "validation"]}
+    if publish and len(entry.get("platform-args", {})) > 1:
+        watched.update(rules["multi-platform-publication"])
     return bool(changed & watched)
 
 
-def release_line(revision):
-    pom = ElementTree.fromstring(git("show", f"{revision}:pom.xml"))
+def release_line(revision, version_file):
+    pom = ElementTree.fromstring(git("show", f"{revision}:{version_file}"))
     version = pom.findtext("{*}version", default="").strip()
     match = re.fullmatch(r"(\d{2}\.\d{2})\.\d+(?:-[A-Za-z0-9.-]+)?", version)
     if not match:
-        raise ValueError(f"Cannot determine release line from root pom.xml version {version!r} at {revision}")
+        raise ValueError(f"Cannot determine release line from {version_file} version {version!r} at {revision}")
     return match.group(1)
 
 
@@ -81,10 +75,13 @@ def still_current(name):
     if at_revision("FETCH_HEAD").get(name) != recipe:
         return False
     changed = paths("diff", "--no-renames", "--name-only", "-z", "HEAD", "FETCH_HEAD")
-    if "variants" in recipe[1] and "pom.xml" in changed:
-        if release_line("HEAD") != release_line("FETCH_HEAD"):
-            return False
-    return not affected(recipe[1], changed, publish=True)
+    rules = json.loads(PATH_RULES.read_text())
+    if affected(recipe[1], changed, rules, publish=True):
+        return False
+    version_file = rules["release-version-file"]
+    if "variants" in recipe[1] and version_file in changed:
+        return release_line("HEAD", version_file) == release_line("FETCH_HEAD", version_file)
+    return True
 
 
 def configurations(name, entry, tracked, branch_tag, line, publish, has_publisher):
@@ -170,11 +167,15 @@ def select():
     if str(CATALOG) in changed:
         previous = at_revision(base)
 
-    line = release_line("HEAD")
+    rules = json.loads(PATH_RULES.read_text())
+    version_file = rules["release-version-file"]
+    line = release_line("HEAD", version_file)
     target = os.environ["GITHUB_BASE_REF"] if event == "pull_request" else ref
     if target.startswith("release/") and target != f"release/{line}":
-        raise ValueError(f"Branch {target} does not match root pom.xml release line {line}")
-    line_changed = "pom.xml" in changed and release_line(base) != line
+        raise ValueError(f"Branch {target} does not match root {version_file} release line {line}")
+    # A shared change already selects all recipes. Its new version file may not exist at base.
+    compare_version = version_file in changed and changed.isdisjoint(rules["shared"])
+    line_changed = compare_version and release_line(base, version_file) != line
 
     jobs = {"validate": [], "publish": []}
     for name, (suite, entry) in images.items():
@@ -188,13 +189,20 @@ def select():
             continue
         publish = ci and event != "pull_request"
         rollover = "variants" in entry and line_changed
-        if base and not (rollover or affected(entry, changed, publish=publish)
+        if base and not (rollover or affected(entry, changed, rules, publish=publish)
                          or previous.get(name) != (suite, entry)):
             continue
         jobs["publish" if publish else "validate"].extend(
             configurations(name, entry, tracked, tag, line, publish, has_publisher=ci)
         )
-    return jobs
+    run_tests = None
+    if event == "pull_request":
+        tests = rules["unit-tests"]
+        run_tests = bool(jobs["validate"])
+        if not run_tests and tests["include"]:
+            filters = [*tests["include"], *(":(exclude)" + pattern for pattern in tests["exclude"])]
+            run_tests = bool(paths("diff", "--no-renames", "--name-only", "-z", base, "HEAD", "--", *filters))
+    return jobs, run_tests
 
 
 if __name__ == "__main__":
@@ -205,8 +213,10 @@ if __name__ == "__main__":
         if not current:
             print(f"Skipping superseded recipe for {sys.argv[2]}; its branch inputs changed.")
         sys.exit(0)
-    jobs = select()
+    jobs, run_tests = select()
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         for operation, matrix in jobs.items():
             print(f"{operation}=" + json.dumps(matrix, separators=(",", ":")), file=output)
             print(f"{operation}: " + (", ".join(c["id"] for c in matrix) or "none"))
+        if run_tests is not None:
+            print(f"run-tests={json.dumps(run_tests)}", file=output)

@@ -58,15 +58,8 @@ jobs:
         if: steps.title.outputs.skip == 'false'
         run: python3 .github/workflows/ci-images/select.py
       - name: Test image CI
-        if: steps.title.outputs.skip == 'false'
-        env:
-          IMAGE_MATRIX: ${{ steps.recipes.outputs.validate }}
-        run: |
-          if [[ "$IMAGE_MATRIX" == '[]' ]] && git diff --quiet HEAD^1 HEAD -- \
-              .github/workflows/ci-images .github/workflows/{docker-images,ci-image-cleanup}.yml ':(exclude)*.md'; then
-            exit 0
-          fi
-          python3 -m unittest discover -s .github/workflows/ci-images/tests -v
+        if: steps.recipes.outputs.run-tests == 'true'
+        run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
 
   validate:
     name: Validate ${{ matrix.image.id }}

@@ -36,7 +36,7 @@ class ReleaseTagTest(unittest.TestCase):
                         GITHUB_STEP_SUMMARY=str(self.root / "summary"), DOCKER_ARGS=str(self.calls),
                         PATH=str(self.root) + os.pathsep + os.environ["PATH"])
         (self.origin / CI_IMAGES).mkdir(parents=True)
-        for name in ("select.py", "suites.json"):
+        for name in ("select.py", "suites.json", "paths.json"):
             shutil.copy(SOURCE / name, self.origin / CI_IMAGES / name)
         self.git("init", "-q", "-b", "main")
         self.git("add", ".")
