@@ -43,7 +43,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
-  private def isDelta43: Boolean = io.delta.VERSION.startsWith("4.3.")
+  private def isDelta43: Boolean = DeltaRuntimeShim.isDelta43Version(io.delta.VERSION)
 
   test("Delta 4.3 test profile selects the required runtime") {
     sys.props.get("rapids.test.delta43.version").foreach { expectedVersion =>
@@ -120,8 +120,9 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       assert(DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, "4.0.1").isEmpty)
     }
     assert(DeltaRuntimeShim.getDelta42ShimClassName("4.3.0", "4.0.1").isEmpty)
-    assert(DeltaRuntimeShim.getDelta43ShimClassName("4.2.0", "4.0.1").isEmpty)
-    assert(DeltaRuntimeShim.getDelta43ShimClassName("4.4.0", "4.0.1").isEmpty)
+    Seq("4.2.0", "4.3.", "4.3.x", "4.4.0").foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, "4.0.1").isEmpty, deltaVersion)
+    }
   }
 
   test("GPU write factory has no default implementation") {
@@ -234,8 +235,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 is_managed_location filtering applies from 4.3.1 onward") {
-    Seq("4.2.0", "4.3.0", "4.3.0-rc1", "4.3.0-SNAPSHOT", "4.4.0").foreach { version =>
-      assert(!DeltaRuntimeShim.isDelta431OrLater(version), version)
+    Seq("4.2.0", "4.3.", "4.3.x", "4.3.0", "4.3.0-rc1", "4.3.0-SNAPSHOT", "4.4.0").foreach {
+      version => assert(!DeltaRuntimeShim.isDelta431OrLater(version), version)
     }
     Seq("4.3.1", "4.3.1-SNAPSHOT", "4.3.2", "4.3.2.2", "4.3.10").foreach { version =>
       assert(DeltaRuntimeShim.isDelta431OrLater(version), version)
@@ -251,7 +252,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     val schema = StructType(Seq(StructField("id", IntegerType)))
     withGpuSparkSession { spark =>
       val catalogObj = spark.sessionState.catalogManager.catalog("spark_catalog")
-      assume(catalogObj.isInstanceOf[DeltaCatalog])
+      assert(catalogObj.isInstanceOf[DeltaCatalog],
+        s"Expected DeltaCatalog for spark_catalog, got ${catalogObj.getClass.getName}")
       val cpuCatalog = catalogObj.asInstanceOf[DeltaCatalog]
       val gpuCatalog = DeltaRuntimeShim.getGpuDeltaCatalog(
         cpuCatalog, new RapidsConf(spark.sessionState.conf))

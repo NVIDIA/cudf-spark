@@ -112,15 +112,20 @@ trait DeltaRuntimeShim {
 
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
-  private val Delta43Version = """^4\.3\.(\d+)(?:[^0-9].*)?$""".r
+  private val DELTA_43_VERSION = """^4\.3\.(\d+)(?:[^0-9].*)?$""".r
 
   private def parseSparkVersion(sparkVersion: String): (Int, Int, Int) = sparkVersion match {
     case SparkVersion(major, minor, patch) => (major.toInt, minor.toInt, patch.toInt)
     case _ => throw new IllegalStateException(s"Unable to parse Spark version $sparkVersion")
   }
 
+  private[rapids] def isDelta43Version(deltaVersion: String): Boolean = deltaVersion match {
+    case DELTA_43_VERSION(_) => true
+    case _ => false
+  }
+
   private[rapids] def isDelta431OrLater(deltaVersion: String): Boolean = deltaVersion match {
-    case Delta43Version(patch) => patch.toInt >= 1
+    case DELTA_43_VERSION(patch) => patch.toInt >= 1
     case _ => false
   }
 
@@ -144,7 +149,7 @@ object DeltaRuntimeShim {
   private[rapids] def getDelta43ShimClassName(
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
-    if (deltaVersion.startsWith("4.3.")) {
+    if (isDelta43Version(deltaVersion)) {
       parseSparkVersion(sparkVersion) match {
         case (4, 0, 1) | (4, 1, 1) =>
           Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")

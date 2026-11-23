@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import lru_cache
 import json
 import os.path
 import pytest
@@ -90,6 +91,10 @@ def set_delta_num_records(spark, target_path, num_records, log_version=0):
     jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
 
 
+_DELTA_43_VERSION_RE = re.compile(r"^4\.3\.\d+(?:[^0-9].*)?$")
+
+
+@lru_cache(maxsize=1)
 def _loaded_delta_lake_version():
     try:
         context_class_loader = (
@@ -143,7 +148,7 @@ def is_oss_delta_lake_42_or_43():
 
 def is_oss_delta_lake_43():
     return (not is_databricks_runtime()
-            and (_loaded_delta_lake_version() or "").startswith("4.3."))
+            and bool(_DELTA_43_VERSION_RE.match(_loaded_delta_lake_version() or "")))
 
 
 def is_oss_delta_lake_40_to_43():
