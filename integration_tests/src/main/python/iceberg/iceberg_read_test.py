@@ -433,7 +433,7 @@ _skip_rest_binary_defaults = pytest.mark.skipif(
            "initial defaults. See https://github.com/NVIDIA/cudf-spark/issues/17078.")
 
 
-def _setup_iceberg_v3_defaults_table(table_name, single_column):
+def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None, *, include_binary=False):
     props = _build_tblprops({"format-version": "3"})
     props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
 
@@ -458,41 +458,41 @@ def _setup_iceberg_v3_defaults_table(table_name, single_column):
         def add_default(name, iceberg_type, value):
             update.addColumn(name, iceberg_type, literals.of(value).to(iceberg_type))
 
-        if single_column is None:
-            # TIME is omitted because Spark's Iceberg adapter rejects it.
-            update.addRequiredColumn(
-                "required_added", types.IntegerType.get(), None, literals.of(7))
-            update.addColumn("optional_added", types.StringType.get(), literals.of("legacy"))
-            update.addColumn("s", "nested_added", types.IntegerType.get(), literals.of(11))
-            add_default("boolean_added", types.BooleanType.get(), True)
-            add_default("long_added", types.LongType.get(), jvm.java.lang.Long.valueOf(5000000000))
-            add_default("float_added", types.FloatType.get(), jvm.java.lang.Float.valueOf("1.25"))
-            add_default("double_added", types.DoubleType.get(), 2.5)
-            add_default("date_added", types.DateType.get(), "2024-01-02")
+        # Cover every Iceberg 1.9 primitive type that Spark SQL can query. Iceberg TIME is omitted
+        # because Iceberg's Spark adapter rejects it with "Spark does not support time fields".
+        update.addRequiredColumn(
+            "required_added", types.IntegerType.get(), None, literals.of(7))
+        update.addColumn("optional_added", types.StringType.get(), literals.of("legacy"))
+        update.addColumn("s", "nested_added", types.IntegerType.get(), literals.of(11))
+        add_default("boolean_added", types.BooleanType.get(), True)
+        add_default("long_added", types.LongType.get(), jvm.java.lang.Long.valueOf(5000000000))
+        add_default("float_added", types.FloatType.get(), jvm.java.lang.Float.valueOf("1.25"))
+        add_default("double_added", types.DoubleType.get(), 2.5)
+        add_default("date_added", types.DateType.get(), "2024-01-02")
+        add_default(
+            "timestamp_added",
+            types.TimestampType.withZone(),
+            "2024-01-02T03:04:05Z")
+        if include_binary:
             add_default(
-                "timestamp_added",
-                types.TimestampType.withZone(),
-                "2024-01-02T03:04:05Z")
-            add_default(
-                "decimal_added", types.DecimalType.of(9, 2),
-                jvm.java.math.BigDecimal("12345.67"))
-        elif single_column == "binary_added":
-            add_default(
-                single_column, types.BinaryType.get(),
+                "binary_added", types.BinaryType.get(),
                 jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2, 3])))
-        elif single_column == "timestamp_ntz_added":
+        add_default(
+            "decimal_added", types.DecimalType.of(9, 2),
+            jvm.java.math.BigDecimal("12345.67"))
+
+        # Add one unsupported default at a time so each fallback case is independent.
+        if unsupported_column == "timestamp_ntz_added":
             add_default(
-                single_column, types.TimestampType.withoutZone(), "2024-01-02T03:04:05")
-        elif single_column == "uuid_added":
+                unsupported_column, types.TimestampType.withoutZone(), "2024-01-02T03:04:05")
+        elif unsupported_column == "uuid_added":
             add_default(
-                single_column, types.UUIDType.get(),
+                unsupported_column, types.UUIDType.get(),
                 "123e4567-e89b-12d3-a456-426614174000")
-        elif single_column == "fixed_added":
+        elif unsupported_column == "fixed_added":
             add_default(
-                single_column, types.FixedType.ofLength(3),
+                unsupported_column, types.FixedType.ofLength(3),
                 jvm.java.nio.ByteBuffer.wrap(bytearray([4, 5, 6])))
-        else:
-            raise ValueError(f"Unexpected default column: {single_column}")
         update.commit()
         spark.sql(f"REFRESH TABLE {table_name}")
 
@@ -503,19 +503,21 @@ def _setup_iceberg_v3_defaults_table(table_name, single_column):
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.parametrize('single_column', [
-    pytest.param(None, id='common'),
-    pytest.param('binary_added', marks=_skip_rest_binary_defaults)])
+@pytest.mark.parametrize('include_binary', [
+    pytest.param(False, id='common'),
+    pytest.param(True, id='binary_added', marks=_skip_rest_binary_defaults)])
 @iceberg_fast_test
-def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type, single_column):
+def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type, include_binary):
     table_name = get_full_table_name(spark_tmp_table_factory)
-    _setup_iceberg_v3_defaults_table(table_name, single_column)
+    _setup_iceberg_v3_defaults_table(table_name, include_binary=include_binary)
     v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true",
                "spark.rapids.sql.format.parquet.reader.type": reader_type}
-    columns = single_column or (
-        "s.present, s.nested_added, required_added, optional_added, boolean_added, long_added, "
-        "float_added, double_added, date_added, timestamp_added, decimal_added")
-    query = f"SELECT id, {columns} FROM {table_name} ORDER BY id"
+    binary_column = "binary_added, " if include_binary else ""
+    query = (
+        f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
+        "boolean_added, long_added, float_added, double_added, date_added, "
+        f"timestamp_added, {binary_column}decimal_added "
+        f"FROM {table_name} ORDER BY id")
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(query),
         exist_classes="GpuBatchScanExec",
