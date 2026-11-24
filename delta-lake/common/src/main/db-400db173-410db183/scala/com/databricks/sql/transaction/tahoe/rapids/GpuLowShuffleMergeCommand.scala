@@ -444,7 +444,7 @@ trait MergeExecutor extends AnalysisHelper with PredicateHelper with Logging wit
 
   def execute(): Seq[FileAction]
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Nothing to close by default */ }
 
   protected def targetOutputCols: Seq[NamedExpression] = {
     context.deltaTxn.metadata.schema.map { col =>
@@ -1205,8 +1205,10 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     val sourceRowIdCol = uniqueColumnName(
       GpuMergeIntoCommand.SOURCE_ROW_ID_COL, taken :+ targetRowIdCol)
 
-    var sourceDF = sourcePlanDF.withColumn(
-      sourceRowPresentCol, DFUDFShims.exprToColumn(incrSourceRowCountExpr))
+    // Count before the join in a filter so pruning the presence marker cannot remove the UDF.
+    var sourceDF = sourcePlanDF
+      .filter(DFUDFShims.exprToColumn(incrSourceRowCountExpr))
+      .withColumn(sourceRowPresentCol, lit(true))
     var targetDF = targetPlanDF.withColumn(targetRowPresentCol, lit(true))
     if (isDeleteWithDuplicateMatches) {
       targetDF = targetDF.withColumn(targetRowIdCol, monotonically_increasing_id())
@@ -1500,8 +1502,10 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     val sourceRowIdCol = uniqueColumnName(
       GpuMergeIntoCommand.SOURCE_ROW_ID_COL, taken :+ targetRowIdCol)
 
-    var sourceDF = sourcePlanDF.withColumn(
-      sourceRowPresentCol, DFUDFShims.exprToColumn(incrSourceRowCountExpr))
+    // Count before the join in a filter so pruning the presence marker cannot remove the UDF.
+    var sourceDF = sourcePlanDF
+      .filter(DFUDFShims.exprToColumn(incrSourceRowCountExpr))
+      .withColumn(sourceRowPresentCol, lit(true))
     var targetDF = targetPlanDF.withColumn(targetRowPresentCol, lit(true))
     if (hasNonEffectiveDuplicateMatches) {
       targetDF = targetDF.withColumn(targetRowIdCol, monotonically_increasing_id())

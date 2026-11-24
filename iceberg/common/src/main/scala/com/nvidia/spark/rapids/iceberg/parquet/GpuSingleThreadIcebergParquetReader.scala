@@ -33,7 +33,7 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.rapids.InputFileUtils
-import org.apache.spark.sql.types.{DataType, LongType}
+import org.apache.spark.sql.types.{DataType, LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuSingleThreadIcebergParquetReader(
@@ -146,8 +146,9 @@ private class SingleFileReader(
       new Path(file.file.getDelegate.location()),
       filteredParquet.blocks,
       filteredParquet.schema,
-      conf.caseSensitive,
+      true, // Iceberg has already resolved the physical schema by field ID.
       filteredParquet.readSchema,
+      StructType(Nil), // partition values are not added by this reader
       conf.parquetDebugDumpPrefix,
       conf.parquetDebugDumpAlways,
       conf.maxBatchSizeRows,
@@ -177,7 +178,7 @@ private class SingleFileReader(
               readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
               readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
               readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
-              readerConf.caseSensitive,
+              true, // The deletion-vector producer also evolves the physical schema.
               useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
               Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
               readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)

@@ -19,11 +19,14 @@ package com.nvidia.spark.rapids
 import java.util.concurrent.ThreadFactory
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.Try
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.jni.DeviceAttr
+import com.nvidia.spark.rapids.jni.NativeFileSource
 import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.parquet.HybridScanPipeline
 import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.{SparkConf, SparkEnv, TaskContext}
@@ -190,6 +193,9 @@ object GpuDeviceManager extends Logging {
       // If Spark didn't provide the address we just use the default GPU.
       val addr = initializeGpu(resources, conf)
       initializeMemory(addr)
+      if (conf.isParquetHybridScanEnabled) {
+        HybridScanPipeline.init(numCores)
+      }
     }
   }
 
@@ -201,20 +207,23 @@ object GpuDeviceManager extends Logging {
     chunkedPackMemoryResource = None
     poolSizeLimit = 0L
 
-    SpillFramework.shutdown()
+    GpuShuffleEnv.closeBroadcastCacheAndThen {
+      SpillFramework.shutdown()
 
-    // If we close RMM resources in the shutdown hook in `MemoryCleaner`, will
-    // get segment fault, so close them here before shutdown hook starts.
-    // We assume all RMM resources should be closed at this point, or leaks occurs,
-    // because all Spark tasks/jobs are done at this point.
-    MemoryCleaner.cleanAllRmmBlockers()
+      // If we close RMM resources in the shutdown hook in `MemoryCleaner`, will
+      // get segment fault, so close them here before shutdown hook starts.
+      // We assume all RMM resources should be closed at this point, or leaks occurs,
+      // because all Spark tasks/jobs are done at this point.
+      MemoryCleaner.cleanAllRmmBlockers()
 
-    RmmSpark.clearEventHandler()
-    Rmm.clearEventHandler()
-    GpuShuffleEnv.shutdown()
+      RmmSpark.clearEventHandler()
+      Rmm.clearEventHandler()
+      GpuShuffleEnv.shutdown()
 
-    Rmm.shutdown()
-    singletonMemoryInitialized = Uninitialized
+      PageableMemoryPool.shutdown()
+      Rmm.shutdown()
+      singletonMemoryInitialized = Uninitialized
+    }
   }
 
   def getResourcesFromTaskContext: Map[String, ResourceInformation] = {
@@ -492,7 +501,7 @@ object GpuDeviceManager extends Logging {
 
   private def initializePinnedPoolAndOffHeapLimits(gpuId: Int, conf: RapidsConf,
                                                    sparkConf: SparkConf): Unit = {
-    val (pinnedSize, nonPinnedLimit) = getPinnedPoolAndOffHeapLimits(
+    val (pinnedSize, pageableSize, nonPinnedLimit) = getHostPoolAndOffHeapLimits(
       conf, sparkConf, Cuda.getDeviceCount)
     // disable the cuDF provided default pinned pool for now
     if (!PinnedMemoryPool.configureDefaultCudfPinnedPoolSize(0L)) {
@@ -509,6 +518,11 @@ object GpuDeviceManager extends Logging {
       logInfo(s"Initializing pinned memory pool (${pinnedSize / 1024 / 1024.0} MiB)${logDetails}")
       PinnedMemoryPool.initialize(pinnedSize, gpuId, conf.pinnedPoolCuioDefault, initThreads)
     }
+    if (!PageableMemoryPool.isInitialized && pageableSize > 0) {
+      logInfo(s"Initializing pre-touched pageable memory pool " +
+        s"(${pageableSize / 1024 / 1024.0} MiB, ${conf.pageablePoolPretouchThreads} threads)")
+      PageableMemoryPool.initialize(pageableSize, conf.pageablePoolPretouchThreads)
+    }
     // Host memory limits must be set after the pinned memory pool is initialized
     HostAlloc.initialize(nonPinnedLimit)
     // Fill the MULTITHREAD_READ_MEMORY_LIMIT_SIZE with 90% of the total off-heap memory
@@ -516,7 +530,7 @@ object GpuDeviceManager extends Logging {
     // falls back to a hardware-derived estimate via computeEffectiveOffHeapLimit.
     if (conf.multiThreadReadMemoryLimit == 0) {
       sparkConf.set(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_SIZE.key,
-        computeMtReadLimit(pinnedSize, nonPinnedLimit, conf, sparkConf,
+        computeMtReadLimit(pinnedSize + pageableSize, nonPinnedLimit, conf, sparkConf,
           Cuda.getDeviceCount).toString)
     }
   }
@@ -676,6 +690,33 @@ object GpuDeviceManager extends Logging {
     }
   }
 
+  // visible for testing
+  def getHostPoolAndOffHeapLimits(conf: RapidsConf, sparkConf: SparkConf, deviceCount: Int,
+      memCheck: MemoryChecker = MemoryCheckerImpl): (Long, Long, Long) = {
+    val (pinnedSize, nonPinnedBeforePageable) =
+      getPinnedPoolAndOffHeapLimits(conf, sparkConf, deviceCount, memCheck)
+    val configuredPageableSize = conf.pageablePoolSize
+
+    if (nonPinnedBeforePageable < 0) {
+      // Off-heap tracking is disabled, so neither pool is deducted from an allocation limit.
+      (pinnedSize, configuredPageableSize, nonPinnedBeforePageable)
+    } else {
+      val pageableSize = math.min(configuredPageableSize, nonPinnedBeforePageable)
+      if (pageableSize < configuredPageableSize) {
+        logWarning(s"The configured pageable memory " +
+          s"${configuredPageableSize / 1024 / 1024.0} MiB is larger than the remaining " +
+          s"off-heap limit ${nonPinnedBeforePageable / 1024 / 1024.0} MiB; dropping pageable " +
+          s"memory to ${pageableSize / 1024 / 1024.0} MiB")
+      }
+      val nonPinnedLimit = nonPinnedBeforePageable - pageableSize
+      logWarning(s"Off Heap Host Memory after pageable reservation: " +
+        s"${pinnedSize / 1024 / 1024.0} MiB pinned, " +
+        s"${pageableSize / 1024 / 1024.0} MiB pageable, and " +
+        s"${nonPinnedLimit / 1024 / 1024.0} MiB dynamically allocated non-pinned memory.")
+      (pinnedSize, pageableSize, nonPinnedLimit)
+    }
+  }
+
   /**
    * Initialize the GPU memory for gpuId according to the settings in rapidsConf.  It is assumed
    * that if gpuId is set then that gpu is already the default device.  If gpuId is not set
@@ -698,6 +739,9 @@ object GpuDeviceManager extends Logging {
           val conf = rapidsConf.getOrElse(new RapidsConf(sparkConf))
           initializePinnedPoolAndOffHeapLimits(gpu, conf, sparkConf)
           initializeRmmGpuPool(gpu, conf)
+          if (conf.isParquetHybridScanEnabled) {
+            initializeKvikio(conf)
+          }
           // we want to initialize this last because we want to take advantage
           // of pinned memory if it is configured
           initializeSpillAndMemoryEvents(conf)
@@ -705,6 +749,54 @@ object GpuDeviceManager extends Logging {
           singletonMemoryInitialized = Initialized
         }
       }
+    }
+  }
+
+  @volatile private var kvikioInitialized = false
+
+  /**
+   * Set KvikIO's compatibility mode and thread count, which libcudf takes only once per process,
+   * so this must run before the first libcudf file read: at startup if hybrid scan is enabled,
+   * else before the first native read of a session that enables it. Compatibility mode ON reads
+   * with POSIX rather than cuFile.
+   */
+  private[rapids] def isKvikioInitialized: Boolean = kvikioInitialized
+
+  private[rapids] def initializeKvikio(conf: RapidsConf): Unit = {
+    if (!kvikioInitialized) {
+      synchronized {
+        if (!kvikioInitialized) {
+          val numThreads = kvikioNumThreads(conf)
+          val compatMode = NativeFileSource.CompatMode.ON
+          logInfo(s"KvikIO reads with compatibility mode $compatMode and $numThreads threads")
+          // TODO: this has no effect if another libcudf file read set KvikIO up first, and
+          // nothing detects that. The plugin's other readers and writers use host buffers, not
+          // libcudf file sources, so it is unlikely; a cuDF change reporting whether KvikIO was
+          // already set up would let this warn.
+          NativeFileSource.setUpKvikio(compatMode, numThreads)
+          kvikioInitialized = true
+        }
+      }
+    }
+  }
+
+  /**
+   * KvikIO's thread count: the config if set, else KvikIO's own environment variable, which the
+   * explicit count passed to libcudf would otherwise override, else the multithreaded reader's
+   * thread count, since each native read blocks its calling thread.
+   */
+  private def kvikioNumThreads(conf: RapidsConf): Int = {
+    // KvikIO fails its setup if these aliases are both set and disagree, so either one will do.
+    val envName = Seq("KVIKIO_NTHREADS", "KVIKIO_NUM_THREADS").find(sys.env.contains)
+    val fromEnv = envName.flatMap(name => Try(sys.env(name).trim.toInt).toOption.filter(_ > 0))
+    conf.readerKvikioNumThreads match {
+      case Some(threads) =>
+        envName.filterNot(_ => fromEnv.contains(threads)).foreach { name =>
+          logWarning(s"KvikIO uses ${RapidsConf.READER_KVIKIO_NUM_THREADS.key}=$threads " +
+            s"threads rather than $name=${sys.env(name)}")
+        }
+        threads
+      case None => fromEnv.getOrElse(conf.multiThreadReadNumThreads)
     }
   }
 

@@ -15,18 +15,22 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["410db183"],"carryForward":"none"}
+{"spark":["411"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
+
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
 /**
  * Spark 4.1+ forwards MergeSummary via BatchWrite.commit(messages, summary).
  */
 object GpuMergeRowMetricsShims {
   val writeSummaryEnabled: Boolean = true
+
+  def createMetric(sc: SparkContext, name: String): SQLMetric =
+    SQLMetrics.createMetric(sc, name)
+
+  def metricValue(metric: SQLMetric): Long = metric.value
 }

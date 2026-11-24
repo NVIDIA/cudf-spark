@@ -15,26 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
+{"spark":["330","350"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution.python.shims
 
@@ -71,7 +52,8 @@ class GpuCoGroupedArrowPythonRunner(
     udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[(ColumnarBatch, ColumnarBatch)](funcs.map(_._1), evalType,
-    argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
+    argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon
+    with GpuDedicatedWriterThread[(ColumnarBatch, ColumnarBatch)] {
 
   protected override def newWriterThread(
       env: SparkEnv,
@@ -79,7 +61,7 @@ class GpuCoGroupedArrowPythonRunner(
       inputIterator: Iterator[(ColumnarBatch, ColumnarBatch)],
       partitionIndex: Int,
       context: TaskContext): WriterThread = {
-    new WriterThread(env, worker, inputIterator, partitionIndex, context) {
+    new DedicatedWriterThread(env, worker, inputIterator, partitionIndex, context) {
 
       protected override def writeCommand(dataOut: DataOutputStream): Unit = {
         dataOut.writeInt(conf.size)
@@ -91,7 +73,7 @@ class GpuCoGroupedArrowPythonRunner(
           udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
       }
 
-      protected override def writeIteratorToStream(dataOut: DataOutputStream): Unit = {
+      protected override def writeInput(dataOut: DataOutputStream): Unit = {
         // For each we first send the number of dataframes in each group then send
         // first df, then send second df.  End of data is marked by sending 0.
         while (inputIterator.hasNext) {

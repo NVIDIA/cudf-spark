@@ -28,6 +28,7 @@ import com.fasterxml.jackson.core.JsonToken
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuTextBasedPartitionReader.LineDelimitedReadChunk
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.io.Text
@@ -36,7 +37,8 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.json.{CreateJacksonParser, GpuJsonUtils, JSONOptions, JSONOptionsInRead}
+import org.apache.spark.sql.catalyst.json.{CreateJacksonParserShim, GpuJsonUtils, JSONOptions,
+  JSONOptionsInRead}
 import org.apache.spark.sql.catalyst.util.PermissiveMode
 import org.apache.spark.sql.connector.read.{PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.execution.QueryExecutionException
@@ -251,7 +253,7 @@ case class GpuJsonScan(
     maxReaderBatchSizeRows: Integer,
     maxReaderBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long)
-  extends TextBasedFileScan(sparkSession, options) with GpuScan {
+  extends TextBasedFileScan(sparkSession, options) with GpuScan with HistorySizedFileScan {
 
   private lazy val parsedOptions: JSONOptions = new JSONOptions(
     options.asScala.toMap,
@@ -264,7 +266,7 @@ case class GpuJsonScan(
     this.copy(partitionFilters = partitionFilters, dataFilters = dataFilters)
   }
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val caseSensitiveMap = options.asCaseSensitiveMap.asScala.toMap
     // Hadoop Configurations are case sensitive.
     val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(caseSensitiveMap)
@@ -321,7 +323,7 @@ object JsonPartitionReader {
               case Some(encoding) =>
                 val text = new Text()
                 text.set(line, offset, len)
-                CreateJacksonParser.text(encoding, jsonFactory, text)
+                CreateJacksonParserShim.text(encoding, parsedOptions, jsonFactory, text)
               case None => jsonFactory.createParser(line, offset, len)
             }
             withResource(parser) { jsonParser =>

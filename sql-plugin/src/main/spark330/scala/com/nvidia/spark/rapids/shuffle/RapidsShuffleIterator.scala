@@ -16,11 +16,7 @@
 
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shuffle
 
@@ -109,7 +105,7 @@ class RapidsShuffleIterator(
 
   // Batches expected is a moving target of batches this iterator will see. The target is moved, by
   // [[RapidsShuffleFetchHandler]]'s start method, as metadata responses are received from
-  // [[RapidsShuffleServer]]s.
+  // [[RapidsShuffleServer]]s. An error reply to a metadata request calls `metadataError` instead.
   private[this] var totalBatchesExpected: Long = 0L
 
   // As batches are received this counter is updated. When all is said and done,
@@ -118,8 +114,9 @@ class RapidsShuffleIterator(
   private[this] var totalBatchesResolved: Long = 0L
 
   // If the task finishes, and this iterator is releasing resources, we set this to true
-  // which allows us to reject incoming batches that would otherwise get leaked
-  private[this] var taskComplete: Boolean = false
+  // which allows us to reject incoming batches that would otherwise get leaked. The handlers'
+  // `isDone` reads it without the lock.
+  @volatile private[this] var taskComplete: Boolean = false
 
   blocksByAddress.foreach(bba => {
     // expected blocks per address
@@ -215,6 +212,8 @@ class RapidsShuffleIterator(
 
           override def getTaskIds: Array[Long] = taskIds
 
+          override def isDone: Boolean = taskComplete
+
           override def start(expectedBatches: Int): Unit = resolvedBatches.synchronized {
             if (expectedBatches == 0) {
               throw new IllegalStateException(
@@ -264,13 +263,29 @@ class RapidsShuffleIterator(
             }
           }
 
-          override def transferError(errorMessage: String, throwable: Throwable): Unit = {
+          override def transferError(errorMessage: String, throwable: Throwable): Unit =
+            failRequest(errorMessage, throwable, failedBlock = -1)
+
+          override def metadataError(errorMessage: String, failedBlock: Int): Unit =
+            failRequest(errorMessage, null, failedBlock)
+
+          // Queues an error for each block of the request. `next()` throws for the first one it
+          // takes, so the block at `failedBlock`, when it is one of them, goes first.
+          private def failRequest(
+              errorMessage: String,
+              throwable: Throwable,
+              failedBlock: Int): Unit = {
             resolvedBatches.synchronized {
               if (!clientDone) {
                 // If Spark detects a single fetch failure, the whole task has failed
-                // as per `FetchFailedException`. In the future `mapIndex` will come from the
-                // error callback.
-                shuffleRequestsMapIndex.map { case BlockIdMapIndex(id, mapIndex) =>
+                // as per `FetchFailedException`.
+                val blocks = if (failedBlock >= 0 && failedBlock < shuffleRequestsMapIndex.size) {
+                  shuffleRequestsMapIndex(failedBlock) +:
+                    shuffleRequestsMapIndex.patch(failedBlock, Nil, 1)
+                } else {
+                  shuffleRequestsMapIndex
+                }
+                blocks.foreach { case BlockIdMapIndex(id, mapIndex) =>
                   resolvedBatches.offer(TransferError(
                     blockManagerId, id, mapIndex, errorMessage, throwable))
                 }
@@ -295,21 +310,48 @@ class RapidsShuffleIterator(
 
   private[this] def receiveBufferCleaner(): Unit = resolvedBatches.synchronized {
     taskComplete = true
-    if (hasNext) {
+    // Every step runs whatever an earlier one throws, since the last ones withdraw the reader's
+    // waiting requests. The first failure is rethrown with the rest suppressed, and an interrupt
+    // among the rest is restored after the last step, so that it cuts none short.
+    var failure: Throwable = null
+    var interrupted = false
+    def attempt(step: => Unit): Unit = {
+      try {
+        step
+      } catch {
+        case t: Throwable =>
+          if (failure == null) {
+            failure = t
+          } else if (t ne failure) {
+            failure.addSuppressed(t)
+            interrupted |= t.isInstanceOf[InterruptedException]
+          }
+      }
+    }
+    // a hasNext that throws counts as not done, so that the closes and cancels still run
+    var done = false
+    attempt { done = !hasNext }
+    if (!done) {
       logWarning(s"Iterator for task ${taskAttemptIdStr} closing, " +
           s"but it is not done. Closing ${resolvedBatches.size()} resolved batches!!")
       resolvedBatches.forEach {
-        case BufferReceived(handle) => handle.close()
+        case BufferReceived(handle) => attempt(handle.close())
         case _ =>
       }
       // tell the client to cancel pending requests
       clientAndHandlers.foreach {
-        case (client, handler) => client.cancelPending(handler)
+        case (client, handler) => attempt(client.cancelPending(handler))
       }
     }
     // tell the client this handler is done, and no longer requires peer failures
     clientAndHandlers.foreach {
-      case (client, handler) => client.unregisterPeerErrorListener(handler)
+      case (client, handler) => attempt(client.unregisterPeerErrorListener(handler))
+    }
+    if (failure != null) {
+      if (interrupted) {
+        Thread.currentThread().interrupt()
+      }
+      throw failure
     }
   }
 

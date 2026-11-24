@@ -62,8 +62,7 @@ table BufferMeta {
   codec_buffer_descrs: [CodecBufferDescriptor];
 }
 
-/// Why the server failed a request. A transfer response carries it, and it holds nothing
-/// specific to transfers, so that other responses can carry it too.
+/// Why the server failed a request. A transfer or metadata response carries it.
 table ResponseError {
   /// why the request failed, for the requester's error message
   reason: string;

@@ -15,37 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark":["330","350","400"],"carryForward":"all"}
+{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -62,7 +33,9 @@ import org.apache.spark.sql.internal.SQLConf
 object FileWriteOptionsShims {
   def mergeWriteOptionsIntoHadoopConf(
       options: Map[String, String],
-      conf: Configuration): Unit = {}
+      conf: Configuration): Unit = {
+    // Pre-4.2 Spark versions do not merge write options into Hadoop conf here.
+  }
 
   def setConfWithWriteOptionPrecedence(
       conf: Configuration,
@@ -79,5 +52,7 @@ object FileWriteOptionsShims {
     defaultValue
   }
 
-  def setupLegacyParquetNanosAsLong(conf: Configuration, sqlConf: SQLConf): Unit = {}
+  def setupLegacyParquetNanosAsLong(conf: Configuration, sqlConf: SQLConf): Unit = {
+    // Only applicable to Spark 4.2+.
+  }
 }

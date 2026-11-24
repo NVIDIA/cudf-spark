@@ -213,7 +213,7 @@ def read_csv_sql(data_path, schema, spark_tmp_table_factory, options = {}):
     pytest.param('trucks-comments.csv', _trucks_schema, {'header': 'true', 'comment': '~'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2066')),
     ('trucks-more-comments.csv', _trucks_schema,  {'header': 'true', 'comment': '#'}),
     pytest.param('trucks-missing-quotes.csv', _trucks_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/130')),
-    pytest.param('trucks-null.csv', _trucks_schema, {'header': 'true', 'nullValue': 'null'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2068')),
+    ('trucks-null.csv', _trucks_schema, {'header': 'true', 'nullValue': 'null'}),
     ('trucks-null.csv', _trucks_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _byte_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _short_schema, {'header': 'true'}),
@@ -256,7 +256,7 @@ def test_basic_csv_read(std_input_path, name, schema, options, read_func, v1_ena
         'spark.sql.ansi.enabled': ansi_enabled
     })
     read = read_func(std_input_path + '/' + name, schema, spark_tmp_table_factory, options)
-    if name == 'trucks-null.csv' and 'nullValue' not in options:
+    if name == 'trucks-null.csv':
         if v1_enabled_list == 'csv':
             gpu_scan = 'GpuFileSourceScanExec'
         elif read_func is read_csv_sql:

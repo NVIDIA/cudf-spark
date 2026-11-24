@@ -43,7 +43,7 @@ from pyspark.sql.types import StringType
 
 try:
     from google.protobuf import descriptor_pb2
-except ModuleNotFoundError:
+except ImportError:
     descriptor_pb2 = None
 
 pytestmark = [

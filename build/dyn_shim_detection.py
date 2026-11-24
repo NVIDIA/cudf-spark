@@ -21,7 +21,7 @@ _log = logging.getLogger("dyn-shim-detection")
 # https://ant.apache.org/manual/Tasks/script.html
 show_version_info = project.getProperty("dyn.shim.trace")
 _log.setLevel(logging.DEBUG if show_version_info else logging.INFO)
-# Same as shimplify.py
+# Match the shim-source task's logging format.
 ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter('%(name)s - %(levelname)s - %(message)s'))
 _log.addHandler(ch)
@@ -39,7 +39,7 @@ active_buildver = project.getProperty("buildver")
 included_buildvers = [x.strip() for x in value.split(",") if x.strip()]
 if active_buildver and active_buildver not in included_buildvers:
     # Opt-in profiles that intentionally do not use the release* naming convention
-    # still need their active shim version when shimplify generates source links.
+    # still need their active shim version when the build generates source links.
     included_buildvers.append(active_buildver)
     value = ", ".join(included_buildvers)
 project.setProperty("included_buildvers", value)

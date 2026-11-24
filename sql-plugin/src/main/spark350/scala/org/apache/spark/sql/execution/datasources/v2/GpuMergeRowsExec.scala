@@ -16,27 +16,8 @@
 
 
 /*** spark-rapids-shim-json-lines
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["350","400","420"],"carryForward":"all"}
+{"spark":["410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
@@ -115,22 +96,25 @@ case class GpuMergeRowsExec(
     // MergeSummary fields must stay ESSENTIAL: metrics.level must not change committed
     // table metadata. Skip registration before Spark 4.1 where WriteSummary is unused.
     if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
+      def mergeMetric(name: String): GpuMetric =
+        createMetric(ESSENTIAL_LEVEL, GpuMergeRowMetricsShims.createMetric(sparkContext, name))
+
       common ++ Map(
-        NUM_TARGET_ROWS_COPIED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_COPIED -> mergeMetric(
           "number of target rows copied unmodified because they did not match any action"),
-        NUM_TARGET_ROWS_INSERTED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_INSERTED -> mergeMetric(
           "number of target rows inserted"),
-        NUM_TARGET_ROWS_DELETED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_DELETED -> mergeMetric(
           "number of target rows deleted"),
-        NUM_TARGET_ROWS_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_UPDATED -> mergeMetric(
           "number of target rows updated"),
-        NUM_TARGET_ROWS_MATCHED_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_MATCHED_UPDATED -> mergeMetric(
           "number of target rows updated by a matched clause"),
-        NUM_TARGET_ROWS_MATCHED_DELETED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_MATCHED_DELETED -> mergeMetric(
           "number of target rows deleted by a matched clause"),
-        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED -> mergeMetric(
           "number of target rows updated by a not matched by source clause"),
-        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED -> createMetric(ESSENTIAL_LEVEL,
+        NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED -> mergeMetric(
           "number of target rows deleted by a not matched by source clause"))
     } else {
       common

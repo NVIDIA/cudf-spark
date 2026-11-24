@@ -26,7 +26,7 @@ import scala.collection.mutable.ListBuffer
 import ai.rapids.cudf._
 import ai.rapids.cudf.ParquetWriterOptions.StatisticsFrequency
 import com.nvidia.spark.GpuCachedBatchSerializer
-import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RowToColumnarIterator, SchemaUtils, TargetSize}
+import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RowToColumnarIterator, SchemaUtils, SQLExecPlugin, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -54,10 +54,11 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData, GenericArrayData, MapData}
 import org.apache.spark.sql.columnar.CachedBatch
-import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, ShimCurrentBatchIterator}
+import org.apache.spark.sql.execution.datasources.parquet.{ParquetCVShims, ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, RapidsVectorizedColumnReader, ShimCurrentBatchIterator}
 import org.apache.spark.sql.execution.datasources.parquet.rapids.ParquetRecordMaterializer
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.rapids.PCBSSchemaHelper
+import org.apache.spark.sql.rapids.execution.PCBSNullSafeRowToColumnarExec
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel
@@ -213,7 +214,17 @@ private case class CloseableColumnBatchIterator(iter: Iterator[ColumnarBatch]) e
  */
 class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
 
-  override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = true
+  override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = {
+    // Cached AQE plans can insert a row-to-columnar transition. Only accept schemas the GPU
+    // converter can materialize, including nested types; use the row cache path otherwise.
+    schema.forall(attribute => GpuRowToColumnConverter.supportsType(attribute.dataType)) &&
+      // Without the SQL extension, Spark cannot install the NullType-safe CPU transition.
+      // Keep columnar input when it is installed so GPU NullType caching stays unchanged.
+      (!schema.exists(attribute =>
+        PCBSNullSafeRowToColumnarExec.containsNullType(attribute.dataType)) ||
+        SQLConf.get.getConfString(StaticSQLConf.SPARK_SESSION_EXTENSIONS.key, "")
+          .split(",").map(_.trim).contains(classOf[SQLExecPlugin].getName))
+  }
 
   override def supportsColumnarOutput(schema: StructType): Boolean = schema.fields.forall { f =>
     // only check spark b/c if we are on the GPU then we will be calling the gpu method regardless
@@ -903,10 +914,16 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
             List(new ColumnarBatch(null, cachedBatch.numRows)).iterator
           } else {
             new ShimCurrentBatchIterator(
-              cachedBatch,
-              conf,
-              selectedAttributes,
-              options, hadoopConf)
+              new ByteArrayInputFile(cachedBatch.buffer),
+              conf, selectedAttributes, options, hadoopConf,
+              ParquetTimestampNTZShims.setupTimestampNTZConfig _,
+              ParquetCVShims.newParquetCV _,
+              (column, required, pages, writerVersion) => RapidsVectorizedColumnReader(
+                column, required, pages, null,
+                LegacyBehaviorPolicyShim.CORRECTED_STR,
+                LegacyBehaviorPolicyShim.EXCEPTION_STR,
+                LegacyBehaviorPolicyShim.EXCEPTION_STR,
+                null, writerVersion))
           }
         }
       }
@@ -915,7 +932,18 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         // go over the batch and get the next non-degenerate iterator
         // and return if it hasNext
         while ((iter == null || !iter.hasNext) && cbIter.hasNext) {
+          iter match {
+            case closeable: AutoCloseable => closeable.close()
+            case _ =>
+          }
           iter = getIterator
+        }
+        if (iter != null && !iter.hasNext) {
+          iter match {
+            case closeable: AutoCloseable => closeable.close()
+            case _ =>
+          }
+          iter = null
         }
         iter != null && iter.hasNext
       }
@@ -947,10 +975,6 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
   // A slice's Parquet output is copied into one Java array, so the GPU writer's budget stays
   // 10 MiB below 2 GiB however large batchSizeBytes is. The CPU writer keeps its own budget.
   private val maxGpuBytesAllowedPerBatch = 2L * 1024 * 1024 * 1024 - 10L * 1024 * 1024
-
-  // The row entry sets no batch size target, so its builders' first allocation would otherwise
-  // follow batchSizeBytes, which can be set far above what any column can hold.
-  private val maxInitialBuilderBytes = 1024L * 1024 * 1024
 
   private def getGpuBytesAllowedPerBatch(conf: SQLConf): Long =
     math.min(getBytesAllowedPerBatch(conf), maxGpuBytesAllowedPerBatch)
@@ -1347,8 +1371,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         val converters = new GpuRowToColumnConverter(structSchema)
         // This only sizes each batch's builders. The goal sets no size target: a partition stays
         // one batch unless the iterator has to split it, as at a column's size limit.
-        val initialBuilderBytes = math.min(rapidsConf.gpuTargetBatchSizeBytes,
-          maxInitialBuilderBytes)
+        val initialBuilderBytes = rapidsConf.gpuTargetBatchSizeBytes
         val enableR2cRetry = rapidsConf.isR2cRetryEnabled
         val columnarBatchRdd = input.mapPartitions(iter => {
           new RowToColumnarIterator(iter, structSchema, TargetSize(Long.MaxValue),

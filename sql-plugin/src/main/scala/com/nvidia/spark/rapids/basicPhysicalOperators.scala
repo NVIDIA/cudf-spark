@@ -67,11 +67,12 @@ class GpuProjectExecMeta(
     val projectList = GpuProjectAstPlanner.wrapProjectOutputs(
       gpuExprs, proj.conf, conf.isProjectAstEnabled, conf.isProjectAstJitEnabled)
         .map(_.asInstanceOf[NamedExpression]).toList
-    // Report original eligibility here and final backend selection after tiering.
-    if (conf.shouldExplain && conf.isProjectAstEnabled) {
+    // Report original eligibility here and final backend selection after tiering. These outputs
+    // run on the GPU either way, so NOT_ON_GPU does not report them.
+    if (conf.shouldExplainAll && conf.isProjectAstEnabled) {
       val legacyExplain = childExprs.iterator.zip(projectList.iterator).flatMap {
         case (meta, expression) if GpuAstJitExpression.extractTopLevel(expression).isEmpty =>
-          Some(meta.explainAst(conf.shouldExplainAll)).filter(_.nonEmpty)
+          Some(meta.explainAst(all = true)).filter(_.nonEmpty)
               .map(explanation => s"  Legacy Project AST eligibility:\n$explanation")
         case _ => None
       }

@@ -451,4 +451,26 @@ object FilterToAstConverter {
     case Not(child) => getReferencedColumns(child)
     case _ => Set.empty
   }
+
+  /** The values a filter compares columns with. */
+  def getLiterals(filter: Filter): Seq[Any] = filter match {
+    case EqualTo(_, value) => Seq(value)
+    case EqualNullSafe(_, value) => Seq(value)
+    case GreaterThan(_, value) => Seq(value)
+    case GreaterThanOrEqual(_, value) => Seq(value)
+    case LessThan(_, value) => Seq(value)
+    case LessThanOrEqual(_, value) => Seq(value)
+    case In(_, values) => values.toSeq
+    case And(left, right) => getLiterals(left) ++ getLiterals(right)
+    case Or(left, right) => getLiterals(left) ++ getLiterals(right)
+    case Not(child) => getLiterals(child)
+    case _ => Seq.empty
+  }
+
+  /** A date literal's days since the epoch, as its AST literal holds them. */
+  def dateLiteralDays(value: Any): Option[Int] = value match {
+    case d: Date => Some(DateTimeUtils.fromJavaDate(d))
+    case d: LocalDate => Some(DateTimeUtils.localDateToDays(d))
+    case _ => None
+  }
 }

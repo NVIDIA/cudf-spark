@@ -14,11 +14,7 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.shims
 
@@ -45,6 +41,7 @@ object GpuJsonToStructsShim {
   }
 
   def tagDateFormatSupportFromScan(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
+    // GpuJsonScan checks date format support before calling this hook.
   }
 
   def castJsonStringToDateFromScan(input: ColumnView, dt: DType,

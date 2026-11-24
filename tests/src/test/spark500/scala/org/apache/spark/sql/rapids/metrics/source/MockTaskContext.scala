@@ -15,12 +15,13 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "500"}
+{"spark":["500"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.metrics.source
 
 import org.apache.spark.TaskContext
-import org.apache.spark.util.{PostStatusUpdateListener, TaskInterruptListener}
+import org.apache.spark.util.{PostStatusUpdateListener, TaskCompletionListener}
+import org.apache.spark.util.TaskInterruptListener
 
 class MockTaskContext(taskAttemptId: Long, partitionId: Int)
     extends MockTaskContextBase(taskAttemptId, partitionId) {
@@ -28,6 +29,10 @@ class MockTaskContext(taskAttemptId: Long, partitionId: Int)
   // Spark 4.2 makes the TaskInterruptListener overload abstract.
   override def addTaskInterruptListener(
       listener: TaskInterruptListener): TaskContext = this
+
+  override private[spark] def addTaskPreCompletionListener(
+      listener: TaskCompletionListener): TaskContext =
+    super.addTaskPreCompletionListener(listener)
 
   override private[spark] def addPostStatusUpdateListener(
       listener: PostStatusUpdateListener): TaskContext = this

@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "411"}
+{"spark":["411"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark.source
 
