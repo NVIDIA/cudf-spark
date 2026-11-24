@@ -220,9 +220,10 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
       val c2r = GpuColumnarToRowExec(optimizeAdaptiveTransitions(e, Some(plan)))
       SparkShimImpl.addRowShuffleToQueryStageTransitionIfNeeded(c2r, e)
 
-    // If Spark wrapped a TableCache query stage with a CPU ColumnarToRow, replace it with
-    // a GPU ColumnarToRow to avoid CPU accessing GPU vectors.
-    case ColumnarToRowExec(e) if SparkShimImpl.getTableCacheNonQueryStagePlan(e).nonEmpty =>
+    // If Spark wrapped a GPU TableCache query stage with a CPU ColumnarToRow, replace it with
+    // a GPU ColumnarToRow to avoid CPU accessing GPU vectors. Leave CPU cache plans unchanged.
+    case ColumnarToRowExec(e) if SparkShimImpl.getTableCacheNonQueryStagePlan(e)
+        .exists(_.isInstanceOf[GpuExec]) =>
       GpuColumnarToRowExec(optimizeAdaptiveTransitions(e, Some(plan)))
 
     case ColumnarToRowExec(e: BroadcastQueryStageExec) =>

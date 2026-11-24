@@ -235,7 +235,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     opName: String,
     useArrowCopyOpt: Boolean,
     releaseSemaphoreWhilePulling: Boolean = false,
-    inputBatchCleanup: HostBatchCleanupPolicy = HostBatchCleanupPolicy.ProducerCloses)
+    inputBatchCleanup: HostBatchCleanupPolicy)
   extends AbstractGpuCoalesceIterator(iter,
     goal,
     numInputRows,
