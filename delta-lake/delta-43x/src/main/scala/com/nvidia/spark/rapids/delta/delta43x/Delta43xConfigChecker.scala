@@ -23,9 +23,11 @@ import com.nvidia.spark.rapids.delta.DeltaConfigChecker
 import org.apache.parquet.column.ParquetProperties.WriterVersion
 import org.apache.parquet.hadoop.ParquetOutputFormat
 
+import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOptions, IcebergCompat,
   MaterializePartitionColumnsTableFeature, Snapshot}
+import org.apache.spark.sql.delta.actions.TableFeatureProtocolUtils
 import org.apache.spark.sql.delta.util.TableParquetVersionOption
 import org.apache.spark.sql.internal.SQLConf
 
@@ -62,15 +64,85 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       options: Map[String, String],
       snapshot: => Snapshot): Unit = {
     val current = snapshot
-    val properties = if (current.version < 0) {
+    if (current.version < 0) {
       // No table exists yet, so Delta creates it with these options and this session's defaults.
       // The empty snapshot's own configuration is left out: Delta caches it per path with the
-      // defaults of whichever session first looked, which may differ from this session's.
-      creationProperties(spark, Map.empty, options)
+      // defaults of whichever session first looked, which may differ from this session's. The
+      // write's partitioning is not visible here, so a materialized partition column request is
+      // treated as if the table were partitioned.
+      tagCreationProperties(meta, spark, Map.empty, options, hasPartitionColumns = true)
     } else {
-      current.metadata.configuration
+      tagParquetFormatVersion(meta, spark, options, current.metadata.configuration)
     }
-    tagParquetFormatVersion(meta, spark, options, properties)
+  }
+
+  /**
+   * Tags a write that creates a table, using the properties Delta would create it with. This
+   * covers the writer features that the GPU cannot write for such a table: variant shredding,
+   * materialized partition columns, and a Parquet format version other than 1. Properties that
+   * fail Delta's own validation fall back so the CPU raises the error, or does not if the write
+   * turns out to target an existing table.
+   */
+  def tagCreationProperties(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      properties: Map[String, String],
+      writeOptions: Map[String, String],
+      hasPartitionColumns: Boolean): Unit = {
+    val created = try {
+      Right(creationProperties(spark, properties, writeOptions))
+    } catch {
+      case e @ (_: IllegalArgumentException | _: AnalysisException) => Left(e.getMessage)
+    }
+    created match {
+      case Left(error) =>
+        meta.willNotWorkOnGpu(s"invalid Delta table properties: $error")
+      case Right(effectiveProperties) =>
+        tagParquetFormatVersion(meta, spark, writeOptions, effectiveProperties)
+        if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {
+          meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
+        }
+        val supportedFeatures =
+          TableFeatureProtocolUtils.getSupportedFeaturesFromTableConfigs(effectiveProperties)
+        val materializesPartitionColumns =
+          IcebergCompat.isAnyEnabled(effectiveProperties) ||
+            DeltaConfigs.ENABLE_MATERIALIZE_PARTITION_COLUMNS_FEATURE
+              .fromMap(effectiveProperties).contains(true) ||
+            supportedFeatures.contains(MaterializePartitionColumnsTableFeature)
+        if (hasPartitionColumns && materializesPartitionColumns) {
+          meta.willNotWorkOnGpu(
+            "Delta 4.3 materialized partition column writes are not supported on GPU")
+        }
+    }
+  }
+
+  private val V1_SAVE_AS_TABLE_OVERWRITE_OPTION = "__v1_save_as_table_overwrite"
+  private val CLASSIC_DATAFRAME_WRITER = "org.apache.spark.sql.classic.DataFrameWriter."
+
+  /**
+   * Whether a replace is DataFrameWriter V1 `saveAsTable` in overwrite mode, for which Delta
+   * keeps the existing table's metadata instead of replacing it. Delta marks it with an internal
+   * write option, except on Spark 4.0 where it inspects the calling stack, so this does too.
+   */
+  def isV1SaveAsTableOverwrite(writeOptions: Map[String, String]): Boolean =
+    writeOptions.exists { case (k, v) =>
+      k.equalsIgnoreCase(V1_SAVE_AS_TABLE_OVERWRITE_OPTION) && v.equalsIgnoreCase("true")
+    } || Thread.currentThread().getStackTrace.exists(_.toString.contains(CLASSIC_DATAFRAME_WRITER))
+
+  /**
+   * Tags a replace that keeps the existing table's metadata: the existing properties apply unless
+   * this write sets them explicitly. Session defaults do not apply to an existing table.
+   */
+  def tagRetainedProperties(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      existingProperties: Map[String, String],
+      properties: Map[String, String],
+      writeOptions: Map[String, String]): Unit = {
+    val explicit = normalizeDeltaKeys(properties) ++ normalizeDeltaKeys(
+      writeOptions.filter { case (k, _) => k.toLowerCase(Locale.ROOT).startsWith("delta.") })
+    tagParquetFormatVersion(meta, spark, writeOptions,
+      normalizeDeltaKeys(existingProperties) ++ explicit)
   }
 
   private def normalizeKey(properties: Map[String, String], key: String): Map[String, String] =
@@ -127,7 +199,12 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       effectiveProperties: Map[String, String]): Unit = {
     // Delta matches these keys exactly, but its catalog and commit path normalize their case.
     val writerVersionKey = ParquetOutputFormat.WRITER_VERSION
-    val normalizedOptions = normalizeKey(options, writerVersionKey)
+    // The writer version may also arrive as a property, e.g. an option SQL CTAS/RTAS persisted
+    // with its original case. An explicit write option still wins.
+    val propertyVersion = effectiveProperties.collectFirst {
+      case (k, v) if k.equalsIgnoreCase(writerVersionKey) => writerVersionKey -> v
+    }
+    val normalizedOptions = propertyVersion.toMap ++ normalizeKey(options, writerVersionKey)
     val normalizedProperties =
       normalizeKey(effectiveProperties, DeltaConfigs.PARQUET_FORMAT_VERSION.key)
     try {

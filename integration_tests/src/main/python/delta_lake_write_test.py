@@ -5113,6 +5113,233 @@ _parquet_format_version_writers = {
 }
 
 
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Materialized partition columns were added in OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+def test_delta_43_new_path_materialized_partition_option_fallback(spark_tmp_path, mode):
+    """A save to a path with no table persists its `delta.*` options, so a materialized partition
+    column request there must fall back even though no table has the property yet."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        spark.sql("SELECT id, CAST(id % 2 AS INT) AS part FROM range(8)").write \
+            .format("delta").mode(mode).partitionBy("part") \
+            .option("delta.enableMaterializePartitionColumnsFeature", "true").save(path)
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+                    reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+def test_delta_43_new_path_variant_shredding_option_fallback(spark_tmp_path, mode):
+    """A save to a path with no table persists its `delta.*` options, so a variant shredding
+    request there must fall back even though no table has the property yet."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        spark.sql("SELECT id, parse_json('{\"a\": 1}') AS v FROM range(4)").write \
+            .format("delta").mode(mode) \
+            .option("delta.enableVariantShredding", "true").save(path)
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_save_as_table_overwrite_keeps_properties(
+        spark_tmp_table_factory):
+    """DataFrameWriter V1 saveAsTable in overwrite mode keeps the existing table's metadata, so a
+    table asking for DataPageV2 must not be rewritten on the GPU, which cannot write it and
+    would fail at write time on every retry."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA "
+        "TBLPROPERTIES ('delta.parquet.format.version' = '2.12.0')").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("overwrite") \
+                .saveAsTable(table)
+    assert not _wrote_on_gpu(write, conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("option_key", ["parquet.writer.version", "PARQUET.WRITER.VERSION"])
+def test_delta_43_parquet_format_version_dataframe_writer_v2_writer_version_option(
+        spark_tmp_table_factory, write_mode, option_key):
+    """The Parquet writer version option is matched whatever its case when planning a
+    DataFrameWriterV2 create or replace."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            writer = spark.sql(_parquet_format_version_query).writeTo(table).using("delta") \
+                .option(option_key, "v2")
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
+    assert not _wrote_on_gpu(write, conf)
+
+
+# DataFrameWriter variants, applied to the table at `path` (or `table` by name).
+_parquet_format_version_writers = {
+    "save_append": lambda df, path, table: df.write.format("delta").mode("append").save(path),
+    "save_partitioned_append": lambda df, path, table: df.write.format("delta").mode("append")
+        .partitionBy("p").save(path),
+    "save_replace_where": lambda df, path, table: df.filter("p = 0").write.format("delta")
+        .mode("overwrite").option("replaceWhere", "p = 0").save(path),
+    "save_dynamic_partition_overwrite": lambda df, path, table: df.filter("p IN (0, 1)")
+        .write.format("delta").mode("overwrite").option("partitionOverwriteMode", "dynamic")
+        .partitionBy("p").save(path),
+    "save_as_table_append": lambda df, path, table: df.write.format("delta").mode("append")
+        .saveAsTable(table),
+}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Materialized partition columns were added in OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+def test_delta_43_new_path_materialized_partition_option_fallback(spark_tmp_path, mode):
+    """A save to a path with no table persists its `delta.*` options, so a materialized partition
+    column request there must fall back even though no table has the property yet."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        spark.sql("SELECT id, CAST(id % 2 AS INT) AS part FROM range(8)").write \
+            .format("delta").mode(mode).partitionBy("part") \
+            .option("delta.enableMaterializePartitionColumnsFeature", "true").save(path)
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+                    reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+def test_delta_43_new_path_variant_shredding_option_fallback(spark_tmp_path, mode):
+    """A save to a path with no table persists its `delta.*` options, so a variant shredding
+    request there must fall back even though no table has the property yet."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        spark.sql("SELECT id, parse_json('{\"a\": 1}') AS v FROM range(4)").write \
+            .format("delta").mode(mode) \
+            .option("delta.enableVariantShredding", "true").save(path)
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_save_as_table_overwrite_keeps_properties(
+        spark_tmp_table_factory):
+    """DataFrameWriter V1 saveAsTable in overwrite mode keeps the existing table's metadata, so a
+    table asking for DataPageV2 must not be rewritten on the GPU, which cannot write it and
+    would fail at write time on every retry."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA "
+        "TBLPROPERTIES ('delta.parquet.format.version' = '2.12.0')").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("overwrite") \
+                .saveAsTable(table)
+    assert not _wrote_on_gpu(write, conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("option_key", ["parquet.writer.version", "PARQUET.WRITER.VERSION"])
+def test_delta_43_parquet_format_version_dataframe_writer_v2_writer_version_option(
+        spark_tmp_table_factory, write_mode, option_key):
+    """The Parquet writer version option is matched whatever its case when planning a
+    DataFrameWriterV2 create or replace."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            writer = spark.sql(_parquet_format_version_query).writeTo(table).using("delta") \
+                .option(option_key, "v2")
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_invalid_creation_default_stale_snapshot(spark_tmp_path):
+    """Delta can hold a snapshot saying a table does not exist after the table was created
+    elsewhere. Planning then builds the creation properties from the session's defaults, which
+    may be invalid. Planning must not fail on that: the write falls back to the CPU write, which
+    decides the outcome, so the GPU does exactly what the CPU does."""
+    source = spark_tmp_path + "/SOURCE"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(_parquet_format_version_query).write
+                     .format("delta").save(source), conf=conf)
+
+    def stale_table(suffix):
+        """A table at a new path whose cached log still holds the empty snapshot."""
+        path = f"{spark_tmp_path}/DELTA_DATA_{suffix}"
+
+        def setup(spark):
+            jvm = spark._jvm
+            jvm.org.apache.spark.sql.delta.DeltaLog.forTable(spark._jsparkSession, path)
+            hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+            source_path = jvm.org.apache.hadoop.fs.Path(source)
+            fs = source_path.getFileSystem(hadoop_conf)
+            # Caching the log already created the target directory, so copy the contents.
+            for child in fs.listStatus(source_path):
+                assert jvm.org.apache.hadoop.fs.FileUtil.copy(
+                    fs, child.getPath(), fs, jvm.org.apache.hadoop.fs.Path(path), False,
+                    hadoop_conf)
+        with_cpu_session(setup, conf=conf)
+        return path
+
+    invalid_default = copy_and_update(
+        conf, {"spark.databricks.delta.properties.defaults.parquet.format.version": "invalid"})
+
+    def appender(path):
+        return lambda spark: spark.sql(_parquet_format_version_query).write.format("delta") \
+            .mode("append").save(path)
+    try:
+        with_cpu_session(appender(stale_table("cpu")), conf=invalid_default)
+        cpu_error = None
+    except Exception as e:
+        cpu_error = str(e)
+    gpu_error, plans = _gpu_plans(appender(stale_table("gpu")), invalid_default,
+                                  fails=cpu_error is not None)
+    _assert_cpu_write_plan(plans, "ExecutedCommandExec")
+    if cpu_error is not None:
+        assert "invalid" in gpu_error and "invalid" in cpu_error
+
+
 def _parquet_format_version_dml_tables(base_table, path_prefix, suffix, targets):
     """The tables of the `suffix` side that a case uses: by `name`, by `path`, or both."""
     return [table for kind, table in (("name", f"{base_table}_{suffix}"),

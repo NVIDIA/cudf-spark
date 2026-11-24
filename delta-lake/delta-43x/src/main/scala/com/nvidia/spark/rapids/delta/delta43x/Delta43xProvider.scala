@@ -34,9 +34,9 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsWrite,
   TableCatalog}
 import org.apache.spark.sql.connector.read.Scan
-import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaConfigs,
+import org.apache.spark.sql.delta.{CatalogOwnedTableFeature,
   DeltaDynamicPartitionOverwriteCommand, DeltaLog, DeltaOptions, DeltaParquetFileFormat,
-  IcebergCompat, MaterializePartitionColumnsTableFeature}
+  MaterializePartitionColumnsTableFeature}
 import org.apache.spark.sql.delta.actions.TableFeatureProtocolUtils
 import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaCatalogRestApiShim, DeltaTableV2}
 import org.apache.spark.sql.delta.commands.{DeleteCommand, DeltaInsertReplaceOnOrUsingCommand,
@@ -185,6 +185,11 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
             meta.willNotWorkOnGpu(
               "Delta 4.3 materialized partition column writes are not supported on GPU")
           }
+          if (Delta43xConfigChecker.isV1SaveAsTableOverwrite(cpuExec.writeOptions)) {
+            // saveAsTable keeps the existing metadata, which may ask for DataPageV2.
+            Delta43xConfigChecker.tagRetainedProperties(meta, cpuExec.session,
+              snapshot.metadata.configuration, cpuExec.properties, cpuExec.writeOptions)
+          }
         case _: ServerSidePlannedTable =>
           meta.willNotWorkOnGpu(
             "Delta 4.3 server-side planned table replacement is not supported on GPU")
@@ -199,24 +204,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       writeOptions: Map[String, String],
       hasPartitionColumns: Boolean,
       spark: SparkSession): Unit = {
-    val effectiveProperties = Delta43xConfigChecker.creationProperties(
-      spark, properties, writeOptions)
-    Delta43xConfigChecker.tagParquetFormatVersion(
-      meta, spark, writeOptions, effectiveProperties)
-    if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {
-      meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
-    }
-    val supportedFeatures =
-      TableFeatureProtocolUtils.getSupportedFeaturesFromTableConfigs(effectiveProperties)
-    val materializesPartitionColumns =
-      IcebergCompat.isAnyEnabled(effectiveProperties) ||
-        DeltaConfigs.ENABLE_MATERIALIZE_PARTITION_COLUMNS_FEATURE
-          .fromMap(effectiveProperties).contains(true) ||
-        supportedFeatures.contains(MaterializePartitionColumnsTableFeature)
-    if (hasPartitionColumns && materializesPartitionColumns) {
-      meta.willNotWorkOnGpu(
-        "Delta 4.3 materialized partition column writes are not supported on GPU")
-    }
+    Delta43xConfigChecker.tagCreationProperties(
+      meta, spark, properties, writeOptions, hasPartitionColumns)
   }
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
