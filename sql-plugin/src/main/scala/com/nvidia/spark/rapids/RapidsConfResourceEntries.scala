@@ -433,18 +433,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val HISTORY_SCAN_SPLIT_ENABLED = conf("spark.rapids.sql.history.scanSplit.enabled")
     .doc("When a history metrics provider is set and this is true, sizes scan splits from the " +
-      "decode-expansion ratio recorded by earlier runs. Off by default: the ratio is recorded " +
-      "per table, so it does not account for the columns a scan reads, the filters it pushes " +
-      "down or dynamic partition pruning. When false, scan splits keep their static size and " +
-      "no ratio is recorded.")
+      "decode-expansion ratio recorded by earlier runs. Off by default. When false, scan " +
+      "splits keep their static size and no ratio is recorded.")
     .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
 
   val HISTORY_SCAN_SPLIT_MAX_AGE_DAYS = conf("spark.rapids.sql.history.scanSplit.maxAgeDays")
-    .doc("How old, in days, the last recorded decode-expansion ratio of a table may be and " +
-      "still size its scan splits. An older ratio is ignored and the scan keeps its static " +
+    .doc("How old, in days, a recorded decode-expansion ratio may be and still size scan " +
+      "splits. Older ratios are ignored; with none left the scan keeps its static " +
       "split. Values above the history store's retention, 14 days, have the same effect as 14. " +
       "This only changes the lookup; it does not change what is stored.")
     .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
@@ -467,6 +465,20 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .bytesConf(ByteUnit.BYTE)
     .checkValue(v => v > 0, "Scan split minimum must be positive")
     .createWithDefault(64L * 1024 * 1024)
+
+  val HISTORY_SCAN_SPLIT_AGGREGATE = conf("spark.rapids.sql.history.scanSplit.aggregate")
+    .doc("How the recorded decode-expansion ratios that a scan finds are combined into the one " +
+      "that sizes its splits: latest, mean, min or max. A scan looks for earlier scans that " +
+      "read the same columns and filters, with the same literals and about the same listed " +
+      "size, then with any literals, and uses the readings of the first search step that has " +
+      "any. latest uses the newest reading and reads only that from the store; mean, min and " +
+      "max read every reading within the maximum age. A larger ratio gives a smaller split, " +
+      "so max is the most cautious choice.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .stringConf
+    .transform(_.toLowerCase(java.util.Locale.ROOT))
+    .checkValues(com.nvidia.spark.rapids.perf.RatioAggregate.byName.keySet)
+    .createWithDefault("latest")
 
   val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +

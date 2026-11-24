@@ -22,8 +22,9 @@ import java.util.{Collections, List => JList}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.history.{BackendInfo, HistoryMetricsApi, MetricSchema, MetricStore,
-  MetricVersionId, Observation, SchemaStatus, Status, Summary, SummaryRequest, SummaryResponse}
+import com.nvidia.spark.history.{BackendInfo, DimMatch, HistoryMetricsApi, LookupRequest,
+  LookupResponse, MetricSchema, MetricStore, MetricVersionId, Observation, SchemaStatus, Status,
+  Summary, SummaryRequest, SummaryResponse}
 
 /**
  * In-memory `MetricStore` following the API contract: declaration gates recording, requests
@@ -87,6 +88,60 @@ class FakeMetricStore extends MetricStore {
         summarizeError.map(SummaryResponse.error).getOrElse(answer(request))
       }.asJava
     }
+  }
+
+  /** When set, `lookup` returns this list as is, whatever was asked. */
+  @volatile var lookupRaw: Option[JList[LookupResponse]] = None
+
+  /** Every lookup request received, with its timeout. */
+  val lookupCalls = new ArrayBuffer[(LookupRequest, Duration)]()
+
+  /**
+   * The first tier with any observation in the window, summarized over its newest `limit`
+   * observations; the failure switches of `summarize` apply as well.
+   */
+  override def lookup(requests: JList[LookupRequest], timeout: Duration)
+      : JList[LookupResponse] = synchronized {
+    requests.asScala.foreach(r => lookupCalls += ((r, timeout)))
+    summarizeThrows.foreach(e => throw e)
+    lookupRaw.getOrElse {
+      requests.asScala.map { request =>
+        summarizeError.map(LookupResponse.error).getOrElse(answerLookup(request))
+      }.asJava
+    }
+  }
+
+  private def answerLookup(request: LookupRequest): LookupResponse = {
+    if (!accepted.contains(request.metric())) {
+      LookupResponse.error(Status.of(Status.Code.NOT_DECLARED, "not declared"))
+    } else {
+      val tiers = request.tiers().asScala
+      val firstWithEvidence = tiers.indices.iterator
+        .map(index => index -> selectTier(request, tiers(index)))
+        .find { case (_, selected) => selected.nonEmpty }
+      firstWithEvidence match {
+        case None => LookupResponse.none()
+        case Some((index, selected)) =>
+          val values = selected.map(_.value())
+          val times = selected.map(_.timestampMs())
+          val mean = math.min(values.max, math.max(values.min, values.sum / values.size))
+          LookupResponse.found(index, Summary.of(values.size.toLong, mean, values.min, values.max,
+            times.min, times.max))
+      }
+    }
+  }
+
+  /** Observations of one tier in the window, newest first, kept to the request's limit. */
+  private def selectTier(
+      request: LookupRequest,
+      tier: java.util.Map[String, DimMatch]): Seq[Observation] = {
+    val matching = stored.zipWithIndex.filter { case (o, _) =>
+      o.metric() == request.metric() &&
+        tier.asScala.forall { case (name, m) => m.values().contains(o.dimensions().get(name)) } &&
+        o.timestampMs() >= request.fromMs() && o.timestampMs() < request.toMs()
+    }
+    val ordered = matching.sortBy { case (o, seq) => (-o.timestampMs(), -seq) }.map(_._1)
+    if (request.limit() > 0) ordered.take(request.limit()).toSeq else ordered.toSeq
   }
 
   override def info(): BackendInfo =
