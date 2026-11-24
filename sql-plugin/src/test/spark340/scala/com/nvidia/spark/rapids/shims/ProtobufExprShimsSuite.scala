@@ -22,14 +22,17 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
+import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids.{GpuLiteral, VersionUtils}
+import com.nvidia.spark.rapids.jni.Protobuf.ENC_DEFAULT
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
-import org.apache.spark.sql.rapids.protobuf.{FlattenedSchemaArrays, ProtobufFieldDescriptor,
-  ProtobufMessageDescriptor, ProtobufPlannerOptions}
+import org.apache.spark.sql.rapids.protobuf.{FlattenedSchemaArrays, ProtobufDefaultValue,
+  ProtobufEnumMetadata, ProtobufFieldDescriptor, ProtobufFieldInfo, ProtobufMessageDescriptor,
+  ProtobufPlannerOptions, ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
 class ProtobufExprShimsSuite extends AnyFunSuite {
@@ -110,20 +113,78 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       Seq("foo"))
   }
 
-  test("compat rejects descriptor fields missing from the Spark schema") {
-    // Spark drops fields of empty message types, but still validates them when parsing.
-    val descriptor = new ProtobufMessageDescriptor {
+  private def fakeMessage(fields: Seq[ProtobufFieldDescriptor]): ProtobufMessageDescriptor =
+    new ProtobufMessageDescriptor {
       def syntax: String = "PROTO2"
-      def findField(name: String): Option[ProtobufFieldDescriptor] = None
-      def fieldNames: Seq[String] = Seq("id", "empty")
+      def findField(name: String): Option[ProtobufFieldDescriptor] = fields.find(_.name == name)
+      def fieldNames: Seq[String] = fields.map(_.name)
     }
+
+  private def fakeField(
+      fieldName: String,
+      number: Int,
+      typeName: String,
+      nested: Option[ProtobufMessageDescriptor] = None): ProtobufFieldDescriptor =
+    new ProtobufFieldDescriptor {
+      def name: String = fieldName
+      def fieldNumber: Int = number
+      def protoTypeName: String = typeName
+      def isRepeated: Boolean = false
+      def isRequired: Boolean = false
+      def isInOneof: Boolean = false
+      def explicitDefaultValue: Either[String, Option[ProtobufDefaultValue]] = Right(None)
+      def enumMetadata: Option[ProtobufEnumMetadata] = None
+      def messageDescriptor: Option[ProtobufMessageDescriptor] = nested
+      def referencedTypeSyntax: Option[String] = nested.map(_.syntax)
+    }
+
+  private val emptyMessageField = fakeField("empty", 2, "MESSAGE", Some(fakeMessage(Nil)))
+
+  test("compat keeps empty-message fields missing from the Spark schema") {
+    // Spark drops fields of empty message types, but still validates them when parsing.
+    val descriptor = fakeMessage(Seq(fakeField("id", 1, "INT32"), emptyMessageField))
     val schema = StructType(Seq(StructField("id", IntegerType)))
-    assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(
-      schema, descriptor, "protobuf field 'child'") ==
-      Left("protobuf field 'child' has fields missing from the Spark schema: empty"))
-    assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(
+
+    val hidden = SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      schema, descriptor, "root message")
+
+    assert(hidden.map(_.map(_.name)) == Right(Seq("empty")))
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
       schema.add("empty", StructType(Seq(StructField("x", IntegerType)))), descriptor,
-      "root message").isRight)
+      "root message") == Right(Seq.empty))
+  }
+
+  test("compat rejects other descriptor fields missing from the Spark schema") {
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("name", 2, "STRING"),
+      fakeField("child", 3, "MESSAGE", Some(fakeMessage(Seq(fakeField("x", 1, "INT32")))))))
+    val schema = StructType(Seq(StructField("id", IntegerType)))
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      schema, descriptor, "protobuf field 'child'") ==
+      Left("protobuf field 'child' has fields missing from the Spark schema: name, child"))
+  }
+
+  test("the GPU decoder accepts a schema with a hidden empty-message field") {
+    val idInfo = ProtobufFieldInfo(fieldNumber = 1, protoTypeName = "INT32",
+      sparkType = IntegerType, encoding = ENC_DEFAULT, isSupported = true,
+      unsupportedReason = None, isRequired = false, defaultValue = None, enumMetadata = None)
+    val id = ProtobufSchemaValidator.toFlattenedFieldDescriptor("id",
+      StructField("id", IntegerType), idInfo, parentIdx = -1, depth = 0,
+      outputTypeId = DType.INT32.getTypeId.getNativeId, isOutput = true)
+    val hidden = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(emptyMessageField,
+      parentIdx = -1, depth = 0, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+
+    val flatFields = (id, hidden) match {
+      case (Right(idField), Right(hiddenField)) => Array(idField, hiddenField)
+      case other => fail(s"unexpected planning failure: $other")
+    }
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields)
+
+    assert(arrays.isOutput.toSeq == Seq(true, false))
+    // The JNI constructor rejects schemas the decoder cannot run.
+    assert(arrays.toJniDescriptor.numFields() == 2)
   }
 
   private def twoFieldSchemaArrays(): FlattenedSchemaArrays = FlattenedSchemaArrays(

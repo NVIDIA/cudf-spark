@@ -41,6 +41,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private val ProtobufDataToCatalystClassName =
     "org.apache.spark.sql.protobuf.ProtobufDataToCatalyst"
 
+  private[this] val proto2Syntax = "PROTO2"
+
   /** Option keys whose semantics the GPU decoder handles. */
   val SupportedOptions: Set[String] = Set("enums.as.ints", "mode")
 
@@ -112,16 +114,30 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
   /**
    * Spark drops empty-message fields from its schema but still checks their presence and
-   * encoding, which the GPU decoder cannot do without them.
+   * encoding, which the GPU decoder cannot do without them. Returns those fields so the planner
+   * can decode them without returning them; any other omission falls back to the CPU.
    */
-  def checkNoFieldsMissingFromSchema(
+  def hiddenFieldsMissingFromSchema(
       schema: StructType,
       desc: ProtobufMessageDescriptor,
-      location: String): Either[String, Unit] = {
-    val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
-    Either.cond(omitted.isEmpty, (),
-      s"$location has fields missing from the Spark schema: ${omitted.mkString(", ")}")
-  }
+      location: String): Either[String, Seq[ProtobufFieldDescriptor]] =
+    Try {
+      val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
+      val (hidden, unsupported) = omitted.partition(emptyMessageField(desc, _).isDefined)
+      Either.cond(unsupported.isEmpty, hidden.flatMap(emptyMessageField(desc, _)),
+        s"$location has fields missing from the Spark schema: ${unsupported.mkString(", ")}")
+    }.toEither.left.map { t =>
+      s"Failed to read protobuf metadata for $location: ${t.getMessage}"
+    }.flatMap(identity)
+
+  /** A proto2 message field without declared fields, which Spark cannot represent. */
+  private def emptyMessageField(
+      desc: ProtobufMessageDescriptor,
+      name: String): Option[ProtobufFieldDescriptor] =
+    desc.findField(name).filter { fd =>
+      fd.protoTypeName == "MESSAGE" && !fd.isInOneof &&
+        fd.messageDescriptor.exists(m => m.fieldNames.isEmpty && m.syntax == proto2Syntax)
+    }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */
   def resolveMessageDescriptor(

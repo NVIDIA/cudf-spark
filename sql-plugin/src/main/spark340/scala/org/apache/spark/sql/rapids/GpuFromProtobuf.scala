@@ -42,8 +42,10 @@ import org.apache.spark.sql.types._
  * supported.
  *
  * The schema uses the JNI flattened representation: nested message fields follow their parent
- * entry and point to it through parentIndices. The planner decodes and returns every field, so
- * every entry has isOutput == true.
+ * entry and point to it through parentIndices. The planner returns every field of the Spark
+ * schema, and message fields Spark cannot represent carry isOutput == false so that they are
+ * parsed and validated; the decoder returns those as all-null columns, which this expression
+ * drops to match the Spark schema.
  *
  * @param decodedSchema Spark output schema
  * @param schema Flattened JNI schema; callers must not mutate its arrays after construction.
@@ -82,7 +84,28 @@ case class GpuFromProtobuf(
       case e: CudfException if failOnErrors =>
         throw QueryExecutionErrors.malformedProtobufMessageDetectedInMessageParsingError(e)
     }
-    if (malformedRowsAsNullFields) restoreInputValidity(decoded, input.getBase) else decoded
+    val visible = dropHiddenColumns(decoded)
+    if (malformedRowsAsNullFields) restoreInputValidity(visible, input.getBase) else visible
+  }
+
+  /**
+   * The decoder returns an all-null column for every hidden field, and the planner appends those
+   * fields after the Spark schema, so the trailing columns have to be dropped here.
+   * Takes ownership of the decoded column.
+   */
+  private def dropHiddenColumns(decoded: cudf.ColumnVector): cudf.ColumnVector = {
+    val visibleFields = decodedSchema.length
+    if (decoded.getNumChildren == visibleFields) {
+      decoded
+    } else {
+      withResource(decoded) { _ =>
+        withResource((0 until visibleFields).safeMap(decoded.getChildColumnView)) { children =>
+          withResource(ColumnView.makeStructView(decoded.getRowCount, children: _*)) { struct =>
+            struct.mergeAndSetValidity(BinaryOp.BITWISE_AND, decoded)
+          }
+        }
+      }
+    }
   }
 
   // Building a struct null mask nulls its fields too, so malformed rows already have only null

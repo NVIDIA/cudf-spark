@@ -31,7 +31,7 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
 import org.apache.spark.sql.rapids.protobuf.{FlattenedFieldDescriptor, FlattenedSchemaArrays,
-  ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
+  ProtobufFieldDescriptor, ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
   ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
@@ -85,6 +85,10 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
         }
 
         private def planGpuDecode(schema: StructType): Either[String, Unit] = for {
+          // Spark returns an empty schema when it cannot represent any field of the message,
+          // and the decoder cannot build a struct column without children.
+          _ <- Either.cond(schema.fields.nonEmpty, (),
+            "from_protobuf without any field in the Spark schema is not supported on GPU")
           exprInfo <- SparkProtobufCompat.extractExprInfo(e)
           plannerOptions <- SparkProtobufCompat.parsePlannerOptions(exprInfo.options)
           _ <- checkSupportedOptions(exprInfo.options)
@@ -143,15 +147,41 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             if (pathPrefix.isEmpty) "root message" else s"protobuf field '$pathPrefix'"
           val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
           for {
-            _ <- SparkProtobufCompat.checkNoFieldsMissingFromSchema(schema, msgDesc, location)
+            hidden <- SparkProtobufCompat.hiddenFieldsMissingFromSchema(schema, msgDesc, location)
+            // A hidden field decodes to an all-null column that GpuFromProtobuf drops from the
+            // top-level struct, so only the root message can hide a field for now.
+            _ <- Either.cond(hidden.isEmpty || parentIdx < 0, (),
+              s"$location has fields missing from the Spark schema: " +
+                hidden.map(_.name).mkString(", "))
             fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
               schema, msgDesc, enumsAsInts, messageName)
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
-            result <- schema.fields.foldLeft(empty) { (fields, sf) =>
+            outputFields <- schema.fields.foldLeft(empty) { (fields, sf) =>
               fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
                 enumsAsInts, parentIdx, depth, pathOf(sf.name), _))
             }
+            result <- flattenHiddenFields(hidden, depth, outputFields)
           } yield result
+        }
+
+        /**
+         * Appends the message fields Spark leaves out of its schema, so that the decoder parses
+         * and validates them. They go last, because GpuFromProtobuf drops the trailing columns
+         * the decoder returns for them.
+         */
+        private def flattenHiddenFields(
+            hidden: Seq[ProtobufFieldDescriptor],
+            depth: Int,
+            flatFields: Vector[FlattenedFieldDescriptor])
+            : Either[String, Vector[FlattenedFieldDescriptor]] = {
+          val start: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
+          hidden.foldLeft(start) { (fields, fieldDesc) =>
+            fields.flatMap { current =>
+              ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(fieldDesc, parentIdx = -1,
+                depth = depth,
+                outputTypeId = DType.STRUCT.getTypeId.getNativeId).map(current :+ _)
+            }
+          }
         }
 
         private def flattenField(

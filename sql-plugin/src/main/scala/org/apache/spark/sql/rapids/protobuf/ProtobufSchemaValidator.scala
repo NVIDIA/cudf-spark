@@ -76,6 +76,36 @@ object ProtobufSchemaValidator {
   }
 
   /**
+   * Builds a parse-only entry for a protobuf message field that Spark cannot represent.
+   * The decoder validates the field like any other one, but leaves it out of the output.
+   */
+  def toHiddenMessageFieldDescriptor(
+      fieldDescriptor: ProtobufFieldDescriptor,
+      parentIdx: Int,
+      depth: Int,
+      outputTypeId: Int): Either[String, FlattenedFieldDescriptor] =
+    ProtobufSchemaExtractor.getWireType(fieldDescriptor.protoTypeName, ENC_DEFAULT).map {
+      wireType =>
+        FlattenedFieldDescriptor(
+          fieldNumber = fieldDescriptor.fieldNumber,
+          parentIdx = parentIdx,
+          depth = depth,
+          wireType = wireType,
+          outputTypeId = outputTypeId,
+          encoding = ENC_DEFAULT,
+          isRepeated = fieldDescriptor.isRepeated,
+          isRequired = fieldDescriptor.isRequired,
+          hasDefaultValue = false,
+          isOutput = false,
+          defaultInt = 0L,
+          defaultFloat = 0.0,
+          defaultBool = false,
+          defaultString = null,
+          enumValidValues = null,
+          enumNames = null)
+    }
+
+  /**
    * Transposes fields into JNI argument arrays in the same order, without validation.
    * Nested payload arrays are shared with the input descriptors.
    */

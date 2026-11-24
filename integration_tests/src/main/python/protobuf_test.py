@@ -19,6 +19,7 @@ import struct
 import pytest
 
 from asserts import (
+    assert_cpu_and_gpu_are_equal_collect_with_capture,
     assert_gpu_and_cpu_are_equal_collect,
     assert_gpu_and_cpu_error,
     assert_gpu_fallback_collect,
@@ -879,6 +880,30 @@ def test_from_protobuf_max_nesting_depth(local_tmp_path, from_protobuf_fn):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+# A missing required field is malformed input, which the malformed-input tests already cover.
+@pytest.mark.parametrize("label,present", [
+    ("optional", True), ("optional", False), ("required", True)], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_empty_message_field(
+        local_tmp_path, from_protobuf_fn, label, present):
+    """Spark drops empty-message fields from its schema, but the decoder still parses them."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, f"empty_field_{label}_{present}.desc",
+        lambda spark: _build_empty_message_field_descriptor_set_bytes(spark, label))
+    row = _encode_varint_field(1, 7)
+    if present:
+        row += _encode_length_delimited_field(2, b"")
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame([(0, row), (1, None)], schema="idx int, bin binary")
+        decoded = _decode(from_protobuf_fn, desc, "Root")
+        return df.select("idx", decoded.alias("decoded"))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuFromProtobuf",
+        non_exist_classes="ProtobufDataToCatalyst")
+
+
 @ignore_order(local=True)
 def test_from_protobuf_all_null_input(local_tmp_path, from_protobuf_fn):
     desc = _setup_protobuf_desc(
@@ -1326,6 +1351,20 @@ def _build_empty_message_field_descriptor_set_bytes(spark, label):
     ])
 
 
+def _build_nested_empty_message_field_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", type_name=".test.Child"),
+        ]),
+    ])
+
+
 def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None):
     return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id)
 
@@ -1353,15 +1392,13 @@ _fallback_cases = [
     _fallback_case("nested_oneof_member", _build_oneof_descriptor_set_bytes, "OuterChoice",
                    _encode_length_delimited_field(1, _oneof_child) + _encode_varint_field(2, 9),
                    ["child.int_value", "sibling"]),
-    # Spark drops empty-message fields from its schema but still validates them.
-    _fallback_case("empty_message_field_optional",
-                   lambda spark: _build_empty_message_field_descriptor_set_bytes(
-                       spark, "optional"),
-                   "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"")),
-    _fallback_case("empty_message_field_required",
-                   lambda spark: _build_empty_message_field_descriptor_set_bytes(
-                       spark, "required"),
-                   "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"")),
+    # A nested message cannot hide a field, because the JNI schema requires a nested field to
+    # carry the output flag of its parent.
+    _fallback_case("nested_empty_message_field",
+                   _build_nested_empty_message_field_descriptor_set_bytes,
+                   "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(
+                       2, _encode_varint_field(1, 9) +
+                       _encode_length_delimited_field(2, b""))),
     # Groups decode to structs like messages, but use their own wire types.
     _fallback_case("group_field", _build_group_descriptor_set_bytes, "WithGroup",
                    _encode_varint_field(1, 7) + _encode_tag(2, 3) + _encode_varint_field(1, 9) +
