@@ -47,13 +47,23 @@ def tracked_coordinates(pom):
     return coordinates
 
 
-def discard_restored_snapshots(pom, home):
+def discard_restored_snapshots(pom, home, current="", prefix="", restored=""):
+    # Only keys in our verified format carry provenance. The digest covers the
+    # coordinate as well as the publication, so it cannot match a different GAV.
+    fingerprint = r"s1(?:\.[0-9a-f]{64}){2,3}"
+    previous = re.fullmatch(re.escape(prefix) + f"({fingerprint})-" +
+                            r"[0-9a-f]{64}-(?:verify|premerge-[A-Za-z0-9._+-]+-[0-9a-f]{64})", restored)
+    proven = set(previous[1].split(".")[1:]) if prefix and previous else set()
+    coordinates = tracked_coordinates(pom)
+    current_ids = current.split(".")[1:] if re.fullmatch(fingerprint, current) else []
     group = home.resolve() / ".m2/repository/com/nvidia"
-    for artifact, version in tracked_coordinates(pom):
+    for index, (artifact, version) in enumerate(coordinates):
         if version.endswith("-SNAPSHOT"):
             directory = group / artifact / version
             if directory.resolve() != directory:
                 raise ValueError(f"Refusing to clean a symlinked Maven path: {directory}")
+            if len(current_ids) == len(coordinates) and current_ids[index] in proven:
+                continue
             if directory.exists():
                 if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
                     raise ValueError("Refusing to clean restored SNAPSHOTs on a non-disposable runner")
@@ -63,15 +73,17 @@ def discard_restored_snapshots(pom, home):
 def dependency_key(pom, resolve=snapshot_candidates):
     snapshots = next((repo.findtext("{*}url") for repo in pom.findall("{*}repositories/{*}repository")
                       if repo.findtext("{*}id") == "snapshots-repo"), None)
-    identities = []
+    # The slots are JNI, private, and optional history-metrics, in tracked_coordinates order.
+    identities = ["s1"]
     for artifact, version in tracked_coordinates(pom):
         candidates = []
         if version.endswith("-SNAPSHOT"):
             if not snapshots:
                 raise ValueError(f"No snapshots-repo configured for {artifact}:{version}")
             candidates = resolve(snapshots, artifact, version)
-        identities.append([artifact, version, candidates])
-    return hashlib.sha256(json.dumps(identities).encode()).hexdigest()
+        publication = [artifact, version, snapshots if candidates else None, candidates]
+        identities.append(hashlib.sha256(json.dumps(publication).encode()).hexdigest())
+    return ".".join(identities)
 
 
 if __name__ == "__main__":
@@ -86,7 +98,9 @@ if __name__ == "__main__":
                         help="Keep the effective POM used for fingerprinting for use after restore")
     args = parser.parse_args()
     if args.discard_restored:
-        discard_restored_snapshots(ET.parse(args.discard_restored).getroot(), Path.home())
+        discard_restored_snapshots(ET.parse(args.discard_restored).getroot(), Path.home(),
+                                   os.environ.get("EXPECTED", ""), os.environ.get("CACHE_PREFIX", ""),
+                                   os.environ.get("RESTORED_KEY", ""))
         sys.exit(0)
     if args.confirm_snapshots:
         model, expected = args.confirm_snapshots

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from xml.etree import ElementTree as ET
 
 
 WARMER = Path(__file__).resolve().with_name("populate-cache.sh")
@@ -136,8 +137,13 @@ done
                     plugins = calls[0]
                     self.assertIn("-N", plugins)
                     self.assertIn("help:evaluate", plugins)
+                    pom = ROOT / ("pom.xml" if scala == "2.12" else "scala2.13/pom.xml")
+                    has_zstd = ET.parse(pom).find("{*}properties/{*}zstd-jni.version") is not None
                     self.assert_pinned_plugin(plugins, "maven-dependency-plugin",
-                                              "dist/build/package-parallel-worlds.py", "get")
+                                              "dist/build/package-parallel-worlds.py", "get",
+                                              "get" if has_zstd else "help")
+                    self.assertEqual("-Dartifact=com.github.luben:zstd-jni:${zstd-jni.version}" in plugins, has_zstd)
+                    self.assertEqual("-Dtransitive=false" in plugins, has_zstd)
                     self.assertEqual("wrapper:wrapper" in plugins, scala == "2.12")
                     self.assertEqual("source:help" in plugins, scala == "2.13")
                     if scala == "2.13":
@@ -148,12 +154,27 @@ done
                         self.assertEqual(generated_in.parent.resolve(), self.scratch.resolve())
                         self.assertFalse(generated_in.exists())
 
-    def assert_pinned_plugin(self, goals, artifact, consumer, consumer_goal):
+    def assert_pinned_plugin(self, goals, artifact, consumer, consumer_goal, warm_goal="help"):
         prefix = f"org.apache.maven.plugins:{artifact}:"
-        matches = [goal for goal in goals if goal.startswith(prefix) and goal.endswith(":help")]
+        matches = [goal for goal in goals if goal.startswith(prefix) and goal.endswith(":" + warm_goal)]
         self.assertEqual(len(matches), 1, matches)
         coordinate = matches[0].rsplit(":", 1)[0]
         self.assertIn(f"{coordinate}:{consumer_goal}", (ROOT / consumer).read_text())
+
+    def test_older_pom_without_zstd_does_not_fetch_it(self):
+        pom = self.workspace / "pom.xml"
+        model = ET.parse(pom)
+        properties = model.find("{*}properties")
+        zstd = properties.find("{*}zstd-jni.version")
+        if zstd is not None:
+            properties.remove(zstd)
+        pom.unlink()  # Replace only the fixture symlink, not the repository POM.
+        ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
+        model.write(pom)
+        _, calls = self.warm("2.12", "wrapper:wrapper", premerge=False)
+        self.assert_pinned_plugin(calls[0], "maven-dependency-plugin",
+                                  "dist/build/package-parallel-worlds.py", "get")
+        self.assertFalse(any("zstd-jni" in arg for arg in calls[0]))
 
     def test_failed_resolve_or_copy_does_not_report_a_complete_cache(self):
         versions = self.build_versions("pom.xml")

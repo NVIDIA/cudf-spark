@@ -14,6 +14,9 @@ inputs:
   premerge:
     description: Seed premerge runtime dependencies; an existing full cache is not downloaded
     default: 'false'
+  key-only:
+    description: Return a ready key without downloading its archive; on a miss, restore and warm as usual
+    default: 'false'
 outputs:
   key:
     description: Exact cache key for downstream verification jobs
@@ -43,18 +46,32 @@ runs:
         echo "model=$model" >> "$GITHUB_OUTPUT"
         bash "$GITHUB_ACTION_PATH/cache-keys.sh" "$java_major" "$snapshot_hash" >> "$GITHUB_OUTPUT"
 
-    - name: Check for an existing premerge seed
-      if: inputs.premerge == 'true'
-      id: existing
+    - name: Look up a ready cache
+      if: inputs.premerge == 'true' || inputs.key-only == 'true'
+      id: lookup
       continue-on-error: true
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.m2/repository
         key: ${{ steps.key.outputs.full }}
         lookup-only: true
+        restore-keys: |
+          ${{ steps.key.outputs.stem }}-premerge-
+          ${{ steps.key.outputs.stem }}-verify
+
+    - name: Check whether the matched key is sufficient
+      id: existing
+      if: steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-matched-key != ''
+      shell: bash
+      env:
+        STEM: ${{ steps.key.outputs.stem }}
+        FULL: ${{ steps.key.outputs.full }}
+        MATCH: ${{ steps.lookup.outputs.cache-matched-key }}
+        PREMERGE: ${{ inputs.premerge }}
+      run: bash "$GITHUB_ACTION_PATH/cache-target.sh" >> "$GITHUB_OUTPUT"
 
     - name: Restore Maven dependencies
-      if: steps.existing.outputs.cache-hit != 'true'
+      if: steps.existing.outputs.ready != 'true'
       id: restore
       continue-on-error: true
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -78,29 +95,26 @@ runs:
       env:
         STEM: ${{ steps.key.outputs.stem }}
         FULL: ${{ steps.key.outputs.full }}
-        MATCH: ${{ steps.existing.outputs.cache-matched-key || (steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key) || '' }}
+        MATCH: ${{ (steps.existing.outputs.ready == 'true' && steps.existing.outputs.key) || (steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key) || '' }}
         PREMERGE: ${{ inputs.premerge }}
       run: bash "$GITHUB_ACTION_PATH/cache-target.sh" >> "$GITHUB_OUTPUT"
-
-    - name: Discard SNAPSHOTs from an older Maven cache
-      if: >-
-        steps.restore.outputs.cache-matched-key &&
-        !startsWith(steps.restore.outputs.cache-matched-key, steps.key.outputs.snapshot-prefix)
-      shell: bash
-      env:
-        MODEL: ${{ steps.key.outputs.model }}
-      # Maven -U can silently use an older local artifact when metadata is unavailable.
-      run: python3 "$GITHUB_ACTION_PATH/dependency-key.py" --discard-restored "$MODEL"
 
     - name: Warm missing dependencies
       id: warm
       if: steps.target.outputs.ready != 'true' && (inputs.premerge == 'true' || steps.restore.outcome != 'failure')
       shell: bash
       env:
+        MODEL: ${{ steps.key.outputs.model }}
+        EXPECTED: ${{ steps.key.outputs.snapshot-hash }}
+        CACHE_PREFIX: ${{ steps.key.outputs.prefix }}
+        RESTORED_KEY: ${{ steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key || '' }}
         SCALA_VER: ${{ inputs.scala }}
         WARM_PREMERGE: ${{ inputs.premerge }}
         WARM_TIMEOUT: ${{ inputs.premerge == 'true' && '55m' || '30m' }}
-      run: timeout "$WARM_TIMEOUT" "$GITHUB_ACTION_PATH/populate-cache.sh"
+      run: |
+        # Maven -U can fall back to stale local JARs when upstream is unavailable.
+        python3 "$GITHUB_ACTION_PATH/dependency-key.py" --discard-restored "$MODEL"
+        timeout "$WARM_TIMEOUT" "$GITHUB_ACTION_PATH/populate-cache.sh"
 
     - name: Confirm upstream SNAPSHOTs did not change during warm-up
       id: confirm

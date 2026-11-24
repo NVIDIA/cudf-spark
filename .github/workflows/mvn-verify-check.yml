@@ -67,6 +67,7 @@ jobs:
         continue-on-error: true
         with:
           scala: '2.12'
+          key-only: 'true'
       - &cold-after-prepare
         name: Ignore failed Maven cache preparation
         if: ${{ !cancelled() && steps.maven-cache.outcome == 'failure' }}
@@ -182,6 +183,7 @@ jobs:
         continue-on-error: true
         with:
           scala: '2.13'
+          key-only: 'true'
       - *cold-after-prepare
       - name: all 213 shim verions
         id: all213ShimVersionsStep

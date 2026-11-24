@@ -92,23 +92,62 @@ class DependencyKeyTest(unittest.TestCase):
             group = home / ".m2/repository/com/nvidia"
             group.parent.mkdir(parents=True)
             group.symlink_to(outside, target_is_directory=True)
+            current = helper["dependency_key"](model(), lambda *_: "unchanged")
+            matching_key = "scope-" + current + "-" + "a" * 64 + "-verify"
             with self.assertRaisesRegex(ValueError, "symlinked Maven path"):
-                cleanup(model(), home)
+                cleanup(model(), home, current, "scope-", matching_key)
             self.assertTrue(marker.exists())
+
+    def test_restore_keeps_only_individually_verified_snapshots(self):
+        pom = model(private="26.12.0-SNAPSHOT")
+        ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "26.12.0"
+        publications = {"jni": "jni-1", "private_2.13": "private-1"}
+        def key():
+            return helper["dependency_key"](pom, lambda repo, artifact, version: publications[artifact])
+
+        before = key()
+        publications["private_2.13"] = "private-2"
+        after = key()
+        prefix = "spark-maven-Linux-X64-jdk17-2.13-26.12-"
+        stem = prefix + before + "-" + "a" * 64
+        full = stem + "-premerge-4.1.2-" + "b" * 64
+        self.assertLessEqual(len(full), 512)
+        for restored, keep_jni in [(full, True), (stem + "-verify", True), ("", False),
+                                   (prefix + "c" * 64 + "-" + "a" * 64 + "-verify", False),
+                                   (stem + "-malformed", False), ("wrong-" + full, False)]:
+            with self.subTest(key=restored), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                group = home / ".m2/repository/com/nvidia"
+                jni = group / "jni/26.12.0-SNAPSHOT/cuda12.jar"
+                private = group / "private_2.13/26.12.0-SNAPSHOT/spark405.jar"
+                pinned = group / "cudf-spark-history-metrics-local/26.12.0/fixed.jar"
+                for jar in (jni, private, pinned):
+                    jar.parent.mkdir(parents=True)
+                    jar.write_bytes(b"original JAR")
+                with patch.dict(os.environ, RUNNER_ENVIRONMENT="github-hosted"):
+                    helper["discard_restored_snapshots"](pom, home, after, prefix, restored)
+                if keep_jni:
+                    self.assertEqual(jni.read_bytes(), b"original JAR")
+                else:
+                    self.assertFalse(jni.exists())
+                self.assertFalse(private.parent.exists())
+                self.assertEqual(pinned.read_bytes(), b"original JAR")
 
     def test_restore_target_and_completeness(self):
         script = Path(__file__).with_name("cache-target.sh")
-        for full in (False, True):
-            for match in ("", "old-premerge-current", "v-verify", "v-premerge-old", "v-premerge-current"):
+        verify = "v-verify"
+        current = "v-premerge-current"
+        previous_fixture = "v-premerge-old"
+        for full, usable in ((False, {verify, previous_fixture, current}), (True, {current})):
+            for match in ("", "old-verify", "old-premerge-current", "v-verify-extra", "v-premerge-",
+                          verify, previous_fixture, current):
                 with self.subTest(premerge=full, match=match):
-                    env = dict(os.environ, STEM="v", FULL="v-premerge-current", MATCH=match,
+                    env = dict(os.environ, STEM="v", FULL=current, MATCH=match,
                                PREMERGE=str(full).lower())
                     result = subprocess.check_output(["bash", str(script)], env=env, text=True)
                     outputs = dict(line.split("=", 1) for line in result.splitlines())
-                    expected = "v-premerge-current" if full else (
-                        match if match.startswith("v-premerge-") else "v-verify")
-                    self.assertEqual(outputs.get("ready") == "true", match == expected)
-                    self.assertEqual(outputs["key"], expected)
+                    self.assertEqual(outputs.get("ready") == "true", match in usable)
+                    self.assertEqual(outputs["key"], match if match in usable else (current if full else verify))
 
     def test_pins_do_not_require_snapshot_service(self):
         key = helper["dependency_key"]

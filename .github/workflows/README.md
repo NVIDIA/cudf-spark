@@ -20,8 +20,9 @@ one command, pass `-gs .github/actions/maven-cache/settings.xml` from the repo r
 Relevant pushes warm `main` and release branches; a daily check on `main` also
 detects upstream SNAPSHOTs published without a repository change.
 
-The key separates branch, platform, JDK and Scala version. JNI, private and history-metrics SNAPSHOTs
-track the published classifier versions; fixed versions use their coordinates.
+The key separates branch, platform, compiler JDK and Scala version. Changing only
+the test JVM does not require warming Maven again. JNI, private and history-metrics
+SNAPSHOTs track their own publications; fixed versions use their coordinates.
 PRs can reuse their target branch's cache. A copied-branch workflow can pass
 `base-branch` to compute the same key, but GitHub's cache visibility still applies:
 a push on a sibling branch cannot read a release-only cache by naming it.

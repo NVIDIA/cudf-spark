@@ -6,7 +6,7 @@ set -eu
 key="$STEM-verify"
 if [[ $PREMERGE == true ]]; then
     key="$FULL"
-elif [[ $MATCH == "$STEM-premerge-"* ]]; then
+elif [[ $MATCH == "$STEM-premerge-"?* ]]; then
     # Verify does not depend on which runtime fixtures were included.
     key="$MATCH"
 fi

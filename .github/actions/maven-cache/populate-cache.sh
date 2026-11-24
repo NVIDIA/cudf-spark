@@ -35,9 +35,14 @@ read -r -a buildvers <<< "${versions//,/ }"
 (( ${#buildvers[@]} > 0 )) || { echo "No build versions found in $pom" >&2; exit 1; }
 
 warm_cli_plugins() (
-    # dist/build/package-parallel-worlds.py pins the dependency plugin for its standalone get goal.
-    goals=(help:evaluate -Dexpression=project.version
-           org.apache.maven.plugins:maven-dependency-plugin:2.10:help)
+    goals=(help:evaluate -Dexpression=project.version)
+    local dependency_plugin=org.apache.maven.plugins:maven-dependency-plugin:2.10
+    if grep -Fq '<zstd-jni.version>' "$pom"; then
+        # The dist packager copies Zstd separately from its dependency graph.
+        goals+=("$dependency_plugin:get" "-Dartifact=com.github.luben:zstd-jni:\${zstd-jni.version}" -Dtransitive=false)
+    else
+        goals+=("$dependency_plugin:help")
+    fi
     if [[ "$SCALA_VER" == 2.12 ]]; then
         # The install matrix generates a wrapper. Running the goal also resolves its scripts ZIP.
         wrapper_dir=$(mktemp -d "${TMPDIR:-/tmp}/maven-wrapper.XXXXXXXX") || exit $?
