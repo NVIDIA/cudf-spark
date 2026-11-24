@@ -214,7 +214,7 @@ object GpuBatchFusion extends Logging {
               val inputs = members.map(inputFor)
               if (inputs.forall(_.isDefined)) {
                 val cudfInputs = inputs.map(_.get)
-                val results = g.receiver.batchEval(exprMembers, cudfInputs).toArray
+                val results = g.receiver.batchEval(exprMembers.toSeq, cudfInputs.toSeq).toArray
                 g.members.map(_._1).zip(results).zipWithIndex.foreach {
                   case ((i, col), ridx) =>
                     try {
