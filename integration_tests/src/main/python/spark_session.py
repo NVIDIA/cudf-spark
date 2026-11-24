@@ -53,27 +53,35 @@ def _legacy_plugin_conf_key(key):
     return canonical
 
 
-def _with_plugin_conf_aliases(conf):
-    canonical_values = {}
-    for key, value in conf.items():
-        if not (key.startswith(_canonical_plugin_conf_prefix) or
-                key.startswith(_legacy_plugin_conf_prefix)):
-            continue
-        canonical = _canonical_plugin_conf_key(key)
-        if key.startswith(_canonical_plugin_conf_prefix) or canonical not in canonical_values:
-            canonical_values[canonical] = value
-
-    resolved = dict(conf)
-    for canonical, value in canonical_values.items():
-        resolved[canonical] = value
-        resolved[_legacy_plugin_conf_key(canonical)] = value
-    return resolved
+def _is_plugin_conf_key(key):
+    return (key.startswith(_canonical_plugin_conf_prefix) or
+            key.startswith(_legacy_plugin_conf_prefix))
 
 
-def _set_plugin_conf(conf, key, value):
+def _plugin_conf_alias(key):
     canonical = _canonical_plugin_conf_key(key)
-    conf[canonical] = value
-    conf[_legacy_plugin_conf_key(canonical)] = value
+    return _legacy_plugin_conf_key(canonical) if key == canonical else canonical
+
+
+def _merge_plugin_confs(base, overrides):
+    """Merge overrides into base so each plugin setting keeps only the name a test chose.
+
+    An override replaces both aliases of its setting in base. When overrides itself names both
+    aliases, both are kept so the plugin resolves the conflict. Keys are never rewritten, so a
+    later spark.conf.set of the same name inside a test still takes effect.
+    """
+    merged = dict(base)
+    for key in overrides:
+        if _is_plugin_conf_key(key) and _plugin_conf_alias(key) not in overrides:
+            merged.pop(_plugin_conf_alias(key), None)
+    merged.update(overrides)
+    return merged
+
+
+def _force_plugin_conf(conf, key, value):
+    """Set a harness-owned plugin setting under key, dropping any alias a test supplied."""
+    conf.pop(_plugin_conf_alias(key), None)
+    conf[key] = value
 
 
 def _get_plugin_conf(conf, key, default=None):
@@ -108,11 +116,15 @@ def _set_all_confs(conf):
     if inject_oom:
         _spark.conf.set("spark.rapids.sql.test.injectRetryOOM",
                          inject_oom.args[0] if len(inject_oom.args) > 0 else True)
-    newconf.update(conf)
-    newconf = _with_plugin_conf_aliases(newconf)
+    newconf = _merge_plugin_confs(newconf, conf)
     for key, value in newconf.items():
         if _spark.conf.get(key, None) != value:
             _spark.conf.set(key, value)
+    # Remove a stale alias left in the session so it cannot shadow the name set above.
+    for key in newconf:
+        alias = _plugin_conf_alias(key) if _is_plugin_conf_key(key) else None
+        if alias and alias not in newconf and _spark.conf.get(alias, None) is not None:
+            _spark.conf.unset(alias)
 
 def reset_spark_session_conf():
     """Reset all of the configs for a given spark session."""
@@ -190,7 +202,7 @@ def _add_job_description(conf):
 def with_cpu_session(func, conf={}):
     """Run func that takes a spark session as input with the given configs set on the CPU."""
     copy = dict(conf)
-    _set_plugin_conf(copy, 'spark.cudf.sql.enabled', 'false')
+    _force_plugin_conf(copy, 'spark.rapids.sql.enabled', 'false')
     return with_spark_session(func, conf=copy)
 
 def with_gpu_session(func, conf={}):
@@ -200,16 +212,17 @@ def with_gpu_session(func, conf={}):
     simplest for right now.
     """
     copy = dict(conf)
-    _set_plugin_conf(copy, 'spark.cudf.sql.enabled', 'true')
+    # Harness-owned settings use the names that in-test spark.conf.set calls use.
+    _force_plugin_conf(copy, 'spark.rapids.sql.enabled', 'true')
     if is_allowing_any_non_gpu():
-        _set_plugin_conf(copy, 'spark.cudf.sql.test.enabled', 'false')
+        _force_plugin_conf(copy, 'spark.rapids.sql.test.enabled', 'false')
     else:
-        _set_plugin_conf(copy, 'spark.cudf.sql.test.enabled', 'true')
-        _set_plugin_conf(
-            copy, 'spark.cudf.sql.test.allowedNonGpu', ','.join(get_non_gpu_allowed()))
+        _force_plugin_conf(copy, 'spark.rapids.sql.test.enabled', 'true')
+        _force_plugin_conf(
+            copy, 'spark.rapids.sql.test.allowedNonGpu', ','.join(get_non_gpu_allowed()))
 
-    _set_plugin_conf(copy, 'spark.cudf.sql.test.validateExecsInGpuPlan',
-                     ','.join(get_validate_execs_in_gpu_plan()))
+    _force_plugin_conf(copy, 'spark.rapids.sql.test.validateExecsInGpuPlan',
+                       ','.join(get_validate_execs_in_gpu_plan()))
     return with_spark_session(func, conf=copy)
 
 # Compare numeric parts so multi-digit patches sort correctly ("3.5.10" < "3.5.3" as strings).

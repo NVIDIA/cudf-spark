@@ -76,8 +76,8 @@ separate Avro invocation selects `avro_test.py`, so it does not add the twelve A
 path-character cases; nightly jobs with Avro enabled can discover them.
 
 For ordinary remote reads, auto mode requires an explicit startup
-`spark.rapids.perfio.s3.enabled=true/false` or
-`spark.rapids.perfio.gcs.enabled=true/false`, or an explicit `--path_backend`.
+`spark.cudf.perfio.s3.enabled=true/false` or
+`spark.cudf.perfio.gcs.enabled=true/false`, or an explicit `--path_backend`.
 It does not predict an executor's opportunistic defaults from driver classes or runtime
 labels. Expected backends remain independent of the observed task counters.
 Use the existing connector/SDK classpath and credentials for each manual invocation:

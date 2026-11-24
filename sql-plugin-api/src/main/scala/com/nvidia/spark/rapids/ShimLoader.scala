@@ -226,10 +226,7 @@ object ShimLoader {
     // in parallel worlds
     val shimProviderOverrideKey = "spark.cudf.shims-provider-override"
     val shimServiceProviderOverrideClassName = Option(SparkEnv.get) // Spark-less RapidsConf.help
-      .flatMap { env =>
-        env.conf.getOption(shimProviderOverrideKey)
-          .orElse(env.conf.getOption(CudfConfKeys.legacyKey(shimProviderOverrideKey)))
-      }
+      .flatMap(env => Option(CudfConfKeys.get(env.conf, shimProviderOverrideKey)))
     shimServiceProviderOverrideClassName.foreach { shimProviderClass =>
       log.warn(s"Overriding Spark shims provider to $shimProviderClass. " +
         "This may be an untested configuration!")

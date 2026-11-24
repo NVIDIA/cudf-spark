@@ -16,6 +16,7 @@
 package com.nvidia.spark.rapids
 
 import java.io.{File, FileOutputStream}
+import java.lang.ref.WeakReference
 import java.util
 
 import scala.collection.JavaConverters._
@@ -55,8 +56,8 @@ object RapidsConf extends Logging with RapidsConfEntries {
   }
 
   private lazy val registeredConfs = new ListBuffer[ConfEntry[_]]()
-  private val applicationsWarnedAboutLegacyConfs =
-    new util.WeakHashMap[SparkContext, java.lang.Boolean]()
+  // The application already warned about legacy names. One SparkContext is active per JVM.
+  @volatile private var warnedAboutLegacyConfs = new WeakReference[SparkContext](null)
 
   private def register(entry: ConfEntry[_]): Unit = {
     registeredConfs += entry
@@ -66,10 +67,8 @@ object RapidsConf extends Logging with RapidsConfEntries {
     new ConfBuilder(key, register)
   }
 
-  def getOption(conf: SparkConf, key: String): Option[String] = {
-    val canonicalKey = CudfConfKeys.canonicalKey(key)
-    conf.getOption(canonicalKey).orElse(conf.getOption(CudfConfKeys.legacyKey(canonicalKey)))
-  }
+  def getOption(conf: SparkConf, key: String): Option[String] =
+    Option(CudfConfKeys.get(conf, key))
 
   def contains(conf: SparkConf, key: String): Boolean = getOption(conf, key).isDefined
 
@@ -83,16 +82,22 @@ object RapidsConf extends Logging with RapidsConfEntries {
 
   private[rapids] def warnIfLegacyConfs(
       sparkContext: SparkContext,
-      keys: Iterable[String]): Unit = synchronized {
-    val legacyKeys = keys.filter(CudfConfKeys.isLegacy).toSeq.sorted
-    if (legacyKeys.nonEmpty && !applicationsWarnedAboutLegacyConfs.containsKey(sparkContext)) {
-      applicationsWarnedAboutLegacyConfs.put(sparkContext, java.lang.Boolean.TRUE)
-      val replacements = legacyKeys
-        .map(key => s"$key -> ${CudfConfKeys.canonicalKey(key)}")
-        .mkString(", ")
-      logWarning("The spark.rapids.* configuration namespace is deprecated. " +
-        "Use the corresponding spark.cudf.* names instead. " +
-        s"Detected: $replacements")
+      keys: Iterable[String]): Unit = {
+    if (warnedAboutLegacyConfs.get() ne sparkContext) {
+      val legacyKeys = keys.filter(CudfConfKeys.isLegacy)
+      if (legacyKeys.nonEmpty) {
+        synchronized {
+          if (warnedAboutLegacyConfs.get() ne sparkContext) {
+            warnedAboutLegacyConfs = new WeakReference(sparkContext)
+            val replacements = legacyKeys.toSeq.sorted
+              .map(key => s"$key -> ${CudfConfKeys.canonicalKey(key)}")
+              .mkString(", ")
+            logWarning("The spark.rapids.* configuration namespace is deprecated. " +
+              "Use the corresponding spark.cudf.* names instead. " +
+              s"Detected: $replacements")
+          }
+        }
+      }
     }
   }
 
@@ -396,7 +401,13 @@ class RapidsConf(rawConf: Map[String, String]) extends Logging {
 
   warnIfLegacyConfs(rawConf.keys)
 
-  private val conf = CudfConfKeys.withAliases(rawConf.asJava).asScala.toMap
+  private val conf = rawConf
+
+  /** Resolve a plugin key by its canonical name first, then its legacy alias. */
+  private def lookup(key: String): Option[String] = {
+    val canonical = CudfConfKeys.canonicalKey(key)
+    conf.get(canonical).orElse(conf.get(CudfConfKeys.legacyKey(canonical)))
+  }
 
   def this(sqlConf: SQLConf) = {
     this(sqlConf.getAllConfs)
@@ -410,11 +421,13 @@ class RapidsConf(rawConf: Map[String, String]) extends Logging {
     entry.get(conf)
   }
 
-  def getStr(key: String): Option[String] = conf.get(key)
+  def getStr(key: String): Option[String] = lookup(key)
 
-  lazy val rapidsConfMap: util.Map[String, String] = conf.filterKeys { key =>
-    CudfConfKeys.isCanonical(key) || CudfConfKeys.isLegacy(key)
-  }.toMap.asJava
+  lazy val rapidsConfMap: util.Map[String, String] = {
+    val pluginConfs = conf.filterKeys(key =>
+      CudfConfKeys.isCanonical(key) || CudfConfKeys.isLegacy(key)).toMap
+    CudfConfKeys.withAliases(pluginConfs.asJava)
+  }
 
   lazy val metricsLevel: String = get(METRICS_LEVEL)
 
@@ -1216,7 +1229,7 @@ class RapidsConf(rawConf: Map[String, String]) extends Logging {
 
   def isOperatorEnabled(key: String, incompat: Boolean, isDisabledByDefault: Boolean): Boolean = {
     val default = !(isDisabledByDefault || incompat) || (incompat && isIncompatEnabled)
-    conf.get(key).map(toBoolean(_, key)).getOrElse(default)
+    lookup(key).map(toBoolean(_, key)).getOrElse(default)
   }
 
   /**
@@ -1253,14 +1266,14 @@ class RapidsConf(rawConf: Map[String, String]) extends Logging {
 
   private def getOptionalCost(key: String) = {
     // user-provided value takes precedence, then look in defaults map
-    conf.get(key).orElse(optimizerDefaults.get(key)).map(toDouble(_, key))
+    lookup(key).orElse(optimizerDefaults.get(key)).map(toDouble(_, key))
   }
 
   /**
    * To judge whether "key" is explicitly set by the users.
    */
   def isConfExplicitlySet(key: String): Boolean = {
-    conf.contains(key)
+    lookup(key).isDefined
   }
 
   // CPU-GPU Bridge Configuration accessors

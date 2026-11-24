@@ -63,7 +63,7 @@ including when a result from the old attempt arrives late. The error contains on
 Rerun with a new DataFrame, unpersisting a cached one first. Checkpointing before the repartition
 does not avoid the failure, and neither does
 `spark.sql.execution.sortBeforeRepartition`. To avoid GPU round-robin recovery restrictions, set
-[`spark.rapids.sql.partitioning.RoundRobinPartitioning`](additional-functionality/advanced_configs.md#sql.partitioning.RoundRobinPartitioning)
+[`spark.cudf.sql.partitioning.RoundRobinPartitioning`](additional-functionality/advanced_configs.md#sql.partitioning.RoundRobinPartitioning)
 to `false` to run the exchange on the CPU. A query that calls `repartition(n)` can instead
 repartition by columns with `repartition(n, cols)`. Splitting and retrying a batch within the
 original map attempt remains supported.
@@ -79,12 +79,12 @@ the GPU.
 
 For `FLOAT` and `DOUBLE` inputs, `round` and `bround` with a literal scale of zero (including an
 omitted scale) are compatible with Spark and run on the GPU even when
-[`spark.rapids.sql.incompatibleOps.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleOps.enabled)
+[`spark.cudf.sql.incompatibleOps.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleOps.enabled)
 is `false`. `round` uses `HALF_UP` rounding and `bround` uses `HALF_EVEN` rounding; both normalize
 negative zero to positive zero.
 
 At nonzero scales, GPU execution of floating-point `round` and `bround` requires
-`spark.rapids.sql.incompatibleOps.enabled=true`. Their results can be off by more because they can
+`spark.cudf.sql.incompatibleOps.enabled=true`. Their results can be off by more because they can
 enlarge the difference. This happens in cases where a binary floating-point representation cannot exactly
 capture a decimal value. For example `1.025` cannot exactly be represented and ends up being closer
 to `1.02499`. The Spark implementation of `round` converts it first to a decimal value with complex
@@ -336,7 +336,7 @@ ORC writes containing `DATE` columns, including nested `DATE` columns, use the C
 default. The cuDF ORC writer does not record calendar metadata in the file footer, so readers
 can interpret dates before October 15, 1582 incorrectly. Applications that guarantee **every**
 written `DATE` value is on or after October 15, 1582 can set
-`spark.rapids.sql.format.orc.write.dateType.enabled=true` to allow the GPU writer. The plugin
+`spark.cudf.sql.format.orc.write.dateType.enabled=true` to allow the GPU writer. The plugin
 does not inspect values to enforce this guarantee. Keep the default CPU writer if the data may
 include older dates; the opt-in does not add calendar metadata to ORC files. The metadata fix is
 tracked in [cuDF #23794](https://github.com/NVIDIA/cudf/issues/23794).
@@ -429,13 +429,13 @@ If an Iceberg file contains a requested shredded or incompatible Variant layout,
 reader throws `java.lang.UnsupportedOperationException`:
 
 ```text
-GPU Iceberg reader does not support shredded or incompatible Variant input (column: <column>). Expected exactly two REQUIRED BINARY fields named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false and rerun the query to read Variant with the CPU reader.
+GPU Iceberg reader does not support shredded or incompatible Variant input (column: <column>). Expected exactly two REQUIRED BINARY fields named value and metadata. Set spark.cudf.sql.format.iceberg.read.enabled=false and rerun the query to read Variant with the CPU reader.
 ```
 
 Spark may wrap this exception in a task/stage failure or `SparkException`. The query
 fails without an automatic CPU retry. Rerun with
 `spark.sql.variant.allowReadingShredded=true` to keep projected Iceberg Variant scans
-on CPU, or set `spark.rapids.sql.format.iceberg.read.enabled=false` to use the CPU
+on CPU, or set `spark.cudf.sql.format.iceberg.read.enabled=false` to use the CPU
 reader for all Iceberg scans. Iceberg's CPU reader can read valid shredded Variant
 data with either value of `spark.sql.variant.allowReadingShredded`. Supported
 downstream operators may still execute on GPU. Queries that prune all Variant columns
@@ -499,13 +499,13 @@ for supported versions, configuration, examples, and limitations.
 
 Low shuffle merge is disabled by default because Delta Lake 2.4 does not support it
 with change data feed enabled. To enable it on Databricks Runtime 17.3, set
-`spark.rapids.sql.delta.lowShuffleMerge.enabled=true`. The Parquet reader can use `PERFILE`
+`spark.cudf.sql.delta.lowShuffleMerge.enabled=true`. The Parquet reader can use `PERFILE`
 or `MULTITHREADED`. With `COALESCING` or `AUTO`, touched-file discovery uses the
 multithreaded reader to preserve file-relative row indices. OSS Delta Lake 2.4 still
 requires `PERFILE`.
 
 Low shuffle merge also requires both
-`spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled=true` and
+`spark.cudf.sql.delta.deletionVectors.predicatePushdown.enabled=true` and
 `spark.databricks.delta.deletionVectors.useMetadataRowIndex=true`. If either is `false`,
 MERGE falls back to classic GPU merge. In particular, remove the `useMetadataRowIndex=false`
 setting recommended for older runtimes when enabling low shuffle merge on Databricks Runtime 17.3.
@@ -520,7 +520,7 @@ CPU fallback for MERGE operations configured to write persistent deletion vector
 is unchanged.
 
 Tables with row tracking enabled fall back to classic GPU merge, even when
-[`spark.rapids.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
+[`spark.cudf.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
 is `true`. Databricks Runtime 17.3 exposes nullable row-tracking metadata fields that
 the GPU scans required by low shuffle merge cannot currently replace. The classic
 merge path preserves row IDs and row commit versions; enabling low shuffle merge

@@ -42,6 +42,34 @@ class CudfConfKeysSuite extends AnyFunSuite {
       "other.spark.rapids.sql.enabled")
   }
 
+  test("foreign spark.rapids.* families are neither aliased nor reported") {
+    val foreign = "spark.rapids.ml.uvm.enabled"
+    assert(!CudfConfKeys.isLegacy(foreign))
+    assert(!CudfConfKeys.isCanonical("spark.cudf.ml.uvm.enabled"))
+    assert(CudfConfKeys.canonicalKey(foreign) === foreign)
+
+    val input = new LinkedHashMap[String, String]()
+    input.put(foreign, "true")
+    assert(CudfConfKeys.withAliases(input).asScala === Map(foreign -> "true"))
+    assert(new RapidsConf(Map(foreign -> "true")).rapidsConfMap.isEmpty)
+
+    val messages = LogCaptureUtils.captureLogsFrom(Seq(
+      "com.nvidia.spark.rapids.RapidsConf")) {
+      RapidsConf.warnIfLegacyConfs(mock[SparkContext], Seq(foreign))
+    }
+    assert(!messages.exists(_.contains("configuration namespace is deprecated")))
+  }
+
+  test("bootstrap SparkConf lookup gives canonical values precedence") {
+    val canonical = "spark.cudf.shims.spark410db183.enabled"
+    val legacy = CudfConfKeys.legacyKey(canonical)
+    assert(CudfConfKeys.get(new SparkConf(false), canonical) === null)
+    assert(CudfConfKeys.get(new SparkConf(false).set(legacy, "false"), canonical) === "false")
+    assert(CudfConfKeys.get(new SparkConf(false).set(canonical, "false"), legacy) === "false")
+    val both = new SparkConf(false).set(legacy, "invalid").set(canonical, "true")
+    assert(CudfConfKeys.get(both, legacy) === "true")
+  }
+
   test("canonical values win while materializing both aliases") {
     val input = new LinkedHashMap[String, String]()
     input.put(legacySqlEnabled, "false")

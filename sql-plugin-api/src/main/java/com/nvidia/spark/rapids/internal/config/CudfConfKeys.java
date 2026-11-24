@@ -20,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
+import org.apache.spark.SparkConf;
+
 /**
  * Internal utilities for resolving the canonical and legacy cuDF plugin configuration namespaces.
  *
@@ -32,12 +34,28 @@ public final class CudfConfKeys {
 
   private CudfConfKeys() {}
 
+  /**
+   * Suffix families under spark.rapids.* that belong to other products, such as
+   * spark-rapids-ml, which reads its spark.rapids.ml.* keys literally. They are neither
+   * plugin configurations nor aliases.
+   */
+  private static final String[] FOREIGN_SUFFIX_PREFIXES = {"ml."};
+
+  private static boolean isForeignSuffix(String key, String prefix) {
+    for (String foreign : FOREIGN_SUFFIX_PREFIXES) {
+      if (key.startsWith(foreign, prefix.length())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   public static boolean isCanonical(String key) {
-    return key.startsWith(CANONICAL_PREFIX);
+    return key.startsWith(CANONICAL_PREFIX) && !isForeignSuffix(key, CANONICAL_PREFIX);
   }
 
   public static boolean isLegacy(String key) {
-    return key.startsWith(LEGACY_PREFIX);
+    return key.startsWith(LEGACY_PREFIX) && !isForeignSuffix(key, LEGACY_PREFIX);
   }
 
   /** Return the canonical name for a plugin configuration key. */
@@ -68,6 +86,19 @@ public final class CudfConfKeys {
       return conf.get(canonical);
     }
     return conf.get(legacyKey(canonical));
+  }
+
+  /**
+   * Resolve a key from a SparkConf. The canonical value takes precedence over its legacy alias.
+   * Returns {@code null} when neither name is set. This is root-safe for bootstrap code.
+   */
+  public static String get(SparkConf conf, String key) {
+    String canonical = canonicalKey(key);
+    if (conf.contains(canonical)) {
+      return conf.get(canonical);
+    }
+    String legacy = legacyKey(canonical);
+    return conf.contains(legacy) ? conf.get(legacy) : null;
   }
 
   /** Return whether either name of a plugin configuration is present in a map. */

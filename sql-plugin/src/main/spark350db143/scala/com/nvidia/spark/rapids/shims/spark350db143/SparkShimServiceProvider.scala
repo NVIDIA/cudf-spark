@@ -38,11 +38,7 @@ class SparkShimServiceProvider extends com.nvidia.spark.rapids.SparkShimServiceP
     val shimEnabledProp = "spark.cudf.shims.spark350db143" + ".enabled"
     // disabled by default
     val shimEnabled = Option(SparkEnv.get)
-      .flatMap { env =>
-        env.conf.getOption(shimEnabledProp)
-          .orElse(env.conf.getOption(CudfConfKeys.legacyKey(shimEnabledProp)))
-          .map(_.toBoolean)
-      }
+      .flatMap(env => Option(CudfConfKeys.get(env.conf, shimEnabledProp)).map(_.toBoolean))
       .getOrElse(true)
 
     DatabricksShimServiceProvider.matchesVersion(

@@ -19,32 +19,54 @@ _canonical_sql_enabled = 'spark.cudf.sql.enabled'
 _legacy_sql_enabled = 'spark.rapids.sql.enabled'
 
 
-def _assert_session_mode(spark, enabled, job_type):
-    expected = str(enabled).lower()
-    assert spark.conf.get(_canonical_sql_enabled) == expected
-    assert spark.conf.get(_legacy_sql_enabled) == expected
-    assert spark.sparkContext.getLocalProperty('spark.job.description').endswith(
-        '[{}]'.format(job_type))
+def _executed_plan(spark):
+    df = spark.range(4).selectExpr('id + 1 AS x')
+    df.collect()
+    return df._jdf.queryExecution().executedPlan().toString()
 
 
-def test_session_conf_aliases_prefer_canonical_values():
-    with_spark_session(
-        lambda spark: _assert_session_mode(spark, True, 'GPU'),
-        {_legacy_sql_enabled: 'false', _canonical_sql_enabled: 'true'})
+def _job_type(spark):
+    return spark.sparkContext.getLocalProperty('spark.job.description').rsplit('[', 1)[1]
 
 
-def test_cpu_session_overrides_conflicting_aliases():
-    def assert_cpu_and_defaults(spark):
-        _assert_session_mode(spark, False, 'CPU')
-        assert spark.conf.get('spark.cudf.sql.castDecimalToFloat.enabled') == 'false'
-        assert spark.conf.get('spark.rapids.sql.castDecimalToFloat.enabled') == 'false'
-
-    with_cpu_session(
-        assert_cpu_and_defaults,
-        {_legacy_sql_enabled: 'true', _canonical_sql_enabled: 'true'})
+def test_conflicting_aliases_reach_the_plugin_and_canonical_wins():
+    def check(spark):
+        # The harness keeps both names so the plugin, not the harness, resolves the conflict.
+        assert spark.conf.get(_legacy_sql_enabled) == 'false'
+        assert spark.conf.get(_canonical_sql_enabled) == 'true'
+        assert 'Gpu' in _executed_plan(spark)
+    with_spark_session(check, {_legacy_sql_enabled: 'false', _canonical_sql_enabled: 'true'})
 
 
-def test_gpu_session_overrides_conflicting_aliases():
-    with_gpu_session(
-        lambda spark: _assert_session_mode(spark, True, 'GPU'),
-        {_legacy_sql_enabled: 'false', _canonical_sql_enabled: 'false'})
+def test_canonical_test_conf_replaces_legacy_default():
+    def check(spark):
+        assert spark.conf.get('spark.cudf.sql.incompatibleOps.enabled') == 'true'
+        assert spark.conf.get('spark.rapids.sql.incompatibleOps.enabled', None) is None
+    with_spark_session(check, {'spark.cudf.sql.incompatibleOps.enabled': 'true'})
+
+
+def test_cpu_session_overrides_canonical_test_conf():
+    def check(spark):
+        assert spark.conf.get(_legacy_sql_enabled) == 'false'
+        assert spark.conf.get(_canonical_sql_enabled, None) is None
+        assert _job_type(spark) == 'CPU]'
+        assert 'Gpu' not in _executed_plan(spark)
+    with_cpu_session(check, {_canonical_sql_enabled: 'true'})
+
+
+def test_gpu_session_overrides_canonical_test_conf():
+    def check(spark):
+        assert spark.conf.get(_legacy_sql_enabled) == 'true'
+        assert spark.conf.get(_canonical_sql_enabled, None) is None
+        assert _job_type(spark) == 'GPU]'
+        assert 'Gpu' in _executed_plan(spark)
+    with_gpu_session(check, {_canonical_sql_enabled: 'false'})
+
+
+def test_in_test_legacy_write_reaches_the_plugin():
+    def check(spark):
+        spark.conf.set(_legacy_sql_enabled, 'false')
+        assert 'Gpu' not in _executed_plan(spark)
+        spark.conf.set(_legacy_sql_enabled, 'true')
+        assert 'Gpu' in _executed_plan(spark)
+    with_gpu_session(check)

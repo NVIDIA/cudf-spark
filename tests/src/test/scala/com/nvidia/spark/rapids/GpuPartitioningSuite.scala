@@ -216,7 +216,7 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
           gp.sliceInternalGpuOrCpuAndClose(numRows, partitionIndices, columns)
         }
         assert(ex.getMessage.contains("exceeding the"))
-        assert(ex.getMessage.contains("reduce spark.rapids.sql.batchSizeBytes"))
+        assert(ex.getMessage.contains(s"reduce ${RapidsConf.GPU_BATCH_SIZE_BYTES.key}"))
       }
     }
   }

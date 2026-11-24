@@ -1565,7 +1565,9 @@ def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command, column_mapping
     gpu_command = "Gpu" + ("MergeInto" if command == "MERGE" else command.title()) + "Command"
 
     def run(spark, path, remainder):
-        enabled_before = spark.conf.get("spark.rapids.sql.enabled")
+        # The CPU-scoped metadata pass toggles the canonical name; check both aliases.
+        enabled_names = ("spark.rapids.sql.enabled", "spark.cudf.sql.enabled")
+        enabled_before = {name: spark.conf.get(name, None) for name in enabled_names}
         predicate = f"pmod(id, 16) = {remainder}"
         if command == "DELETE":
             sql = f"DELETE FROM delta.`{path}` WHERE {predicate}"
@@ -1576,7 +1578,7 @@ def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command, column_mapping
                    f"USING (SELECT id FROM range(1024) WHERE {predicate}) AS s "
                    "ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.v = t.v + 10")
         result = spark.sql(sql).collect()
-        assert spark.conf.get("spark.rapids.sql.enabled") == enabled_before
+        assert {name: spark.conf.get(name, None) for name in enabled_names} == enabled_before
         return result
 
     # Two operations on existing DVs verify that the metadata scope does not disable later DML.

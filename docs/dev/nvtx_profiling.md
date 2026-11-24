@@ -72,7 +72,7 @@ for further details.
 
 ## Project AST backend selection
 
-`spark.rapids.sql.projectAstEnabled` and `spark.rapids.sql.projectAstJitEnabled`
+`spark.cudf.sql.projectAstEnabled` and `spark.cudf.sql.projectAstJitEnabled`
 independently enable interpreted AST and AST JIT. Both remain disabled by default.
 Project and extracted broadcast build-side projections use a shared tier planner;
 generic tiered binders continue to require an explicit backend opt-in and drop
@@ -111,7 +111,7 @@ this rule does not change JIT selection.
 
 ## Project AST JIT diagnostics
 
-With either Project AST backend enabled, `spark.rapids.sql.explain=ALL` logs the
+With either Project AST backend enabled, `spark.cudf.sql.explain=ALL` logs the
 final bound tiers under `FINAL PROJECT AST SELECTION`, including any JIT execution
 groups. Input ordinals refer to the current tier's
 input batch; output positions refer to its output batch. The log identifies
@@ -131,7 +131,7 @@ and use native tracing to confirm the executed backend. The Spark plan string
 shows a backend for an output only when the output's final root runs on it; it does
 not show AST subexpressions extracted to earlier tiers.
 
-With `spark.rapids.sql.metrics.level=DEBUG`, `GpuProjectExec` exposes:
+With `spark.cudf.sql.metrics.level=DEBUG`, `GpuProjectExec` exposes:
 
 | Metric key | Meaning |
 |---|---|

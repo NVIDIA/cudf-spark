@@ -27,7 +27,7 @@ spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
 ```
 
 Delta GPU writes are enabled by default through
-`spark.rapids.sql.format.delta.write.enabled=true`. If this setting was disabled,
+`spark.cudf.sql.format.delta.write.enabled=true`. If this setting was disabled,
 re-enable it to accelerate writes.
 
 Install compatible Delta dependencies on the driver and executors. See the
@@ -124,7 +124,7 @@ options and can reject them rather than perform selective replacement.
 - GPU support follows the plugin's supported expressions, types, and operators.
   An unsupported operator inside matching can run on the CPU while supported
   parts remain accelerated. Disabling Delta GPU writes runs the command on the
-  CPU. Use `spark.rapids.sql.explain=NOT_ON_GPU` to inspect fallback reasons.
+  CPU. Use `spark.cudf.sql.explain=NOT_ON_GPU` to inspect fallback reasons.
 - User subqueries follow upstream Delta's validation and GPU fallback rules;
   enabling selective replacement does not enable arbitrary subqueries in
   `replaceWhere` or ordinary `DELETE` commands.

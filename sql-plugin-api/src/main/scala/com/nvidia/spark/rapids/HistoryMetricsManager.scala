@@ -24,6 +24,7 @@ import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
 import com.nvidia.spark.history.{HistoryMetricCatalog, HistoryMetricsProvider, MetricStores}
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 import org.slf4j.LoggerFactory
 
 /**
@@ -51,9 +52,10 @@ private[rapids] class HistoryMetricsManager(
       log.warn("History metrics provider initialization was requested more than once; " +
         "keeping the current provider")
     } else {
+      // Providers read canonical names; materialize legacy aliases for every caller.
       val providerConfiguration: JavaMap[String, String] =
         Collections.unmodifiableMap[String, String](
-          new HashMap[String, String](configuration))
+          new HashMap[String, String](CudfConfKeys.withAliases(configuration)))
       val requested =
         Option(configuredName).map(_.trim.toLowerCase(Locale.ROOT)).getOrElse("")
       if (requested == HistoryMetricsManager.NO_PROVIDER) {
