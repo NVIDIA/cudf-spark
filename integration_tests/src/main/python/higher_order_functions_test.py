@@ -551,7 +551,7 @@ def test_array_aggregate_narrow_acc_cast_ansi_overflow(merge_sql):
     assert_gpu_and_cpu_error(
         lambda spark: spark.createDataFrame([([300, 5],)], 'a array<bigint>').selectExpr(
             f'aggregate(a, 0L, (acc, x) -> {merge_sql})').collect(),
-        conf=ansi_enabled_conf, error_message='CAST_OVERFLOW')
+        conf=ansi_enabled_conf, error_message='cannot be cast to "TINYINT" due to an overflow')
 
 
 @disable_ansi_mode
