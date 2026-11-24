@@ -1190,7 +1190,7 @@ sealed abstract class ArraySumOp extends AggOp {
   def combineWithZero(r: cudf.ColumnVector, z: cudf.BinaryOperable, out: DType) = r.add(z, out)
   def matchBinary(e: Expression): Option[(Expression, Expression)] = e match {
     // Reject TRY mode and checked arithmetic retained from an ANSI view in a non-ANSI session.
-    case a: Add if !TryModeShim.isTryMode(a) && a == Add(a.left, a.right) =>
+    case a: Add if TryModeShim.getEvalMode(a) == ArrayAggregateDecomposer.sessionEvalMode =>
       Some((a.left, a.right))
     case _ => None
   }
@@ -1253,7 +1253,7 @@ case object ProductOp extends AggOp {
   }
   def combineWithZero(r: cudf.ColumnVector, z: cudf.BinaryOperable, out: DType) = r.mul(z, out)
   def matchBinary(e: Expression): Option[(Expression, Expression)] = e match {
-    case m: Multiply if !TryModeShim.isTryMode(m) && m == Multiply(m.left, m.right) =>
+    case m: Multiply if TryModeShim.getEvalMode(m) == ArrayAggregateDecomposer.sessionEvalMode =>
       Some((m.left, m.right))
     case _ => None
   }
@@ -1552,13 +1552,16 @@ object ArrayAggregateDecomposer {
     case _ => false
   }
 
+  private[rapids] def sessionEvalMode: GpuEvalMode.Value =
+    if (SQLConf.get.ansiEnabled) GpuEvalMode.ANSI else GpuEvalMode.LEGACY
+
   private def matchNarrowingSum(
       body: Expression,
       acc: NamedLambdaVariable,
       elem: NamedLambdaVariable): Option[NarrowingSumOp] = body match {
-    // A default Add in non-ANSI mode wraps on overflow. Comparing to it also rules out an
-    // explicitly checked or TRY addition across Spark versions with different mode fields.
-    case add: Add if !SQLConf.get.ansiEnabled && add == Add(add.left, add.right) &&
+    // Only LEGACY addition wraps on overflow; ANSI/TRY arithmetic must stay on Spark CPU.
+    case add: Add if !SQLConf.get.ansiEnabled &&
+        TryModeShim.getEvalMode(add) == GpuEvalMode.LEGACY &&
         elem.dataType == acc.dataType && TypeSig.integral.isSupportedByPlugin(acc.dataType) =>
       // Require a bare element so finish() can read the last addend from the input list.
       val castSide = (add.left, add.right) match {

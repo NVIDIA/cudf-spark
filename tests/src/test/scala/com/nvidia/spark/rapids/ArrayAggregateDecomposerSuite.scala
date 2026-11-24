@@ -233,6 +233,24 @@ class ArrayAggregateDecomposerSuite extends GpuUnitTests {
     }
   }
 
+  test("Decimal precision-loss setting does not reject integral sum or product") {
+    val acc = lv("acc", LongType); val x = lv("x", LongType)
+    withSQLConf(
+      "spark.sql.ansi.enabled" -> "false",
+      "spark.sql.decimalOperations.allowPrecisionLoss" -> "false") {
+      val castAcc = Cast(Cast(acc, IntegerType), LongType)
+      val add = Add(acc, x)
+      val mul = Multiply(acc, x)
+      val narrowAdd = Add(castAcc, x)
+      withSQLConf("spark.sql.decimalOperations.allowPrecisionLoss" -> "true") {
+        assertDecomposes(add, acc, x, SumOp, zeroType = LongType)
+        assertDecomposes(mul, acc, x, ProductOp, zeroType = LongType)
+        assertDecomposes(narrowAdd, acc, x, NarrowingSumOp(IntegerType), Some(x),
+          zeroType = LongType)
+      }
+    }
+  }
+
   test("TRY-mode cast and arithmetic in merge lambda are rejected") {
     withCpuSparkSession { spark =>
       withSQLConf("spark.sql.ansi.enabled" -> "false") {
