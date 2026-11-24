@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.{
 import org.apache.spark.sql.catalyst.plans.LeftOuter
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
-import org.apache.spark.sql.execution.python.BatchEvalPythonExec
+import org.apache.spark.sql.execution.python.EvalPythonExec
 import org.apache.spark.sql.rapids.{GpuFileSourceScanExec, GpuShuffleEnv}
 import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
 import org.apache.spark.sql.rapids.execution.python.GpuArrowEvalPythonExec
@@ -226,13 +226,16 @@ private[rapids] object GpuRangeBoundaryPlan {
     case stage: ShuffleQueryStageExec if pruneThroughOperators && isGpuShuffleStage(stage) =>
       Some(wrapPostShuffleCoalesce(stage, rapidsConf))
 
-    // Row-boundary islands (C2R → BatchEvalPython → R2C) are pass-through only when no range
-    // key depends on a Python UDF output. A project widens `required` to the expressions behind
-    // each required output and a filter adds its condition ids, so a UDF output that feeds a
-    // key or a filter is already in `required` and blocks the pass-through, while a UDF output
-    // nothing reads cannot change which rows are sampled. The boundary plan executes this
-    // subtree separately from the shuffle input, so both executions must agree on the keys.
-    case python: BatchEvalPythonExec if pruneThroughOperators &&
+    // A row-boundary island, R2C(BatchEvalPython(C2R(child))), arrives here as the CPU
+    // EvalPythonExec node, batch or arrow depending on the evaluator the fallback picked; the
+    // GPU arrow wrapper has its own arm below. Such an island is pass-through only when no
+    // range key depends on a Python UDF output. A project widens `required` to the expressions
+    // behind each required output and a filter adds its condition ids, so a UDF output that
+    // feeds a key or a filter is already in `required` and blocks the pass-through, while a
+    // UDF output nothing reads cannot change which rows are sampled. The boundary plan
+    // executes this subtree separately from the shuffle input, so both executions must agree
+    // on the keys.
+    case python: EvalPythonExec if pruneThroughOperators &&
         required.intersect(python.resultAttrs.map(_.exprId).toSet).isEmpty =>
       prune(python.child, required, deterministicRequired, pruneThroughOperators, rapidsConf)
 
