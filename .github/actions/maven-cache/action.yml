@@ -40,11 +40,9 @@ runs:
       run: |
         model=$(mktemp "$RUNNER_TEMP/maven-effective.XXXXXXXX")
         snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER" --keep-model "$model")
-        java_major=$(java -XshowSettings:properties -version 2>&1 | awk '$1 == "java.specification.version" {print $3}')
-        [[ -n "$java_major" ]] || { echo "Cannot determine Java version for Maven cache" >&2; exit 1; }
         echo "snapshot-hash=$snapshot_hash" >> "$GITHUB_OUTPUT"
         echo "model=$model" >> "$GITHUB_OUTPUT"
-        bash "$GITHUB_ACTION_PATH/cache-keys.sh" "$java_major" "$snapshot_hash" >> "$GITHUB_OUTPUT"
+        bash "$GITHUB_ACTION_PATH/cache-keys.sh" "$snapshot_hash" >> "$GITHUB_OUTPUT"
 
     - name: Look up a ready cache
       if: inputs.premerge == 'true' || inputs.key-only == 'true'

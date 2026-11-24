@@ -41,10 +41,10 @@ class DependencyKeyTest(unittest.TestCase):
             with self.subTest(branch=branch):
                 env = dict(os.environ, BRANCH=branch, RUNNER_OS="Linux", RUNNER_ARCH="X64",
                            SCALA_VER="2.12", INPUT_HASH="inputs", PREMERGE_HASH="fixture")
-                output = subprocess.check_output(["bash", str(script), "17", "upstream"],
+                output = subprocess.check_output(["bash", str(script), "upstream"],
                                                  cwd=script.parents[3], env=env, text=True)
                 keys = dict(row.split("=", 1) for row in output.splitlines())
-                self.assertEqual(keys["prefix"], f"spark-maven-Linux-X64-jdk17-2.12-{scope}-")
+                self.assertEqual(keys["prefix"], f"spark-maven-Linux-X64-2.12-{scope}-")
                 self.assertEqual(keys["snapshot-prefix"], keys["prefix"] + "upstream-")
                 self.assertEqual(keys["stem"], keys["snapshot-prefix"] + "inputs")
                 self.assertTrue(keys["full"].startswith(keys["stem"] + "-premerge-"))
@@ -108,7 +108,7 @@ class DependencyKeyTest(unittest.TestCase):
         before = key()
         publications["private_2.13"] = "private-2"
         after = key()
-        prefix = "spark-maven-Linux-X64-jdk17-2.13-26.12-"
+        prefix = "spark-maven-Linux-X64-2.13-26.12-"
         stem = prefix + before + "-" + "a" * 64
         full = stem + "-premerge-4.1.2-" + "b" * 64
         self.assertLessEqual(len(full), 512)
