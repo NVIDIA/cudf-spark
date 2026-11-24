@@ -18,8 +18,8 @@ class CudfComparisonTest extends AnyFunSuite with BeforeAndAfterAll {
       .appName("UDF vs. RapidsUDF Comparison Test")
       .master("local[4]")
       .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
-      .config("spark.rapids.memory.gpu.pool", "NONE")
-      .config("spark.rapids.sql.explain", "NONE")
+      .config("spark.cudf.memory.gpu.pool", "NONE")
+      .config("spark.cudf.sql.explain", "NONE")
       .enableHiveSupport()
       .getOrCreate()
   }

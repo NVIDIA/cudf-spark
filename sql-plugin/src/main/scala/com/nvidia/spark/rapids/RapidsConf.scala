@@ -16,17 +16,20 @@
 package com.nvidia.spark.rapids
 
 import java.io.{File, FileOutputStream}
+import java.lang.ref.WeakReference
 import java.util
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
 
 import ai.rapids.cudf.Cuda
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RapidsPrivateUtil
 import org.apache.spark.sql.rapids.execution.{JoinBuildSideSelection, JoinOptions, JoinStrategy}
@@ -53,6 +56,8 @@ object RapidsConf extends Logging with RapidsConfEntries {
   }
 
   private lazy val registeredConfs = new ListBuffer[ConfEntry[_]]()
+  // The application already warned about legacy names. One SparkContext is active per JVM.
+  @volatile private var warnedAboutLegacyConfs = new WeakReference[SparkContext](null)
 
   private def register(entry: ConfEntry[_]): Unit = {
     registeredConfs += entry
@@ -60,6 +65,46 @@ object RapidsConf extends Logging with RapidsConfEntries {
 
   def conf(key: String): ConfBuilder = {
     new ConfBuilder(key, register)
+  }
+
+  def getOption(conf: SparkConf, key: String): Option[String] =
+    Option(CudfConfKeys.get(conf, key))
+
+  def contains(conf: SparkConf, key: String): Boolean = getOption(conf, key).isDefined
+
+  def getOption(conf: SQLConf, key: String): Option[String] = {
+    val canonicalKey = CudfConfKeys.canonicalKey(key)
+    Option(conf.getConfString(canonicalKey, null))
+      .orElse(Option(conf.getConfString(CudfConfKeys.legacyKey(canonicalKey), null)))
+  }
+
+  def contains(conf: SQLConf, key: String): Boolean = getOption(conf, key).isDefined
+
+  private[rapids] def warnIfLegacyConfs(
+      sparkContext: SparkContext,
+      keys: Iterable[String]): Unit = {
+    if (warnedAboutLegacyConfs.get() ne sparkContext) {
+      val legacyKeys = keys.filter(CudfConfKeys.isLegacy)
+      if (legacyKeys.nonEmpty) {
+        synchronized {
+          if (warnedAboutLegacyConfs.get() ne sparkContext) {
+            warnedAboutLegacyConfs = new WeakReference(sparkContext)
+            val replacements = legacyKeys.toSeq.sorted
+              .map(key => s"$key -> ${CudfConfKeys.canonicalKey(key)}")
+              .mkString(", ")
+            logWarning("The spark.rapids.* configuration namespace is deprecated. " +
+              "Use the corresponding spark.cudf.* names instead. " +
+              s"Detected: $replacements")
+          }
+        }
+      }
+    }
+  }
+
+  private[rapids] def warnIfLegacyConfs(keys: Iterable[String]): Unit = {
+    SparkSession.getActiveSession.foreach { session =>
+      warnIfLegacyConfs(session.sparkContext, keys)
+    }
   }
 
   private[rapids] def shouldExplain(explain: String): Boolean =
@@ -182,13 +227,13 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |```
         |${SPARK_HOME}/bin/spark-shell --jars cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar \
         |--conf spark.plugins=com.nvidia.spark.SQLPlugin \
-        |--conf spark.rapids.sql.concurrentGpuTasks=2
+        |--conf spark.cudf.sql.concurrentGpuTasks=2
         |```
         |
         |At runtime use: `spark.conf.set("[conf key]", [conf value])`. For example:
         |
         |```
-        |scala> spark.conf.set("spark.rapids.sql.concurrentGpuTasks", 2)
+        |scala> spark.conf.set("spark.cudf.sql.concurrentGpuTasks", 2)
         |```
         |
         | All configs can be set on startup, but some configs, especially for shuffle, will not
@@ -199,6 +244,14 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |The "Since Version" column shows the first cuDF plugin release known to support
         |the config. "Unreleased" means the config exists on this branch but is not in a tagged
         |release yet. "Unknown" means the metadata has not been recorded yet.
+        |
+        |## Configuration Namespace
+        |
+        |`spark.cudf.*` is the canonical namespace for cuDF plugin configuration. The corresponding
+        |`spark.rapids.*` names are deprecated compatibility aliases. When both names of the same
+        |configuration are set, the `spark.cudf.*` value takes precedence. Spark's generic
+        |`spark.conf.get` and `spark.conf.unset` APIs continue to operate on the literal name that
+        |was set; alias resolution occurs when the cuDF plugin reads the configuration.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       ConsoleOutput.writeLine("\n## General Configuration\n")
@@ -269,11 +322,11 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |expression is configured as disabled, the accelerator plugin will not attempt replacement,
         |and it will run on the CPU.
         |
-        |Please leverage the [`spark.rapids.sql.explain`](#sql.explain) setting to get
+        |Please leverage the [`spark.cudf.sql.explain`](#sql.explain) setting to get
         |feedback from the plugin as to why parts of a query may not be executing on the GPU.
         |
         |**NOTE:** Setting
-        |[`spark.rapids.sql.incompatibleOps.enabled=true`](#sql.incompatibleOps.enabled)
+        |[`spark.cudf.sql.incompatibleOps.enabled=true`](#sql.incompatibleOps.enabled)
         |will enable all the settings in the table below which are not enabled by default due to
         |incompatibilities.""".stripMargin)
       // scalastyle:on line.size.limit
@@ -341,10 +394,20 @@ object RapidsConf extends Logging with RapidsConfEntries {
   }
 }
 
-class RapidsConf(conf: Map[String, String]) extends Logging {
+class RapidsConf(rawConf: Map[String, String]) extends Logging {
 
   import ConfHelper._
   import RapidsConf._
+
+  warnIfLegacyConfs(rawConf.keys)
+
+  private val conf = rawConf
+
+  /** Resolve a plugin key by its canonical name first, then its legacy alias. */
+  private def lookup(key: String): Option[String] = {
+    val canonical = CudfConfKeys.canonicalKey(key)
+    conf.get(canonical).orElse(conf.get(CudfConfKeys.legacyKey(canonical)))
+  }
 
   def this(sqlConf: SQLConf) = {
     this(sqlConf.getAllConfs)
@@ -358,10 +421,13 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     entry.get(conf)
   }
 
-  def getStr(key: String): Option[String] = conf.get(key)
+  def getStr(key: String): Option[String] = lookup(key)
 
-  lazy val rapidsConfMap: util.Map[String, String] = conf.filterKeys(
-    _.startsWith("spark.rapids.")).toMap.asJava
+  lazy val rapidsConfMap: util.Map[String, String] = {
+    val pluginConfs = conf.filterKeys(key =>
+      CudfConfKeys.isCanonical(key) || CudfConfKeys.isLegacy(key)).toMap
+    CudfConfKeys.withAliases(pluginConfs.asJava)
+  }
 
   lazy val metricsLevel: String = get(METRICS_LEVEL)
 
@@ -1152,25 +1218,25 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     // GpuProject cost is zero (in our cost model) and we don't want to encourage moving to
     // the GPU just to do a trivial projection, so we pretend the overhead of a
     // CPU projection (beyond evaluating the expressions) is also zero
-    "spark.rapids.sql.optimizer.cpu.exec.ProjectExec" -> "0",
+    "spark.cudf.sql.optimizer.cpu.exec.ProjectExec" -> "0",
     // The cost of a GPU projection is mostly the cost of evaluating the expressions
     // to produce the projected columns
-    "spark.rapids.sql.optimizer.gpu.exec.ProjectExec" -> "0",
+    "spark.cudf.sql.optimizer.gpu.exec.ProjectExec" -> "0",
     // union does not further process data produced by its children
-    "spark.rapids.sql.optimizer.cpu.exec.UnionExec" -> "0",
-    "spark.rapids.sql.optimizer.gpu.exec.UnionExec" -> "0"
+    "spark.cudf.sql.optimizer.cpu.exec.UnionExec" -> "0",
+    "spark.cudf.sql.optimizer.gpu.exec.UnionExec" -> "0"
   )
 
   def isOperatorEnabled(key: String, incompat: Boolean, isDisabledByDefault: Boolean): Boolean = {
     val default = !(isDisabledByDefault || incompat) || (incompat && isIncompatEnabled)
-    conf.get(key).map(toBoolean(_, key)).getOrElse(default)
+    lookup(key).map(toBoolean(_, key)).getOrElse(default)
   }
 
   /**
    * Get the GPU cost of an expression, for use in the cost-based optimizer.
    */
   def getGpuExpressionCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.gpu.expr.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.gpu.expr.$operatorName"
     getOptionalCost(key)
   }
 
@@ -1178,7 +1244,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the GPU cost of an operator, for use in the cost-based optimizer.
    */
   def getGpuOperatorCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.gpu.exec.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.gpu.exec.$operatorName"
     getOptionalCost(key)
   }
 
@@ -1186,7 +1252,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the CPU cost of an expression, for use in the cost-based optimizer.
    */
   def getCpuExpressionCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.cpu.expr.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.cpu.expr.$operatorName"
     getOptionalCost(key)
   }
 
@@ -1194,20 +1260,20 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the CPU cost of an operator, for use in the cost-based optimizer.
    */
   def getCpuOperatorCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.cpu.exec.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.cpu.exec.$operatorName"
     getOptionalCost(key)
   }
 
   private def getOptionalCost(key: String) = {
     // user-provided value takes precedence, then look in defaults map
-    conf.get(key).orElse(optimizerDefaults.get(key)).map(toDouble(_, key))
+    lookup(key).orElse(optimizerDefaults.get(key)).map(toDouble(_, key))
   }
 
   /**
    * To judge whether "key" is explicitly set by the users.
    */
   def isConfExplicitlySet(key: String): Boolean = {
-    conf.contains(key)
+    lookup(key).isDefined
   }
 
   // CPU-GPU Bridge Configuration accessors

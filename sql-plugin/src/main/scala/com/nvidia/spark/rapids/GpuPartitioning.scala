@@ -221,7 +221,7 @@ trait GpuPartitioning extends Partitioning {
           require(data.getLength <= maxGpuSerializedSliceBytes,
             s"GPU-serialized shuffle batch is ${data.getLength} bytes, exceeding the " +
             s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
-            s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
+            s"serialized-slice offsets; reduce spark.cudf.sql.batchSizeBytes")
           NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, d2hCopyTime) {
             closeOnExcept(HostMemoryBuffer.allocate(data.getLength)) { dataHost =>
               closeOnExcept(HostMemoryBuffer.allocate(offsets.getLength)) { offsetsHost =>

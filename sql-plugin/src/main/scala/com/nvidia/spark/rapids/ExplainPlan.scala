@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ object ExplainPlan {
    * in the plan due to that.
    *
    * This is very similar output you would get by running the query with the
-   * Rapids Accelerator enabled and with the config `spark.rapids.sql.enabled` enabled.
+   * cuDF plugin enabled and with the config `spark.cudf.sql.enabled` enabled.
    *
    * Requires the RAPIDS Accelerator for Apache Spark jar and RAPIDS cudf jar be included
    * in the classpath but the RAPIDS Accelerator for Apache Spark should be disabled.

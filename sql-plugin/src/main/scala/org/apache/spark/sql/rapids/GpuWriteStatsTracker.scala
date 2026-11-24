@@ -111,8 +111,9 @@ object GpuWriteJobStatsTracker {
 
   def taskMetrics: Map[String, GpuMetric] = {
     val sparkContext = SparkContext.getActive.get
-    val metricsConf = MetricsLevel(sparkContext.conf.get(RapidsConf.METRICS_LEVEL.key,
-      RapidsConf.METRICS_LEVEL.defaultValue))
+    val metricsConf = MetricsLevel(RapidsConf.getOption(
+      sparkContext.conf, RapidsConf.METRICS_LEVEL.key)
+      .getOrElse(RapidsConf.METRICS_LEVEL.defaultValue))
     val metricFactory = new GpuMetricFactory(metricsConf, sparkContext)
     Map(
       GPU_TIME_KEY -> metricFactory.createNanoTiming(GpuMetric.ESSENTIAL_LEVEL,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import scala.io.Source
 
 import com.nvidia.spark.rapids.{ConfEntry, ConfEntryWithDefault, OptionalConfEntry}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 
 import org.apache.spark.internal.config.ConfigEntry
 
@@ -54,18 +55,21 @@ object RapidsPrivateUtil {
   /** Convert Spark ConfigEntry to Spark RAPIDS ConfEntry */
   private def convert(e: ConfigEntry[_], isStartup: Boolean): ConfEntry[_] = {
     val isCommonly = isCommonlyUsed(e.key)
+    // Private entries are supplied by extension modules which can still publish legacy names and
+    // references. Exclude fully-qualified class names such as com.nvidia.spark.rapids.*.
+    val doc = e.doc.replaceAll("(?<!\\.)spark\\.rapids\\.", CudfConfKeys.CANONICAL_PREFIX)
     e.defaultValue match {
-      case None => createEntry[String](e.key, e.doc, _.toString, isStartup, isCommonly)
+      case None => createEntry[String](e.key, doc, _.toString, isStartup, isCommonly)
       case Some(value: Boolean) =>
-        createEntryWithDefault[Boolean](e.key, e.doc, _.toBoolean, value, isStartup, isCommonly)
+        createEntryWithDefault[Boolean](e.key, doc, _.toBoolean, value, isStartup, isCommonly)
       case Some(value: Integer) =>
-        createEntryWithDefault[Integer](e.key, e.doc, _.toInt, value, isStartup, isCommonly)
+        createEntryWithDefault[Integer](e.key, doc, _.toInt, value, isStartup, isCommonly)
       case Some(value: Long) =>
-        createEntryWithDefault[Long](e.key, e.doc, _.toLong, value, isStartup, isCommonly)
+        createEntryWithDefault[Long](e.key, doc, _.toLong, value, isStartup, isCommonly)
       case Some(value: Double) =>
-        createEntryWithDefault[Double](e.key, e.doc, _.toDouble, value, isStartup, isCommonly)
+        createEntryWithDefault[Double](e.key, doc, _.toDouble, value, isStartup, isCommonly)
       case Some(value: String) =>
-        createEntryWithDefault[String](e.key, e.doc, _.toString, value, isStartup, isCommonly)
+        createEntryWithDefault[String](e.key, doc, _.toString, value, isStartup, isCommonly)
       case Some(other) => throw new IllegalStateException(
         s"Unsupported private config defaultValue type: $other")
     }

@@ -55,12 +55,12 @@ be used with either the Scala 2.12 or 2.13 distribution.
 
 ## Select and configure the local provider
 
-`spark.rapids.sql.history.metrics.provider` selects a provider by its case-insensitive service name.
+`spark.cudf.sql.history.metrics.provider` selects a provider by its case-insensitive service name.
 The default value `none` keeps the built-in no-op store without loading a provider. To select the
 bundled local provider, set:
 
 ```
-spark.rapids.sql.history.metrics.provider=local
+spark.cudf.sql.history.metrics.provider=local
 ```
 
 Custom providers may be placed in the application jar or supplied before driver startup through `--jars`,
@@ -78,7 +78,7 @@ store installed.
 To retain history across driver restarts, set the local provider's database path:
 
 ```
-spark.rapids.sql.history.metrics.local.path=/protected/local/history.db
+spark.cudf.sql.history.metrics.local.path=/protected/local/history.db
 ```
 
 When the key is absent, each provider instance uses an isolated SQLite in-memory database. When the

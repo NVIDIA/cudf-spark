@@ -396,7 +396,7 @@ object GpuEquivalentExpressions {
     def isEnabled(clazz: Class[_]): Boolean = {
       enabled.getOrElse(clazz, {
         val confKey = RapidsConf.ENABLE_COMBINED_EXPR_PREFIX + clazz.getSimpleName
-        val isEnabled = conf.getConfString(confKey, "true").trim.toBoolean
+        val isEnabled = RapidsConf.getOption(conf, confKey).getOrElse("true").trim.toBoolean
         enabled.put(clazz, isEnabled)
         isEnabled
       })

@@ -250,7 +250,7 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
 
   private def checkExecPlan(plan: SparkPlan): Unit = {
     val executedPlan = ExecutionPlanCaptureCallback.extractExecutedPlan(plan)
-    if (executedPlan.conf.getAllConfs(RapidsConf.SQL_ENABLED.key).toBoolean) {
+    if (RapidsConf.SQL_ENABLED.get(executedPlan.conf)) {
       val gpuAgg = executedPlan.find(_.isInstanceOf[GpuHashAggregateExec]) match {
         case Some(agg) => Some(agg)
         case _ => executedPlan.find(_.isInstanceOf[QueryStageExec]) match {

@@ -24,10 +24,10 @@ nav_order: 2
   The cuDF plugin version 0.4+ has the `ParquetCachedBatchSerializer`
   that is optimized to run on the GPU and uses Parquet to compress data before caching it.
   ParquetCachedBatchSerializer can be used independent of what the value of
-  `spark.rapids.sql.enabled` is. If it is set to true then the Parquet compression will run
+  `spark.cudf.sql.enabled` is. If it is set to true then the Parquet compression will run
   on the GPU if possible, and importantly
   `spark.sql.inMemoryColumnarStorage.enableVectorizedReader` will not be honored as the GPU
-  data is always read in as columnar. If `spark.rapids.sql.enabled` is set to false
+  data is always read in as columnar. If `spark.cudf.sql.enabled` is set to false
   the cached objects will still be compressed on the CPU as a part of the caching process.
 
   To use this serializer please run Spark with the following conf.

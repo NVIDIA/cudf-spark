@@ -26,27 +26,27 @@ performance analysis. In high level it works as follows:
 ## Configuration
 
 By default, LORE id will always be generated for operators, but user could disable this behavior 
-by setting `spark.rapids.sql.lore.tag.enabled` to `false`. 
+by setting `spark.cudf.sql.lore.tag.enabled` to `false`.
 
 To tell LORE the LORE ids of the operators you are interested in, you need to set 
-`spark.rapids.sql.lore.idsToDump`. For example, you could set it to "1[\*], 2[\*], 3[\*]" to tell 
+`spark.cudf.sql.lore.idsToDump`. For example, you could set it to "1[\*], 2[\*], 3[\*]" to tell
 LORE to dump all partitions of input data of operators with id 1, 2, or 3. You can also only dump 
 some partition of the operator's input by appending partition numbers to lore ids. For example, 
 "1[0 4-6 7], 2[\*]" tell LORE to dump operator with LORE id 1, but only dump partition 0, 4, 5, 
 and 7, e.g. the end of the range is exclusive. But for operator with LORE id 2, it will dump all 
 partitions. 
 
-You also need to set `spark.rapids.sql.lore.dumpPath` to tell LORE where to dump the data, the 
+You also need to set `spark.cudf.sql.lore.dumpPath` to tell LORE where to dump the data, the
 value of which should point to a directory. All dumped data of a query will live in this 
 directory. By default the directory must either not exist (it will be created) or be empty.
 If the directory exists and contains files, an `IllegalArgumentException` will be thrown to prevent overwriting existing data unless you explicitly enable non-strict mode (see below).
 
 ### Non-strict mode
 
-Set `spark.rapids.sql.lore.nonStrictMode.enabled=true` to make LORE more tolerant when dumping multiple lore ids. When this flag is enabled:
+Set `spark.cudf.sql.lore.nonStrictMode.enabled=true` to make LORE more tolerant when dumping multiple lore ids. When this flag is enabled:
 
 * Any lore id that fails to dump because of unsupported operators or misconfigurations is skipped with a warning while the rest of the query continues.
-* Existing data underneath `spark.rapids.sql.lore.dumpPath` is preserved. LORE logs a warning if the path is non-empty but still dumps any remaining lore ids into their own subdirectories.
+* Existing data underneath `spark.cudf.sql.lore.dumpPath` is preserved. LORE logs a warning if the path is non-empty but still dumps any remaining lore ids into their own subdirectories.
 ### Preserve original schema names in Parquet
 
 By default, LORE writes Parquet files using the original Spark schema names (including nested
@@ -56,7 +56,7 @@ field names for structures, arrays, and maps, following Spark-compat naming such
 You can disable this behavior if you prefer auto-generated type-based names by setting:
 
 ```
-spark.rapids.sql.lore.parquet.useOriginalSchemaNames = false
+spark.cudf.sql.lore.parquet.useOriginalSchemaNames = false
 ```
 
 When enabled, LORE writes Parquet files with the original Spark schema names (including nested

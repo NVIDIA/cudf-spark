@@ -193,7 +193,7 @@ exclusive mode to assign GPUs under Spark. To disable exclusive mode, use
 
     ```shell
     ...
-    --conf spark.rapids.sql.python.gpu.enabled=true \
+    --conf spark.cudf.sql.python.gpu.enabled=true \
     ```
 
 Please note: every type of Pandas UDF on Spark is run by a specific Spark execution plan. The cuDF
@@ -216,19 +216,19 @@ The following configuration settings are also relevant for GPU scheduling for Pa
 1. Memory efficiency
 
     ```shell
-    --conf spark.rapids.python.memory.gpu.pooling.enabled=false \
-    --conf spark.rapids.python.memory.gpu.allocFraction=0.1 \
-    --conf spark.rapids.python.memory.gpu.maxAllocFraction= 0.2 \
+    --conf spark.cudf.python.memory.gpu.pooling.enabled=false \
+    --conf spark.cudf.python.memory.gpu.allocFraction=0.1 \
+    --conf spark.cudf.python.memory.gpu.maxAllocFraction= 0.2 \
     ```
     Similar to the [RMM pooling for JVM](https://docs.nvidia.com/spark-rapids/user-guide/latest/tuning-guide.html#pinned-memory) settings like
-    `spark.rapids.memory.gpu.allocFraction` and `spark.rapids.memory.gpu.maxAllocFraction` except
+    `spark.cudf.memory.gpu.allocFraction` and `spark.cudf.memory.gpu.maxAllocFraction` except
     these specify the GPU pool size for the _Python processes_. Half of the GPU _available_ memory
     will be used by default if it is not specified.
 
 2. Limit of concurrent Python processes
 
     ```shell
-    --conf spark.rapids.python.concurrentPythonWorkers=2 \
+    --conf spark.cudf.python.concurrentPythonWorkers=2 \
     ```
     This parameter limits the total concurrent running _Python processes_ for a Spark executor.
     It defaults to 0 which means no limit. Note that for certain cases, setting
@@ -239,7 +239,7 @@ The following configuration settings are also relevant for GPU scheduling for Pa
 
     For example, in a specific Spark Stage that contains 3 Pandas UDFs, 2 Spark tasks are running
     and each task launches 3 Python processes while we set this
-    `spark.rapids.python.concurrentPythonWorkers` to 4.
+    `spark.cudf.python.concurrentPythonWorkers` to 4.
 
     ```python
     df_1 = df_0.mapInPandas(udf_1, schema_1)
@@ -280,7 +280,7 @@ The following configuration settings are also relevant for GPU scheduling for Pa
               +- GpuArrowEvalPython
     ```
     This means each Spark task will trigger 2 Python processes. In this case, if we set
-    `spark.rapids.python.concurrentPythonWorkers=2`, it will also probably result in a hang as we
+    `spark.cudf.python.concurrentPythonWorkers=2`, it will also probably result in a hang as we
     allow 2 tasks running and each of them spawns 2 Python processes. Let's say Task_1_Process_1 and
     Task_2_Process_1 acquired the semaphore, but neither of them are going to proceed becasue both
     of them are waiting for their second semaphore.

@@ -30,7 +30,7 @@ import org.apache.spark.sql.delta.rapids.GpuDeltaReorgTableCommand
 import org.apache.spark.sql.execution.command.RunnableCommand
 
 object DeltaReorgTableCommandMeta {
-  private val optimizeCommandConfKey = "spark.rapids.sql.command.OptimizeTableCommand"
+  private val optimizeCommandConfKey = "spark.cudf.sql.command.OptimizeTableCommand"
 
   def rule: RunnableCommandRule[DeltaReorgTableCommand] = {
     new RunnableCommandRule[DeltaReorgTableCommand](

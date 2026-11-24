@@ -27,7 +27,7 @@ private[rapids] trait RapidsConfResourceEntries {
 
   // Resource Configuration
 
-  val PINNED_POOL_SIZE = conf("spark.rapids.memory.pinnedPool.size")
+  val PINNED_POOL_SIZE = conf("spark.cudf.memory.pinnedPool.size")
     .doc("The size of the pinned memory pool in bytes unless otherwise specified. " +
       "Use 0 to disable the pool.")
     .startupOnly()
@@ -35,7 +35,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(0)
 
-  val PAGEABLE_POOL_SIZE = conf("spark.rapids.memory.pageablePool.size")
+  val PAGEABLE_POOL_SIZE = conf("spark.cudf.memory.pageablePool.size")
     .doc("Size in bytes of a pre-touched pageable host memory pool used for non-pinned " +
       "allocations and when the pinned pool is exhausted. Set to 0 to disable; allocations " +
       "then use raw host memory.")
@@ -45,14 +45,14 @@ private[rapids] trait RapidsConfResourceEntries {
     .checkValue(_ >= 0, "Pageable pool size must be non-negative")
     .createWithDefault(0)
 
-  val PAGEABLE_POOL_PRETOUCH_THREADS = conf("spark.rapids.memory.pageablePool.pretouchThreads")
+  val PAGEABLE_POOL_PRETOUCH_THREADS = conf("spark.cudf.memory.pageablePool.pretouchThreads")
     .doc("Number of worker threads used to pre-touch the pageable pool at startup.")
     .startupOnly()
     .internal()
     .integerConf
     .createWithDefault(16)
 
-  val PINNED_POOL_SET_CUIO_DEFAULT = conf("spark.rapids.memory.pinnedPool.setCuioDefault")
+  val PINNED_POOL_SET_CUIO_DEFAULT = conf("spark.cudf.memory.pinnedPool.setCuioDefault")
     .doc("If set to true, the pinned pool configured for the plugin will be shared with " +
       "cuIO for small pinned allocations.")
     .startupOnly()
@@ -61,7 +61,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .createWithDefault(true)
 
   val PINNED_POOL_PARALLEL_INIT_THREADS =
-    conf("spark.rapids.memory.pinnedPool.parallelInit.threads")
+    conf("spark.cudf.memory.pinnedPool.parallelInit.threads")
       .doc("Number of CPU threads used to initialize the pinned pool's backing memory, capped at " +
         "the number of executor cores. Set to 'all' to use the number of executor cores. A value " +
         "of 1 initializes the backing memory using cudaHostAlloc. Values greater than 1 instead " +
@@ -76,7 +76,7 @@ private[rapids] trait RapidsConfResourceEntries {
         "Pinned-pool initialization threads must be a positive integer or 'all'.")
       .createWithDefault("all")
 
-  val OFF_HEAP_LIMIT_ENABLED = conf("spark.rapids.memory.host.offHeapLimit.enabled")
+  val OFF_HEAP_LIMIT_ENABLED = conf("spark.cudf.memory.host.offHeapLimit.enabled")
       .doc("Should the off heap limit be enforced or not.")
       .startupOnly()
       // This might change as a part of https://github.com/NVIDIA/spark-rapids/issues/8878
@@ -84,7 +84,7 @@ private[rapids] trait RapidsConfResourceEntries {
       .booleanConf
       .createWithDefault(false)
 
-  val OFF_HEAP_LIMIT_SIZE = conf("spark.rapids.memory.host.offHeapLimit.size")
+  val OFF_HEAP_LIMIT_SIZE = conf("spark.cudf.memory.host.offHeapLimit.size")
       .doc("The maximum amount of off heap memory that the plugin will use. " +
           "This includes pinned memory and some overhead memory. If pinned is larger " +
           "than this - overhead pinned will be truncated.")
@@ -94,21 +94,21 @@ private[rapids] trait RapidsConfResourceEntries {
       .bytesConf(ByteUnit.BYTE)
       .createOptional // The default
 
-  val CGROUPS_MEMORY_LIMIT_PATH = conf("spark.rapids.cgroups.memory.limit.path")
+  val CGROUPS_MEMORY_LIMIT_PATH = conf("spark.cudf.cgroups.memory.limit.path")
     .doc("The filepath of the local file on host that stores the memory limit " +
       "for the process. If omitted, attempts to detect the file from common locations.")
     .startupOnly()
     .stringConf
     .createOptional
 
-  val CGROUPS_MEMORY_USAGE_PATH = conf("spark.rapids.cgroups.memory.usage.path")
+  val CGROUPS_MEMORY_USAGE_PATH = conf("spark.cudf.cgroups.memory.usage.path")
     .doc("The filepath of the local file on host that stores the memory usage " +
       "for the process. If omitted, attempts to detect the file from common locations.")
     .startupOnly()
     .stringConf
     .createOptional
 
-  val TASK_OVERHEAD_SIZE = conf("spark.rapids.memory.host.taskOverhead.size")
+  val TASK_OVERHEAD_SIZE = conf("spark.cudf.memory.host.taskOverhead.size")
       .doc("The amount of off heap memory reserved per task for overhead activities " +
           "like C++ heap/stack and a few other small things that are hard to control for.")
       .startupOnly()
@@ -116,7 +116,7 @@ private[rapids] trait RapidsConfResourceEntries {
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(15L * 1024 * 1024) // 15 MiB
 
-  val RMM_DEBUG = conf("spark.rapids.memory.gpu.debug")
+  val RMM_DEBUG = conf("spark.cudf.memory.gpu.debug")
     .doc("Provides a log of GPU memory allocations and frees. If set to " +
       "STDOUT or STDERR the logging will go there. Setting it to NONE disables logging. " +
       "All other values are reserved for possible future expansion and in the mean time will " +
@@ -125,7 +125,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .stringConf
     .createWithDefault("NONE")
 
-  val SPARK_RMM_STATE_DEBUG = conf("spark.rapids.memory.gpu.state.debug")
+  val SPARK_RMM_STATE_DEBUG = conf("spark.cudf.memory.gpu.state.debug")
       .doc("To better recover from out of memory errors, RMM will track several states for " +
           "the threads that interact with the GPU. This provides a log of those state " +
           "transitions to aid in debugging it. STDOUT or STDERR will have the logging go there " +
@@ -135,7 +135,7 @@ private[rapids] trait RapidsConfResourceEntries {
       .stringConf
       .createWithDefault("")
 
-  val SPARK_RMM_STATE_ENABLE = conf("spark.rapids.memory.gpu.state.enable")
+  val SPARK_RMM_STATE_ENABLE = conf("spark.cudf.memory.gpu.state.enable")
       .doc("Enabled or disable using the SparkRMM state tracking to improve " +
           "OOM response. This includes possibly retrying parts of the processing in " +
           "the case of an OOM")
@@ -144,7 +144,7 @@ private[rapids] trait RapidsConfResourceEntries {
       .booleanConf
       .createWithDefault(true)
 
-  val GPU_OOM_DUMP_DIR = conf("spark.rapids.memory.gpu.oomDumpDir")
+  val GPU_OOM_DUMP_DIR = conf("spark.cudf.memory.gpu.oomDumpDir")
     .doc("The path to a local directory where a heap dump will be created if the GPU " +
       "encounters an unrecoverable out-of-memory (OOM) error. The filename will be of the " +
       "form: \"gpu-oom-<pid>-<dumpId>.hprof\" where <pid> is the process ID, and " +
@@ -155,7 +155,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .createOptional
 
   val GPU_OOM_MAX_RETRIES =
-    conf("spark.rapids.memory.gpu.oomMaxRetries")
+    conf("spark.cudf.memory.gpu.oomMaxRetries")
       .doc("The number of times that an OOM will be re-attempted after the device store " +
         "can't spill anymore. In practice, we can use Cuda.deviceSynchronize to allow temporary " +
         "state in the allocator and in the various streams to catch up, in hopes we can satisfy " +
@@ -164,7 +164,7 @@ private[rapids] trait RapidsConfResourceEntries {
       .integerConf
       .createWithDefault(2)
 
-  val ENABLE_R2C_RETRY = conf("spark.rapids.sql.rowToColumnar.retry.enabled")
+  val ENABLE_R2C_RETRY = conf("spark.cudf.sql.rowToColumnar.retry.enabled")
     .doc("When true (default), the row-to-columnar conversion uses a per-batch retry block " +
       "so that host OOM during conversion can be recovered with negligible overhead. " +
       "Set to false to disable retry and let host OOM fail the task immediately.")
@@ -172,7 +172,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .booleanConf
     .createWithDefault(true)
 
-  val GPU_COREDUMP_DIR = conf("spark.rapids.gpu.coreDump.dir")
+  val GPU_COREDUMP_DIR = conf("spark.cudf.gpu.coreDump.dir")
     .doc("The URI to a directory where a GPU core dump will be created if the GPU encounters " +
       "an exception. The URI can reference a distributed filesystem. The filename will be of the " +
       "form gpucore-<appID>-<executorID>.nvcudmp, where <appID> is the Spark application ID and " +
@@ -181,21 +181,21 @@ private[rapids] trait RapidsConfResourceEntries {
     .stringConf
     .createOptional
 
-val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
+val GPU_COREDUMP_PIPE_PATTERN = conf("spark.cudf.gpu.coreDump.pipePattern")
     .doc("The pattern to use to generate the named pipe path. Occurrences of %p in the pattern " +
       "will be replaced with the process ID of the executor.")
     .internal
     .stringConf
     .createWithDefault("gpucorepipe.%p")
 
-  val GPU_COREDUMP_FULL = conf("spark.rapids.gpu.coreDump.full")
+  val GPU_COREDUMP_FULL = conf("spark.cudf.gpu.coreDump.full")
     .doc("If true, GPU coredumps will be a full coredump (i.e.: with local, shared, and global " +
       "memory).")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val ENABLE_CPU_BRIDGE = conf("spark.rapids.sql.expression.cpuBridge.enabled")
+  val ENABLE_CPU_BRIDGE = conf("spark.cudf.sql.expression.cpuBridge.enabled")
     .doc("Enable CPU-GPU bridge expressions that allow CPU expression subtrees " +
       "to run while keeping the overall plan on GPU. When enabled, expressions that have no " +
       "GPU implementation will automatically be wrapped in bridge expressions instead of " +
@@ -203,14 +203,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
-  val BRIDGE_DISALLOW_LIST = conf("spark.rapids.sql.expression.cpuBridge.disallowList")
+  val BRIDGE_DISALLOW_LIST = conf("spark.cudf.sql.expression.cpuBridge.disallowList")
     .doc("Comma separated list of expression class names that should not use CPU bridge " +
       "expressions even when bridge is enabled.")
     .internal()
     .stringConf
     .createWithDefault("")
 
-  val CPU_BRIDGE_THREAD_POOL_SIZE = conf("spark.rapids.sql.cpuBridge.threadPoolSize")
+  val CPU_BRIDGE_THREAD_POOL_SIZE = conf("spark.cudf.sql.cpuBridge.threadPoolSize")
     .doc("Override the default CPU bridge thread pool size. When set to a positive value, " +
       "uses this specific number of threads instead of the default calculation based on " +
       "task slots. This is an internal config primarily for testing and debugging.")
@@ -219,26 +219,26 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Thread pool size must be positive")
     .createOptional
 
-  val GPU_COREDUMP_COMPRESSION_CODEC = conf("spark.rapids.gpu.coreDump.compression.codec")
+  val GPU_COREDUMP_COMPRESSION_CODEC = conf("spark.cudf.gpu.coreDump.compression.codec")
     .doc("The codec used to compress GPU core dumps. Spark provides the codecs " +
       "lz4, lzf, snappy, and zstd.")
     .internal()
     .stringConf
     .createWithDefault("zstd")
 
-  val GPU_COREDUMP_COMPRESS = conf("spark.rapids.gpu.coreDump.compress")
+  val GPU_COREDUMP_COMPRESS = conf("spark.cudf.gpu.coreDump.compress")
     .doc("If true, GPU coredumps will be compressed using the compression codec specified " +
       s"in $GPU_COREDUMP_COMPRESSION_CODEC")
     .internal()
     .booleanConf
     .createWithDefault(true)
 
-  private val RMM_ALLOC_MAX_FRACTION_KEY = "spark.rapids.memory.gpu.maxAllocFraction"
-  private val RMM_ALLOC_MIN_FRACTION_KEY = "spark.rapids.memory.gpu.minAllocFraction"
-  private val RMM_ALLOC_RESERVE_KEY = "spark.rapids.memory.gpu.reserve"
-  private val INTEGRATED_GPU_MEMORY_FRACTION_KEY = "spark.rapids.memory.integratedGpuMemoryFraction"
+  private val RMM_ALLOC_MAX_FRACTION_KEY = "spark.cudf.memory.gpu.maxAllocFraction"
+  private val RMM_ALLOC_MIN_FRACTION_KEY = "spark.cudf.memory.gpu.minAllocFraction"
+  private val RMM_ALLOC_RESERVE_KEY = "spark.cudf.memory.gpu.reserve"
+  private val INTEGRATED_GPU_MEMORY_FRACTION_KEY = "spark.cudf.memory.integratedGpuMemoryFraction"
 
-  val RMM_ALLOC_FRACTION = conf("spark.rapids.memory.gpu.allocFraction")
+  val RMM_ALLOC_FRACTION = conf("spark.cudf.memory.gpu.allocFraction")
     .doc("The fraction of available (free) GPU memory that should be allocated for pooled " +
       "memory. This must be less than or equal to the maximum limit configured via " +
       s"$RMM_ALLOC_MAX_FRACTION_KEY, and greater than or equal to the minimum limit configured " +
@@ -248,7 +248,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v >= 0 && v <= 1, "The fraction value must be in [0, 1].")
     .createWithDefault(1)
 
-  val RMM_EXACT_ALLOC = conf("spark.rapids.memory.gpu.allocSize")
+  val RMM_EXACT_ALLOC = conf("spark.cudf.memory.gpu.allocSize")
       .doc("The exact size in byte that RMM should allocate. This is intended to only be " +
           "used for testing.")
       .internal() // If this becomes public we need to add in checks for the value when it is used.
@@ -279,7 +279,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
   val RMM_ALLOC_RESERVE = conf(RMM_ALLOC_RESERVE_KEY)
       .doc("The amount of GPU memory that should remain unallocated by RMM and left for " +
           "system use such as memory needed for kernels and kernel launches. When " +
-          "spark.rapids.shuffle.mode is UCX and spark.rapids.memory.gpu.pool is ASYNC, the UCX " +
+          "spark.cudf.shuffle.mode is UCX and spark.cudf.memory.gpu.pool is ASYNC, the UCX " +
           "shuffle's GPU bounce buffers are reserved additionally.")
       .startupOnly()
       .bytesConf(ByteUnit.BYTE)
@@ -296,19 +296,19 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v >= 0 && v <= 1, "The fraction value must be in [0, 1].")
     .createWithDefault(0.6)
 
-  val HOST_SPILL_STORAGE_SIZE = conf("spark.rapids.memory.host.spillStorageSize")
+  val HOST_SPILL_STORAGE_SIZE = conf("spark.cudf.memory.host.spillStorageSize")
     .doc("Amount of off-heap host memory to use for buffering spilled GPU data before spilling " +
         "to local disk. Use -1 to set the amount to the combined size of pinned and pageable " +
         "memory pools. This config is deprecated in favor of " +
-        "spark.rapids.memory.host.offHeapLimit.enabled/" +
-        "spark.rapids.memory.host.offHeapLimit.size, which will take precedence if set.")
+        "spark.cudf.memory.host.offHeapLimit.enabled/" +
+        "spark.cudf.memory.host.offHeapLimit.size, which will take precedence if set.")
     .startupOnly()
     .commonlyUsed()
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(-1)
 
   val PARTIAL_FILE_BUFFER_INITIAL_SIZE =
-    conf("spark.rapids.memory.host.partialFileBufferInitialSize")
+    conf("spark.cudf.memory.host.partialFileBufferInitialSize")
     .doc("The initial size in bytes for a host memory buffer used by " +
         "SpillablePartialFileHandle during shuffle write. This buffer allows shuffle " +
         "data to be kept in memory instead of writing to disk immediately, reducing " +
@@ -323,7 +323,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(32L * 1024 * 1024)  // 32MB default, expanded predictively
 
   val PARTIAL_FILE_BUFFER_MAX_SIZE =
-    conf("spark.rapids.memory.host.partialFileBufferMaxSize")
+    conf("spark.cudf.memory.host.partialFileBufferMaxSize")
     .doc("The maximum size in bytes for a single host memory buffer used by " +
         "SpillablePartialFileHandle during shuffle write. When a buffer needs to " +
         "expand beyond this limit, it will be spilled to disk instead. This prevents " +
@@ -335,7 +335,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(Int.MaxValue.toLong)  // ~2GB, limited by ByteBuffer
 
   val PARTIAL_FILE_BUFFER_MEMORY_THRESHOLD =
-    conf("spark.rapids.memory.host.partialFileBufferMemoryThreshold")
+    conf("spark.cudf.memory.host.partialFileBufferMemoryThreshold")
     .doc("The host memory usage threshold (as a fraction from 0.0 to 1.0) for deciding " +
         "whether to use memory-based buffering for partial files during shuffle write. " +
         "When host memory usage exceeds this threshold, file-based storage will be used " +
@@ -353,7 +353,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "The memory threshold must be in the range (0.0, 1.0]")
     .createWithDefault(0.5)
 
-  val UNSPILL = conf("spark.rapids.memory.gpu.unspill.enabled")
+  val UNSPILL = conf("spark.cudf.memory.gpu.unspill.enabled")
     .doc("When a spilled GPU buffer is needed again, should it be unspilled, or only copied " +
         "back into GPU memory temporarily. Unspilling may be useful for GPU buffers that are " +
         "needed frequently, for example, broadcast variables; however, it may also increase GPU " +
@@ -362,7 +362,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
-  val RMM_POOL = conf("spark.rapids.memory.gpu.pool")
+  val RMM_POOL = conf("spark.cudf.memory.gpu.pool")
     .doc("Select the RMM pooling allocator to use. Valid values are \"DEFAULT\", \"ARENA\", " +
       "\"ASYNC\", and \"NONE\". With \"DEFAULT\", the RMM pool allocator is used; with " +
       "\"ARENA\", the RMM arena allocator is used; with \"ASYNC\", the new CUDA stream-ordered " +
@@ -372,7 +372,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createWithDefault("ASYNC")
 
-  val CONCURRENT_GPU_TASKS = conf("spark.rapids.sql.concurrentGpuTasks")
+  val CONCURRENT_GPU_TASKS = conf("spark.cudf.sql.concurrentGpuTasks")
       .doc("Set the initial number of tasks that can execute concurrently per GPU. " +
         "By default the number of tasks allowed on the GPU will adjust dynamically " +
         "to try and provide optimal performance. This sets the starting point for each " +
@@ -381,13 +381,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .integerConf
       .createOptional
 
-  val DYNAMIC_CONCURRENT_GPU_TASKS = conf("spark.rapids.sql.concurrentGpuTasks.dynamic")
+  val DYNAMIC_CONCURRENT_GPU_TASKS = conf("spark.cudf.sql.concurrentGpuTasks.dynamic")
       .doc("Set to false if the system should not dynamically adjust the concurrent task " +
         "amount, but keep it to be a static number")
       .booleanConf
       .createWithDefault(true)
 
-  val MAX_CONCURRENT_GPU_TASKS = conf("spark.rapids.sql.maxConcurrentGpuTasks")
+  val MAX_CONCURRENT_GPU_TASKS = conf("spark.cudf.sql.maxConcurrentGpuTasks")
       .doc("The maximum number of tasks that can execute concurrently per GPU. " +
         "This sets an upper bound on concurrent task execution regardless of " +
         "available GPU memory permits. Set to 0 for no limit.")
@@ -395,7 +395,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .integerConf
       .createWithDefault(0)
 
-  val GPU_BATCH_SIZE_BYTES = conf("spark.rapids.sql.batchSizeBytes")
+  val GPU_BATCH_SIZE_BYTES = conf("spark.cudf.sql.batchSizeBytes")
     .doc("Set the target number of bytes for a GPU batch. Splits sizes for input data " +
       "is covered by separate configs.")
     .commonlyUsed()
@@ -403,7 +403,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Batch size must be positive")
     .createWithDefault(1 * 1024 * 1024 * 1024) // 1 GiB is the default
 
-  val HISTORY_METRICS_PROVIDER = conf("spark.rapids.sql.history.metrics.provider")
+  val HISTORY_METRICS_PROVIDER = conf("spark.cudf.sql.history.metrics.provider")
     .doc("Selects the driver-side history metrics provider by name. The default 'none' uses " +
       "the built-in no-op store. The local SQLite provider is bundled; other providers " +
       "must be present on the driver classpath.")
@@ -413,7 +413,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v.trim.nonEmpty, "History metrics provider name must not be empty")
     .createWithDefault("none")
 
-  val HISTORY_PLANNING_TIMEOUT_MS = conf("spark.rapids.sql.history.planningTimeoutMillis")
+  val HISTORY_PLANNING_TIMEOUT_MS = conf("spark.cudf.sql.history.planningTimeoutMillis")
     .doc("Budget for one history lookup on the query planning path. A lookup that does not " +
       "answer within it leaves the static planning decision in place.")
     .internal()
@@ -422,7 +422,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "History planning timeout must be positive")
     .createWithDefault(100)
 
-  val HISTORY_DECLARE_TIMEOUT_MS = conf("spark.rapids.sql.history.declareTimeoutMillis")
+  val HISTORY_DECLARE_TIMEOUT_MS = conf("spark.cudf.sql.history.declareTimeoutMillis")
     .doc("Budget for declaring each history metric family to the store, once per store. A " +
       "declaration that does not answer within it leaves the static planning decision in place.")
     .internal()
@@ -431,7 +431,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "History declare timeout must be positive")
     .createWithDefault(5000)
 
-  val HISTORY_SCAN_SPLIT_ENABLED = conf("spark.rapids.sql.history.scanSplit.enabled")
+  val HISTORY_SCAN_SPLIT_ENABLED = conf("spark.cudf.sql.history.scanSplit.enabled")
     .doc("When a history metrics provider is set and this is true, sizes scan splits from the " +
       "decode-expansion ratio recorded by earlier runs. Off by default: the ratio is recorded " +
       "per table, so it does not account for the columns a scan reads, the filters it pushes " +
@@ -442,7 +442,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
-  val HISTORY_SCAN_SPLIT_MAX_AGE_DAYS = conf("spark.rapids.sql.history.scanSplit.maxAgeDays")
+  val HISTORY_SCAN_SPLIT_MAX_AGE_DAYS = conf("spark.cudf.sql.history.scanSplit.maxAgeDays")
     .doc("How old, in days, the last recorded decode-expansion ratio of a table may be and " +
       "still size its scan splits. An older ratio is ignored and the scan keeps its static " +
       "split. Values above the history store's retention, 14 days, have the same effect as 14. " +
@@ -452,7 +452,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Scan split maximum age must be positive")
     .createWithDefault(7)
 
-  val HISTORY_SCAN_SPLIT_MAX_BYTES = conf("spark.rapids.sql.history.scanSplit.maxBytes")
+  val HISTORY_SCAN_SPLIT_MAX_BYTES = conf("spark.cudf.sql.history.scanSplit.maxBytes")
     .doc("Upper bound of a scan split sized from history. The split is also kept at or below " +
       "the listed bytes divided by the minimum partition count, to retain parallelism.")
     .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
@@ -460,7 +460,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Scan split maximum must be positive")
     .createWithDefault(4L * 1024 * 1024 * 1024)
 
-  val HISTORY_SCAN_SPLIT_MIN_BYTES = conf("spark.rapids.sql.history.scanSplit.minBytes")
+  val HISTORY_SCAN_SPLIT_MIN_BYTES = conf("spark.cudf.sql.history.scanSplit.minBytes")
     .doc("Lower bound of a scan split sized from history. When the listed bytes divided by the " +
       "minimum partition count is below it, the scan keeps its static split.")
     .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
@@ -468,7 +468,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Scan split minimum must be positive")
     .createWithDefault(64L * 1024 * 1024)
 
-  val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
+  val CHUNKED_READER = conf("spark.cudf.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +
       "reading highly compressed data that could not be read otherwise, but at the expense " +
       "of more GPU memory, and in some cases more GPU computation. "+
@@ -476,7 +476,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
-  val CHUNKED_READER_MEMORY_USAGE_RATIO = conf("spark.rapids.sql.reader.chunked.memoryUsageRatio")
+  val CHUNKED_READER_MEMORY_USAGE_RATIO = conf("spark.cudf.sql.reader.chunked.memoryUsageRatio")
     .doc("A value to compute soft limit on the internal memory usage of the chunked reader " +
       "(if being used). Such limit is calculated as the multiplication of this value and " +
       s"'${GPU_BATCH_SIZE_BYTES.key}'.")
@@ -486,7 +486,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "The ratio value must be positive.")
     .createWithDefault(4)
 
-  val LIMIT_CHUNKED_READER_MEMORY_USAGE = conf("spark.rapids.sql.reader.chunked.limitMemoryUsage")
+  val LIMIT_CHUNKED_READER_MEMORY_USAGE = conf("spark.cudf.sql.reader.chunked.limitMemoryUsage")
     .doc("Enable a soft limit on the internal memory usage of the chunked reader " +
       "(if being used). Such limit is calculated as the multiplication of " +
       s"'${GPU_BATCH_SIZE_BYTES.key}' and '${CHUNKED_READER_MEMORY_USAGE_RATIO.key}'." +
@@ -495,14 +495,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createOptional
 
-  val CHUNKED_SUBPAGE_READER = conf("spark.rapids.sql.reader.chunked.subPage")
+  val CHUNKED_SUBPAGE_READER = conf("spark.cudf.sql.reader.chunked.subPage")
     .doc("Enable a chunked reader where possible for reading data that is smaller " +
       "than the typical row group/page limit. Currently deprecated and replaced by " +
       s"'${LIMIT_CHUNKED_READER_MEMORY_USAGE}'.")
     .booleanConf
     .createOptional
 
-  val MAX_GPU_COLUMN_SIZE_BYTES = conf("spark.rapids.sql.columnSizeBytes")
+  val MAX_GPU_COLUMN_SIZE_BYTES = conf("spark.cudf.sql.columnSizeBytes")
     .doc("Limit the max number of bytes for a GPU column. It is same as the cudf " +
       "row count limit of a column. It is used by the multi-file readers. " +
       "See com.nvidia.spark.rapids.BatchWithPartitionDataUtils.")
@@ -512,7 +512,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       s"Column size must be positive and not exceed ${Integer.MAX_VALUE} bytes.")
     .createWithDefault(Integer.MAX_VALUE) // 2 GiB is the default
 
-  val MAX_READER_BATCH_SIZE_ROWS = conf("spark.rapids.sql.reader.batchSizeRows")
+  val MAX_READER_BATCH_SIZE_ROWS = conf("spark.cudf.sql.reader.batchSizeRows")
     .doc("Soft limit on the maximum number of rows the reader will read per batch. " +
       "The orc and parquet readers will read row groups until this limit is met or exceeded. " +
       "The limit is respected by the csv reader.")
@@ -520,7 +520,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .integerConf
     .createWithDefault(Integer.MAX_VALUE)
 
-  val MAX_READER_BATCH_SIZE_BYTES = conf("spark.rapids.sql.reader.batchSizeBytes")
+  val MAX_READER_BATCH_SIZE_BYTES = conf("spark.cudf.sql.reader.batchSizeBytes")
     .doc("Soft limit on the maximum number of bytes the reader reads per batch. " +
       "The readers will read chunks of data until this limit is met or exceeded. " +
       "Note that the reader may estimate the number of bytes that will be used on the GPU " +
@@ -530,7 +530,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(Integer.MAX_VALUE)
 
   val READER_USE_READ_ESTIMATE_FROM_SCHEMA =
-    conf("spark.rapids.sql.reader.useReadEstimateFromSchema")
+    conf("spark.cudf.sql.reader.useReadEstimateFromSchema")
       .doc("Use a schema based estimate of GPU memory to limit a read batch. The estimate is a " +
         s"worst case guess that ignores compression, so it can stop a batch short of " +
         s"'${MAX_READER_BATCH_SIZE_BYTES.key}'. If unset, the estimate is used only when there " +
@@ -542,7 +542,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createOptional
 
-  val DRIVER_TIMEZONE = conf("spark.rapids.driver.user.timezone")
+  val DRIVER_TIMEZONE = conf("spark.cudf.driver.user.timezone")
     .doc("This config is used to inform the executor plugin about the driver's timezone " +
       "and is not intended to be set by the user.")
     .internal()
@@ -551,7 +551,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   // Internal Features
 
-  val UVM_ENABLED = conf("spark.rapids.memory.uvm.enabled")
+  val UVM_ENABLED = conf("spark.cudf.memory.uvm.enabled")
     .doc("UVM or universal memory can allow main host memory to act essentially as swap " +
       "for device(GPU) memory. This allows the GPU to process more data than fits in memory, but " +
       "can result in slower processing. This is an experimental feature.")
@@ -561,21 +561,21 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(false)
 
   val RANGE_SHUFFLE_INPUT_BATCHING_ENABLED =
-    conf("spark.rapids.sql.rangeShuffle.inputBatching.enabled")
+    conf("spark.cudf.sql.rangeShuffle.inputBatching.enabled")
       .doc("Enables experimental one-input-batch-at-a-time consumption for GPU range shuffles " +
         "to bound the amount of decoded input retained before partitioning.")
       .internal()
       .booleanConf
       .createWithDefault(false)
 
-  val EXPORT_COLUMNAR_RDD = conf("spark.rapids.sql.exportColumnarRdd")
+  val EXPORT_COLUMNAR_RDD = conf("spark.cudf.sql.exportColumnarRdd")
     .doc("Spark has no simply way to export columnar RDD data.  This turns on special " +
       "processing/tagging that allows the RDD to be picked back apart into a Columnar RDD.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val JOIN_STRATEGY = conf("spark.rapids.sql.join.strategy")
+  val JOIN_STRATEGY = conf("spark.cudf.sql.join.strategy")
     .doc("Specifies the join strategy to use for GPU joins. Options are: " +
       "AUTO (default) - automatically determine the best join strategy using heuristics; " +
       "INNER_HASH_WITH_POST - use inner hash join with post-processing to convert to other " +
@@ -589,7 +589,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValues(JoinStrategy.values.map(_.toString))
     .createWithDefault(JoinStrategy.AUTO.toString)
 
-  val JOIN_BUILD_SIDE = conf("spark.rapids.sql.join.buildSide")
+  val JOIN_BUILD_SIDE = conf("spark.cudf.sql.join.buildSide")
     .doc("Specifies the physical build side selection strategy for GPU join algorithms. " +
       "This controls which side the join algorithm uses as its internal build table, " +
       "which is distinct from the data movement build side (which side is materialized/" +
@@ -607,7 +607,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(JoinBuildSideSelection.AUTO.toString)
 
   val HASH_TABLE_REUSE =
-    conf("spark.rapids.sql.join.hashTable.reuse")
+    conf("spark.cudf.sql.join.hashTable.reuse")
       .doc("Enable reuse of hash tables across GPU hash-join probes. Currently this supports " +
         "caching broadcast hash tables. With AUTO build-side selection a heuristic is used to " +
         "determine whether to use the cached broadcast-side or rebuild with the stream-side. " +
@@ -615,7 +615,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
-  val LOG_JOIN_CARDINALITY = conf("spark.rapids.sql.join.logCardinality")
+  val LOG_JOIN_CARDINALITY = conf("spark.cudf.sql.join.logCardinality")
     .doc("Enable logging of join cardinality statistics to help diagnose performance issues. " +
       "When enabled, logs task context, key data types, join condition, row counts, and " +
       "distinct key counts for both left and right sides of joins. This can help identify " +
@@ -626,7 +626,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(false)
 
   val JOIN_GATHERER_SIZE_ESTIMATE_THRESHOLD =
-    conf("spark.rapids.sql.join.gatherer.sizeEstimateThreshold")
+    conf("spark.cudf.sql.join.gatherer.sizeEstimateThreshold")
     .doc("When a join is gathered we try to output a batch that is close to the target batch " +
       "size. But that can be expensive so we use a heuristic to estimate the size. It is based " +
       "on the average size of left and right rows. If that average size times the number of " +
@@ -640,7 +640,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(0.75)
 
   val SHUFFLED_HASH_JOIN_OPTIMIZE_SHUFFLE =
-    conf("spark.rapids.sql.shuffledHashJoin.optimizeShuffle")
+    conf("spark.cudf.sql.shuffledHashJoin.optimizeShuffle")
       .doc("Enable or disable an optimization where shuffled build side batches are kept " +
         "on the host while the first stream batch is loaded onto the GPU. The optimization " +
         "increases off-heap host memory usage to avoid holding onto the GPU semaphore while " +
@@ -649,25 +649,25 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(true)
 
-  val USE_SHUFFLED_SYMMETRIC_HASH_JOIN = conf("spark.rapids.sql.join.useShuffledSymmetricHashJoin")
+  val USE_SHUFFLED_SYMMETRIC_HASH_JOIN = conf("spark.cudf.sql.join.useShuffledSymmetricHashJoin")
     .doc("Use the experimental shuffle symmetric hash join designed to improve handling of large " +
-      "symmetric joins. Requires spark.rapids.sql.shuffledHashJoin.optimizeShuffle=true.")
+      "symmetric joins. Requires spark.cudf.sql.shuffledHashJoin.optimizeShuffle=true.")
     .internal()
     .booleanConf
     .createWithDefault(true)
 
   val USE_SHUFFLED_ASYMMETRIC_HASH_JOIN =
-    conf("spark.rapids.sql.join.useShuffledAsymmetricHashJoin")
+    conf("spark.cudf.sql.join.useShuffledAsymmetricHashJoin")
       .doc("Use the experimental shuffle asymmetric hash join designed to improve handling of " +
         "large joins for left and right outer joins. Requires " +
-        "spark.rapids.sql.shuffledHashJoin.optimizeShuffle=true and " +
-        "spark.rapids.sql.join.useShuffledSymmetricHashJoin=true")
+        "spark.cudf.sql.shuffledHashJoin.optimizeShuffle=true and " +
+        "spark.cudf.sql.join.useShuffledSymmetricHashJoin=true")
       .internal()
       .booleanConf
       .createWithDefault(true)
 
   val JOIN_OUTER_MAGNIFICATION_THRESHOLD =
-    conf("spark.rapids.sql.join.outer.magnificationFactorThreshold")
+    conf("spark.cudf.sql.join.outer.magnificationFactorThreshold")
       .doc("The magnification factor threshold at which outer joins will consider using the " +
         "unnatural side of the join to build the hash table")
       .internal()
@@ -675,7 +675,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .createWithDefault(10000)
 
   val BUCKET_JOIN_IO_PREFETCH =
-    conf("spark.rapids.sql.join.bucket.IOPrefetch")
+    conf("spark.cudf.sql.join.bucket.IOPrefetch")
       .doc("Enable I/O prefetch of the upstream bucket scans if there is a SizedHashJoin " +
         "in downstream. Please notice the prefetch will only take affect with " +
         "MultiFileCloudPartitionReader")
@@ -683,7 +683,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(true)
 
-  val STABLE_SORT = conf("spark.rapids.sql.stableSort.enabled")
+  val STABLE_SORT = conf("spark.cudf.sql.stableSort.enabled")
       .doc("Enable or disable stable sorting. Apache Spark's sorting is typically a stable " +
           "sort, but sort stability cannot be guaranteed in distributed work loads because the " +
           "order in which upstream data arrives to a task is not guaranteed. Sort stability then " +
@@ -694,7 +694,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(false)
 
-  val FILE_SCAN_PRUNE_PARTITION_ENABLED = conf("spark.rapids.sql.fileScanPrunePartition.enabled")
+  val FILE_SCAN_PRUNE_PARTITION_ENABLED = conf("spark.cudf.sql.fileScanPrunePartition.enabled")
     .doc("Enable or disable the partition column pruning for v1 file scan. Spark always asks " +
         "for all the partition columns even a query doesn't need them. Generation of " +
         "partition columns is relatively expensive for the GPU. Enabling this allows the " +
@@ -706,7 +706,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   // METRICS
 
-  val METRICS_LEVEL = conf("spark.rapids.sql.metrics.level")
+  val METRICS_LEVEL = conf("spark.cudf.sql.metrics.level")
       .doc("GPU plans can produce a lot more metrics than CPU plans do. In very large " +
           "queries this can sometimes result in going over the max result size limit for the " +
           "driver. Supported values include " +
@@ -722,20 +722,20 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .checkValues(Set("DEBUG", "MODERATE", "ESSENTIAL"))
       .createWithDefault("MODERATE")
 
-  val PROFILE_PATH = conf("spark.rapids.profile.pathPrefix")
+  val PROFILE_PATH = conf("spark.cudf.profile.pathPrefix")
     .doc("Enables profiling and specifies a URI path to use when writing profile data")
     .internal()
     .stringConf
     .createOptional
 
-  val PROFILE_EXECUTORS = conf("spark.rapids.profile.executors")
+  val PROFILE_EXECUTORS = conf("spark.cudf.profile.executors")
     .doc("Comma-separated list of executors IDs and hyphenated ranges of executor IDs to " +
       "profile when profiling is enabled")
     .internal()
     .stringConf
     .createWithDefault("0")
 
-  val PROFILE_TIME_RANGES_SECONDS = conf("spark.rapids.profile.timeRangesInSeconds")
+  val PROFILE_TIME_RANGES_SECONDS = conf("spark.cudf.profile.timeRangesInSeconds")
     .doc("Comma-separated list of start-end ranges of time, in seconds, since executor startup " +
       "to start and stop profiling. For example, a value of 10-30,100-110 will have the profiler " +
       "wait for 10 seconds after executor startup then profile for 20 seconds, then wait for " +
@@ -744,40 +744,40 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createOptional
 
-  val PROFILE_JOBS = conf("spark.rapids.profile.jobs")
+  val PROFILE_JOBS = conf("spark.cudf.profile.jobs")
     .doc("Comma-separated list of job IDs and hyphenated ranges of job IDs to " +
       "profile when profiling is enabled")
     .internal()
     .stringConf
     .createOptional
 
-  val PROFILE_STAGES = conf("spark.rapids.profile.stages")
+  val PROFILE_STAGES = conf("spark.cudf.profile.stages")
     .doc("Comma-separated list of stage IDs and hyphenated ranges of stage IDs to " +
       "profile when profiling is enabled")
     .internal()
     .stringConf
     .createOptional
 
-  val PROFILE_TASK_LIMIT_PER_STAGE = conf("spark.rapids.profile.taskLimitPerStage")
+  val PROFILE_TASK_LIMIT_PER_STAGE = conf("spark.cudf.profile.taskLimitPerStage")
     .doc("Limit the number of tasks to profile per stage. A value <= 0 will profile all tasks.")
     .internal()
     .integerConf
     .createWithDefault(0)
 
-  val PROFILE_ASYNC_ALLOC_CAPTURE = conf("spark.rapids.profile.asyncAllocCapture")
+  val PROFILE_ASYNC_ALLOC_CAPTURE = conf("spark.cudf.profile.asyncAllocCapture")
     .doc("Whether the profiler should capture async CUDA allocation and free events")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val PROFILE_DRIVER_POLL_MILLIS = conf("spark.rapids.profile.driverPollMillis")
+  val PROFILE_DRIVER_POLL_MILLIS = conf("spark.cudf.profile.driverPollMillis")
     .doc("Interval in milliseconds the executors will poll for job and stage completion when " +
       "stage-level profiling is used.")
     .internal()
     .integerConf
     .createWithDefault(1000)
 
-  val PROFILE_COMPRESSION = conf("spark.rapids.profile.compression")
+  val PROFILE_COMPRESSION = conf("spark.cudf.profile.compression")
     .doc("Specifies the compression codec to use when writing profile data, one of " +
       "zstd or none")
     .internal()
@@ -786,14 +786,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValues(Set("zstd", "none"))
     .createWithDefault("zstd")
 
-  val PROFILE_FLUSH_PERIOD_MILLIS = conf("spark.rapids.profile.flushPeriodMillis")
+  val PROFILE_FLUSH_PERIOD_MILLIS = conf("spark.cudf.profile.flushPeriodMillis")
     .doc("Specifies the time period in milliseconds to flush profile records. " +
       "A value <= 0 will disable time period flushing.")
     .internal()
     .integerConf
     .createWithDefault(0)
 
-  val PROFILE_WRITE_BUFFER_SIZE = conf("spark.rapids.profile.writeBufferSize")
+  val PROFILE_WRITE_BUFFER_SIZE = conf("spark.cudf.profile.writeBufferSize")
     .doc("Buffer size to use when writing profile records.")
     .internal()
     .bytesConf(ByteUnit.BYTE)
@@ -801,7 +801,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   // ASYNC PROFILER (FOR FLAME GRAPH)
 
-  val ASYNC_PROFILER_PATH_PREFIX = conf("spark.rapids.flameGraph.pathPrefix")
+  val ASYNC_PROFILER_PATH_PREFIX = conf("spark.cudf.flameGraph.pathPrefix")
     .doc("Enables collecting flame graph (with async profiler) and specifies " +
       "a file prefix to use when writing the JFR file by async-profiler. " +
       "The async-profiler will write a flame graph file for each stage. " +
@@ -811,14 +811,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createOptional
 
-  val ASYNC_PROFILER_EXECUTORS = conf("spark.rapids.flameGraph.executors")
+  val ASYNC_PROFILER_EXECUTORS = conf("spark.cudf.flameGraph.executors")
     .doc("Comma-separated list of executors IDs and hyphenated ranges of executor IDs to " +
       "profile when async-profiler (for flame graph) is enabled. " +
       "The default value '*' means all executors")
     .stringConf
     .createWithDefault("*")
 
-  val ASYNC_PROFILER_PROFILE_OPTIONS = conf("spark.rapids.flameGraph.asyncProfiler.options")
+  val ASYNC_PROFILER_PROFILE_OPTIONS = conf("spark.cudf.flameGraph.asyncProfiler.options")
     .doc("The cuDF plugin uses the async profiler to generate flame graphs. " +
       "You can specify profiler options via this property. " +
       "The plugin supports all options except for the 'file' option listed in " +
@@ -829,13 +829,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createWithDefault("jfr,event=cpu,wall=10ms")
 
-  val ASYNC_PROFILER_JFR_COMPRESSION = conf("spark.rapids.flameGraph.jfr.compression")
+  val ASYNC_PROFILER_JFR_COMPRESSION = conf("spark.cudf.flameGraph.jfr.compression")
     .doc("Enable compression for JFR files generated by async profiler. " +
       "When enabled, JFR files will be compressed after generation to save disk space.")
     .booleanConf
     .createWithDefault(false)
 
-  val ASYNC_PROFILER_STAGE_EPOCH_INTERVAL = conf("spark.rapids.flameGraph.stageEpochInterval")
+  val ASYNC_PROFILER_STAGE_EPOCH_INTERVAL = conf("spark.cudf.flameGraph.stageEpochInterval")
     .doc("Interval in seconds to determine the current stage epoch based on running task " +
       "counts. The profiler will check which stage has the most running tasks and profile " +
       "that stage during each epoch. This allows profiling when multiple stages run " +

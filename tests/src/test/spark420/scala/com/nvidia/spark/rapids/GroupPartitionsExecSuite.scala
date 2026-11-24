@@ -678,7 +678,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
 
     createTable(catalog, "left_table")
     createTable(catalog, "right_table")
-    val rapidsEnabled = spark.conf.get(RapidsConf.SQL_ENABLED.key)
+    val rapidsEnabled = RapidsConf.SQL_ENABLED.get(spark.sessionState.conf).toString
     spark.conf.set(RapidsConf.SQL_ENABLED.key, "false")
     try {
       spark.sql(

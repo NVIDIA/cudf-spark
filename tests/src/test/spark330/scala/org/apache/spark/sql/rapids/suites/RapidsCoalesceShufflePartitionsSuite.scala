@@ -140,7 +140,7 @@ class RapidsCoalesceShufflePartitionsSuite
 
   private def checkCpuAndGpu(spark: SparkSession, expectedRows: Seq[Row])(query: => DataFrame)(
       checkPlan: (SparkPlan, Boolean) => Unit): Unit = {
-    val enabled = spark.conf.get(RapidsConf.SQL_ENABLED.key)
+    val enabled = RapidsConf.SQL_ENABLED.get(spark.sessionState.conf)
     try {
       spark.conf.set(RapidsConf.SQL_ENABLED.key, false)
       val cpuDf = query

@@ -25,7 +25,7 @@ import org.apache.spark.SparkContext
 
 /** Limits DBR's nested Delta data-writing command to a validated atomic CTAS/RTAS call stack. */
 object GpuAtomicDeltaWriteContext {
-  private val activeKey = "spark.rapids.sql.delta.atomicWrite.active"
+  private val activeKey = "spark.cudf.sql.delta.atomicWrite.active"
   private val activeToken = UUID.randomUUID().toString
 
   def isActive: Boolean = SparkContext.getActive

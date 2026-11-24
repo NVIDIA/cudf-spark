@@ -307,7 +307,7 @@ object GpuDeltaParquetFileFormat {
         meta.willNotWorkOnGpu(
           "DBR 17.3/18.3 deletion vector reads on GPU require native cuDF deletion-vector " +
             "support with spark.databricks.delta.deletionVectors.useMetadataRowIndex " +
-            "and spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled set to true")
+            "and spark.cudf.sql.delta.deletionVectors.predicatePushdown.enabled set to true")
       }
       if (!format.optimizationsEnabled) {
         meta.willNotWorkOnGpu(

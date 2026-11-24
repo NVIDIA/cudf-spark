@@ -10,13 +10,13 @@ Hive text tables, and DSv2 file scans (Parquet, ORC, CSV, JSON, Avro).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `spark.rapids.sql.history.metrics.provider` | `none` | any other value enables history-backed planning |
-| `spark.rapids.sql.history.planningTimeoutMillis` | 100 | budget for one history lookup while planning |
-| `spark.rapids.sql.history.declareTimeoutMillis` | 5000 | budget for declaring each metric family to the store |
-| `spark.rapids.sql.history.scanSplit.enabled` | `false` | `true` turns on the scan split heuristic when a provider is set; off by default because the ratio is keyed by table only, not by the columns read, the filters pushed down or dynamic partition pruning |
-| `spark.rapids.sql.history.scanSplit.maxAgeDays` | 7 | how old the last ratio may be; lookup only, capped at the store's 14 day retention |
-| `spark.rapids.sql.history.scanSplit.minBytes` | 64 MiB | lower bound of a learned split |
-| `spark.rapids.sql.history.scanSplit.maxBytes` | 4 GiB | upper bound of a learned split |
+| `spark.cudf.sql.history.metrics.provider` | `none` | any other value enables history-backed planning |
+| `spark.cudf.sql.history.planningTimeoutMillis` | 100 | budget for one history lookup while planning |
+| `spark.cudf.sql.history.declareTimeoutMillis` | 5000 | budget for declaring each metric family to the store |
+| `spark.cudf.sql.history.scanSplit.enabled` | `false` | `true` turns on the scan split heuristic when a provider is set; off by default because the ratio is keyed by table only, not by the columns read, the filters pushed down or dynamic partition pruning |
+| `spark.cudf.sql.history.scanSplit.maxAgeDays` | 7 | how old the last ratio may be; lookup only, capped at the store's 14 day retention |
+| `spark.cudf.sql.history.scanSplit.minBytes` | 64 MiB | lower bound of a learned split |
+| `spark.cudf.sql.history.scanSplit.maxBytes` | 4 GiB | upper bound of a learned split |
 
 Planning only uses history once a provider store is actually installed. This package talks to
 the history metrics API (`MetricStores.current()`) only; the driver plugin's
@@ -83,7 +83,7 @@ extract what the two have in common, rather than to guess it now.
    changed, because stored observations are keyed by the id. A clash between two families makes
    building the catalog fail, which leaves history off.
 2. Write the heuristic as `ScanSplitHeuristic` is written (key, static decision, formula, bounds,
-   observation, and `enabled`, which reads its own `spark.rapids.sql.history.<name>.enabled`
+   observation, and `enabled`, which reads its own `spark.cudf.sql.history.<name>.enabled`
    switch) as a singleton over `MetricStores.current()`, and add it to the list in
    `HistoryHeuristics`, whose lifecycle is typed to `ScanSplitHeuristic` today.
 3. Call `decide` and `register` from the planning site.

@@ -27,6 +27,7 @@ import org.apache.spark.sql.rapids.GpuShuffleEnv
  * suite needs no SparkContext, shuffle manager or GPU.
  */
 class UcxReclaimAdmissionSuite extends AnyFunSuite {
+  // Inputs use legacy names to cover alias resolution; reasons name the canonical keys.
   private val gateKey = "spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled"
   private val modeKey = "spark.rapids.shuffle.mode"
   private val managerKey = "spark.shuffle.manager"
@@ -51,7 +52,8 @@ class UcxReclaimAdmissionSuite extends AnyFunSuite {
   }
 
   test("an unset gate key refuses, with a reason that names the key") {
-    assertRefusalNames(refusal(base.clone.remove(gateKey), isDataBricks = false), gateKey)
+    assertRefusalNames(refusal(base.clone.remove(gateKey), isDataBricks = false),
+      RapidsConf.SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED.key)
   }
 
   test("MULTITHREADED mode refuses, with a reason that names MULTITHREADED") {
@@ -82,9 +84,9 @@ class UcxReclaimAdmissionSuite extends AnyFunSuite {
     assertResult(None)(refusal(shuffleOff, isDataBricks = false))
   }
 
-  test("explainOnly mode refuses, with a reason that names spark.rapids.sql.mode") {
+  test("explainOnly mode refuses, with a reason that names the SQL mode key") {
     // no GPU is set up in this mode, so the endpoint's poll thread could not start
     val explainOnly = base.clone.set("spark.rapids.sql.mode", "explainOnly")
-    assertRefusalNames(refusal(explainOnly, isDataBricks = false), "spark.rapids.sql.mode")
+    assertRefusalNames(refusal(explainOnly, isDataBricks = false), RapidsConf.SQL_MODE.key)
   }
 }

@@ -31,6 +31,8 @@ class RapidsConfSuite extends AnyFunSuite {
       .createWithDefault("enabled")
 
     assert(registered.contains(entry))
+    // A legacy name passed to the builder is registered under its canonical name.
+    assertResult("spark.cudf.test.versioned")(entry.key)
     assertResult("26.08")(entry.versionInfo.sinceVersion)
 
     val out = new ByteArrayOutputStream()
@@ -39,7 +41,7 @@ class RapidsConfSuite extends AnyFunSuite {
     }
 
     assertResult(
-      "<a name=\"test.versioned\"></a>spark.rapids.test.versioned|" +
+      "<a name=\"test.versioned\"></a>spark.cudf.test.versioned|" +
         "test doc|enabled|Runtime|26.08\n") {
       out.toString("UTF-8")
     }

@@ -66,7 +66,7 @@ object GpuScalaUDFMeta {
       override def convertToGpuImpl(): GpuExpression = {
         // It can come here only when at least one option as below is true.
         //   1. UDF implements a RAPIDS accelerated interface.
-        //   2. The conf "spark.rapids.sql.rowBasedUDF.enabled" is enabled.
+        //   2. The conf "spark.cudf.sql.rowBasedUDF.enabled" is enabled.
         opRapidsFunc.map { rapidsFunc =>
           GpuScalaUDF(
             rapidsFunc,

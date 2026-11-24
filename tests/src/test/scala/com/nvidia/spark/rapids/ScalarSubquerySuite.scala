@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import org.apache.spark.sql.execution.{ScalarSubquery, SparkPlan}
 class ScalarSubquerySuite extends SparkQueryCompareTestSuite {
 
   private def checkExecPlan(plan: SparkPlan): Unit = {
-    if (!plan.conf.getAllConfs(RapidsConf.SQL_ENABLED.key).toBoolean) return
+    if (!RapidsConf.SQL_ENABLED.get(plan.conf)) return
     plan.find(_.expressions.exists(e => e.find(_.isInstanceOf[ScalarSubquery]).nonEmpty)) match {
       case Some(plan) =>
         throw new AssertionError(s"Assume no (cpu)ScalarSubquery, but found in $plan")
