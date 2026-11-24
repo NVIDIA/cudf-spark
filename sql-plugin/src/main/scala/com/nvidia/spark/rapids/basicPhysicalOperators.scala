@@ -1778,7 +1778,7 @@ object GpuUnionExec {
 }
 
 case class GpuUnionExec(children: Seq[SparkPlan])(
-    val isPlainUnion: Boolean = true) extends ShimSparkPlan with GpuExec {
+    val isPlainUnion: Boolean) extends ShimSparkPlan with GpuExec {
 
   override def otherCopyArgs: Seq[AnyRef] =
     Seq[AnyRef](isPlainUnion.asInstanceOf[java.lang.Boolean])
@@ -1816,11 +1816,16 @@ case class GpuUnionExec(children: Seq[SparkPlan])(
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
+    // Read this before creating child RDDs. A child such as an adaptive cache scan can sharpen
+    // its partitioning when executed, but this invocation must build the same union RDD that its
+    // caller observed from outputPartitioning.
+    val partitioning = outputPartitioning
+    val rdds = children.map(_.executeColumnar())
 
     GpuUnionExecShim.unionColumnarRdds(
       sparkContext,
-      children.map(_.executeColumnar()),
-      outputPartitioning,
+      rdds,
+      partitioning,
       numOutputRows,
       numOutputBatches)
   }
