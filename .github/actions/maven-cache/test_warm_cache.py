@@ -27,12 +27,20 @@ class MavenCacheWarmupTest(unittest.TestCase):
             settings.write_text("keep this file")
             github_env = Path(home) / "github-env"
             subprocess.run(["bash", script, "verify"], env=dict(os.environ, HOME=home,
-                           GITHUB_ENV=str(github_env), RUNNER_TEMP=home, MAVEN_OPTS="-Xmx1g"), check=True)
+                           GITHUB_ENV=str(github_env), RUNNER_TEMP=home, RUNNER_ENVIRONMENT="self-hosted",
+                           MAVEN_OPTS="-Xmx1g"), check=True)
             opts, path = github_env.read_text().splitlines()
             fresh_repo = Path(path.removeprefix("MAVEN_REPOSITORY="))
             self.assertEqual(opts, f"MAVEN_OPTS=-Xmx1g -Dmaven.repo.local={fresh_repo}")
             self.assertTrue(fresh_repo.is_dir())
             self.assertFalse(any(fresh_repo.iterdir()))
+            self.assertTrue((repo / "partial.jar").exists())
+            self.executable("rm", "exit 1")
+            result = subprocess.run(["bash", script, "verify"], env=dict(os.environ, HOME=home,
+                                    PATH=f"{self.bin}:{os.defpath}", GITHUB_ENV=str(github_env),
+                                    RUNNER_TEMP=home, RUNNER_ENVIRONMENT="github-hosted"),
+                                    check=True, capture_output=True, text=True)
+            self.assertIn("Could not reclaim space", result.stdout)
             self.assertTrue((repo / "partial.jar").exists())
             for runner, retained in [("self-hosted", True), ("github-hosted", False)]:
                 subprocess.run(["bash", script, "warm"], env=dict(os.environ, HOME=home,
