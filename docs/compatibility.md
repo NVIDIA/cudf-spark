@@ -1083,12 +1083,9 @@ hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising he
 
 Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
 ([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks
-runtimes, including 14.3 and 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
+Runtime 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
 `0x0ABC`. The GPU returns the corrected result for every Spark version, so results for
-odd-length input differ from the CPU on those runtimes. On Databricks 14.3, setting the internal
-configuration `spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled` to `true`
-(default: `false`) enables the corrected CPU behavior. The GPU behavior is unchanged by this
-setting.
+odd-length input differ from the CPU on those runtimes.
 
 ### String to Date
 

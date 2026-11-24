@@ -18,7 +18,7 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks143, is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
     is_spark_400_or_later, is_spark_local_mode, \
     with_cpu_session, with_gpu_session
 from asserts import assert_equal, collect_plan_nodes
@@ -56,8 +56,8 @@ delta_meta_allow = [
     "JsonToStructs"
 ]
 
-if is_databricks143() or is_databricks173_or_later():
-    # DBR 14.3 and 17.3 DV write/update paths can serialize Delta stats JSON on the CPU bridge.
+if is_databricks173_or_later():
+    # Databricks DV write/update paths can serialize Delta stats JSON on the CPU bridge.
     delta_meta_allow += ["StructsToJson", "CreateNamedStruct"]
 
 delta_write = ["RapidsDeltaWrite"]
@@ -186,30 +186,12 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
     return enable_deletion_vector
 
 
-def dml_deletion_vector_values_with_xfail_reasons(
-        enabled_xfail_reason=None, disabled_xfail_reason=None):
-    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+ and DBR 17.3+. Keep the DV-enabled
-    # xfail only for Databricks runtimes before 17.3, without suppressing OSS or DBR 17.3 coverage.
-    if is_databricks_runtime() and disabled_xfail_reason is not None:
-        enable_deletion_vector = [
-            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
-    else:
-        enable_deletion_vector = [False]
-
-    if supports_delta_lake_deletion_vectors() and (
-            is_databricks_runtime() or is_spark_353_or_later()):
-        if is_databricks_runtime() and not is_databricks173_or_later() \
-                and enabled_xfail_reason is not None:
-            enable_deletion_vector.append(
-                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
-        else:
-            enable_deletion_vector.append(True)
-
-    return enable_deletion_vector
-
-
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
-dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
+# Persistent-DV DML coverage needs DBR 17.3+ or OSS Delta on Spark 3.5.3+.
+dml_deletion_vector_values = [False]
+if supports_delta_lake_deletion_vectors() and (
+        is_databricks_runtime() or is_spark_353_or_later()):
+    dml_deletion_vector_values.append(True)
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 

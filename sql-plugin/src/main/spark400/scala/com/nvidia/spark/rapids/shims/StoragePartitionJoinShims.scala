@@ -28,7 +28,7 @@ import org.apache.spark.sql.execution.datasources.v2.StoragePartitionJoinParams
 
 /**
  * Shim for StoragePartitionJoinParams to handle package location change.
- * In Spark 3.5.0-db143 and 4.0.x, it's in org.apache.spark.sql.execution.datasources.v2
+ * In Apache Spark 4.0.x, it's in org.apache.spark.sql.execution.datasources.v2
  * In Spark 4.1.0+ and 400db173, it moved to org.apache.spark.sql.execution.joins
  */
 object StoragePartitionJoinShims {

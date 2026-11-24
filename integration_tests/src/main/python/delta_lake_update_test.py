@@ -110,8 +110,6 @@ def assert_delta_sql_update_collect(spark_tmp_path, use_cdf, enable_deletion_vec
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), reason="Deletion vectors aren't supported")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_353(),
                     reason="Update with deletion vector is only supported after delta.io 3.0.0")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 @pytest.mark.parametrize("update_sql", [
     "UPDATE delta.`{path}` SET a = 1 WHERE a = 0",
     "UPDATE delta.`{path}` SET a = 1"
@@ -142,8 +140,6 @@ def test_delta_update_with_deletion_vectors(
                     reason="Deletion vectors are not supported")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_353(),
                     reason="Update with deletion vector requires delta.io 3.0.0 or later")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_update_twice_with_dv(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
@@ -460,8 +456,7 @@ if is_before_spark_353():
 @ignore_order
 @pytest.mark.parametrize("disable_conf", fallback_test_params, ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values, ids=idfn)
 def test_delta_update_disabled_fallback(spark_tmp_path, disable_conf, enable_deletion_vector):
     data_path = spark_tmp_path + "/DELTA_DATA"
     def setup_tables(spark):
@@ -534,8 +529,7 @@ def test_delta_update_optimized_column_mapping_cdf(spark_tmp_path, mapping, aqe_
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values, ids=idfn)
 def test_delta_update_entire_table(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vector):
     def generate_dest_data(spark):
         return three_col_df(spark,
@@ -552,8 +546,7 @@ def test_delta_update_entire_table(spark_tmp_path, use_cdf, partition_columns, e
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [["a"], ["a", "b"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values, ids=idfn)
 def test_delta_update_partitions(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vector):
     def generate_dest_data(spark):
         return three_col_df(spark,
@@ -571,8 +564,7 @@ def test_delta_update_partitions(spark_tmp_path, use_cdf, partition_columns, ena
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values, ids=idfn)
 def test_delta_update_rows(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vector):
     # Databricks changes the number of files being written, so we cannot compare logs unless there's only one slice
     num_slices_to_test = 1 if is_databricks_runtime() else 10
@@ -590,8 +582,7 @@ def test_delta_update_rows(spark_tmp_path, use_cdf, partition_columns, enable_de
 @ignore_order
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values, ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), reason="Deletion vectors are new in Spark 3.4.0 / DBR 12.2")
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10025')
 def test_delta_update_rows_with_dv(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
@@ -623,8 +614,7 @@ def test_delta_update_preserves_row_tracking(spark_tmp_path):
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10025')
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values, ids=idfn)
 def test_delta_update_dataframe_api(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vector):
     from delta.tables import DeltaTable
     data_path = spark_tmp_path + "/DELTA_DATA"
