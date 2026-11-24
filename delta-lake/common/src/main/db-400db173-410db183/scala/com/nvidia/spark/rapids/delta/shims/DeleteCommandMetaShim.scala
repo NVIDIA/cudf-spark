@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.{DeltaTableUtils, RowTracking, Snapshot}
+import com.databricks.sql.transaction.tahoe.{RowTracking, Snapshot}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.{DeleteCommandEdgeMeta, DeleteCommandMeta}
@@ -49,8 +49,8 @@ object DeleteCommandMetaShim {
       meta, sqlConf, snapshot, DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS, targetSchema)
     // Whole-table and metadata-only deletes do not need physical indexes from a data scan.
     if (persistentDvEnabled && RowTracking.isEnabled(snapshot.protocol, snapshot.metadata) &&
-        condition.exists(cond => DeltaTableUtils.splitMetadataAndDataPredicates(
-          cond, snapshot.metadata.partitionColumns, SparkSession.active)._2.nonEmpty)) {
+        PersistentDeletionVectorMetaShim.hasDataPredicate(
+          condition, snapshot.metadata.partitionColumns, SparkSession.active)) {
       meta.willNotWorkOnGpu(
         "Persistent deletion vector DELETE with row tracking is not supported on GPU")
     }

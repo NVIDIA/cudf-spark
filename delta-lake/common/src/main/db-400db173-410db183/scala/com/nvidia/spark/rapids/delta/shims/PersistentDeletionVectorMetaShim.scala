@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.{DeltaParquetFileFormat, Snapshot}
+import com.databricks.sql.transaction.tahoe.{DeltaParquetFileFormat, DeltaTableUtils, Snapshot}
 import com.databricks.sql.transaction.tahoe.commands.DeletionVectorUtils
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.RapidsMeta
@@ -24,11 +24,23 @@ import com.nvidia.spark.rapids.parquet.GpuParquetScan
 
 import org.apache.spark.internal.config.ConfigEntry
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 
 /** Fallback checks shared by DBR 17.3+ DELETE, UPDATE and MERGE with persistent DVs. */
 object PersistentDeletionVectorMetaShim {
+  def hasDataPredicate(
+      condition: Option[Expression],
+      partitionColumns: Seq[String],
+      spark: SparkSession): Boolean = {
+    condition.exists { predicate =>
+      val (_, dataPredicates) =
+        DeltaTableUtils.splitMetadataAndDataPredicates(predicate, partitionColumns, spark)
+      dataPredicates.nonEmpty
+    }
+  }
+
   /**
    * Tags the command for CPU fallback when the GPU cannot write persistent deletion vectors.
    *
