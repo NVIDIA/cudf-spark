@@ -524,8 +524,8 @@ def test_delta_deletion_vector_read(spark_tmp_path, reader_type, condition):
 @ignore_order
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_before_spark_353(),
     reason="Persistent-DV command acceleration requires Delta Lake DV support and Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="Databricks runs its own DV writer, not the one this test covers")
 @pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE_DELETE", "MERGE_UPSERT"])
 @pytest.mark.parametrize("random_prefixes", [False, True], ids=["plain", "random_prefixes"])
 def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes):
@@ -536,8 +536,8 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
     existing DVs. This checks the wiring from the command to the DV writer and the results. That
     the writer overlaps its files is covered by GpuDeletionVectorWriterSuite. On a local table the
     GPU statements also run with a file system that records the thread writing each DV file, to
-    check that the command uses the concurrent writer. On Databricks this runs the Databricks
-    implementation, which does not use that writer."""
+    check that the command uses the concurrent writer. Databricks runs its own writer, so the
+    test is skipped there."""
     data_path = spark_tmp_path + "/DELTA_DATA"
     num_files = 40
     num_rows = num_files * 10
@@ -620,9 +620,8 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
         if step > 0:
             assert cpu_dvs > 5, "Expected the CPU statement to persist many DV files"
         assert dv_file_count(data_path + "/GPU") == cpu_dvs
-        if is_local and not is_databricks_runtime() and step > 0:
-            # Many files in one task are written by the concurrent writer's threads. Databricks
-            # runs its own writer, so only the file counts and the rows are checked there.
+        if is_local and step > 0:
+            # Many files in one task are written by the concurrent writer's threads.
             writers = [n for n in dv_file_names(data_path + "/GPU")
                        if n.startswith("_dv_writer_gpu-delta-dv-writer")]
             assert writers, "No DV file was written by the concurrent DV writer"
