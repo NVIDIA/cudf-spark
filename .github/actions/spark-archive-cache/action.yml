@@ -13,7 +13,7 @@ inputs:
 outputs:
   path:
     description: Absolute path of the verified tarball for consumers; empty in warm-only mode
-    value: ${{ steps.archive.outputs.warm_only != 'true' && steps.archive.outputs.path || '' }}
+    value: ${{ steps.verify.outcome == 'success' && steps.archive.outputs.warm_only != 'true' && steps.archive.outputs.path || '' }}
   key:
     description: Exact cache key of this immutable Apache archive
     value: ${{ steps.archive.outputs.key }}
@@ -41,12 +41,14 @@ runs:
         key: ${{ steps.archive.outputs.key }}
         lookup-only: ${{ steps.archive.outputs.warm_only }}
     - name: Verify or fetch archive
+      id: verify
       if: steps.archive.outputs.warm_only != 'true' || steps.restore.outputs.cache-hit != 'true'
       shell: bash
       env:
         SCALA: ${{ inputs.scala }}
       run: python3 "$GITHUB_ACTION_PATH/archive.py" ensure "$SCALA"
     - name: Save archive
+      id: save
       # A PR miss may seed only its merge ref, never a trusted caller's branch.
       if: >-
         steps.restore.outputs.cache-hit != 'true' &&
@@ -58,3 +60,22 @@ runs:
       with:
         path: ~/.cache/cudf-spark/spark/${{ steps.archive.outputs.name }}
         key: ${{ steps.archive.outputs.key }}
+    - name: Look up saved archive
+      id: saved
+      if: steps.archive.outputs.warm_only == 'true' && steps.save.outcome == 'success'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      continue-on-error: true
+      with:
+        path: ~/.cache/cudf-spark/spark/${{ steps.archive.outputs.name }}
+        key: ${{ steps.archive.outputs.key }}
+        lookup-only: true
+    - name: Report unconfirmed trusted cache
+      if: >-
+        steps.archive.outputs.warm_only == 'true' && steps.save.outcome == 'success' &&
+        (steps.saved.outcome != 'success' || steps.saved.outputs.cache-hit != 'true')
+      shell: bash
+      env:
+        KEY: ${{ steps.archive.outputs.key }}
+      run: |
+        echo "::error::Could not confirm exact Spark archive cache after save: $KEY"
+        exit 1

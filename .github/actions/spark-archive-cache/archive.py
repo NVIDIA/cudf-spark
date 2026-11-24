@@ -39,17 +39,22 @@ def download(url, path):
     ], check=True, timeout=600)
 
 
-def ensure(path, url, expected, fetch=download):
-    if path.is_symlink():
+def check_path(path):
+    if path.resolve() != path:
         raise ValueError(f"Refusing symlink at Spark archive location: {path}")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"Spark archive location is not a regular file: {path}")
+
+
+def ensure(path, url, expected, fetch=download):
+    check_path(path)
     if path.is_file():
         observed = sha512(path)
         if observed == expected:
             print(f"Verified local Spark archive: {path}")
             return
         print(f"Cached {path.name}: expected SHA-512 {expected}, found {observed}; "
-              "discarding invalid file and downloading a fresh copy.", file=sys.stderr)
-        path.unlink()
+              "downloading a replacement.", file=sys.stderr)
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {url}", flush=True)
     with tempfile.TemporaryDirectory(dir=path.parent) as tmp:
@@ -58,6 +63,7 @@ def ensure(path, url, expected, fetch=download):
         observed = sha512(candidate)
         if observed != expected:
             raise ValueError(f"{path.name}: expected SHA-512 {expected}, downloaded {observed}")
+        check_path(path)
         candidate.replace(path)
     print(f"Verified downloaded Spark archive: {path}")
 
@@ -68,8 +74,9 @@ def main():
     parser.add_argument("scala", choices=("2.12", "2.13"))
     args = parser.parse_args()
     name, url, digest = archive(args.scala)
-    path = Path.home() / ".cache/cudf-spark/spark" / name
+    path = Path.home().resolve() / ".cache/cudf-spark/spark" / name
     if args.operation == "metadata":
+        check_path(path)
         print(f"name={name}\npath={path}\nkey=spark-archive-v1-{name}-{digest}")
     else:
         ensure(path, url, digest)

@@ -149,6 +149,22 @@ class DependencyKeyTest(unittest.TestCase):
                     self.assertEqual(outputs.get("ready") == "true", match in usable)
                     self.assertEqual(outputs["key"], match if match in usable else (current if full else verify))
 
+    def test_only_an_exact_post_save_lookup_exposes_a_key(self):
+        script = Path(__file__).with_name("cache-target.sh")
+        for premerge in ("false", "true"):
+            for match in ("", "v-verify-older", "v-verify"):
+                with self.subTest(premerge=premerge, match=match):
+                    env = dict(os.environ, PREMERGE=premerge, TARGET="v-verify", MATCH=match)
+                    result = subprocess.run(["bash", script, "--after-save"], env=env,
+                                            text=True, capture_output=True)
+                    if match == env["TARGET"]:
+                        self.assertEqual(result.returncode, 0)
+                        self.assertEqual(result.stdout.strip(), "key=v-verify")
+                    else:
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(result.returncode, 1 if premerge == "true" else 0)
+                        self.assertIn("::error::" if premerge == "true" else "::warning::", result.stderr)
+
     def test_pins_do_not_require_snapshot_service(self):
         key = helper["dependency_key"]
         offline = Mock(side_effect=AssertionError("unexpected network request"))

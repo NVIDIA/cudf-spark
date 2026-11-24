@@ -20,7 +20,7 @@ inputs:
 outputs:
   key:
     description: Exact cache key for downstream verification jobs
-    value: ${{ (steps.target.outputs.ready == 'true' || steps.save.outcome == 'success') && steps.target.outputs.key || '' }}
+    value: ${{ (steps.target.outputs.ready == 'true' && steps.target.outputs.key) || steps.result.outputs.key || '' }}
 runs:
   using: composite
   steps:
@@ -126,7 +126,28 @@ runs:
     - name: Save Maven dependencies
       id: save
       if: success() && steps.confirm.outcome == 'success'
+      continue-on-error: true
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.m2/repository
         key: ${{ steps.target.outputs.key }}
+
+    - name: Look up the saved Maven cache
+      id: saved
+      if: steps.confirm.outcome == 'success'
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.target.outputs.key }}
+        lookup-only: true
+
+    - name: Report Maven cache availability
+      id: result
+      if: steps.confirm.outcome == 'success'
+      shell: bash
+      env:
+        TARGET: ${{ steps.target.outputs.key }}
+        MATCH: ${{ steps.saved.outcome == 'success' && steps.saved.outputs.cache-matched-key || '' }}
+        PREMERGE: ${{ inputs.premerge }}
+      run: bash "$GITHUB_ACTION_PATH/cache-target.sh" --after-save >> "$GITHUB_OUTPUT"
