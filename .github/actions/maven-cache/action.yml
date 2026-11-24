@@ -60,8 +60,6 @@ runs:
       id: restore
       continue-on-error: true
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      env:
-        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
       with:
         path: ~/.m2/repository
         key: ${{ steps.key.outputs.full }}

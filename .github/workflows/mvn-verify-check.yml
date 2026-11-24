@@ -24,7 +24,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
   COMMON_MVN_FLAGS: >-
     -Ddist.jar.compress=false
     -DskipTests
@@ -64,7 +63,6 @@ jobs:
         run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
       - name: Prepare Maven dependency cache
         id: maven-cache
-        timeout-minutes: 40
         uses: ./.github/actions/maven-cache
         continue-on-error: true
         with:
@@ -125,7 +123,6 @@ jobs:
       - name: Restore Maven dependencies
         id: restore-maven
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
-        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -181,7 +178,6 @@ jobs:
         run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
       - name: Prepare Maven dependency cache
         id: maven-cache
-        timeout-minutes: 40
         uses: ./.github/actions/maven-cache
         continue-on-error: true
         with:
@@ -232,7 +228,6 @@ jobs:
       - name: Restore Maven dependencies
         id: restore-maven
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
-        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -294,7 +289,6 @@ jobs:
       - name: Restore Maven dependencies
         id: restore-maven
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
-        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -355,7 +349,6 @@ jobs:
       - name: Restore Maven dependencies
         id: restore-maven
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
-        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -412,7 +405,6 @@ jobs:
       - name: Restore Maven dependencies
         id: restore-maven
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
-        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -465,7 +457,6 @@ jobs:
       - name: Restore Maven dependencies
         id: restore-maven
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
-        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

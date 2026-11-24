@@ -63,7 +63,6 @@ jobs:
       github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
-    timeout-minutes: 80
     strategy:
       fail-fast: false
       matrix:
