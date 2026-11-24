@@ -1051,8 +1051,9 @@ object GpuTransitionOverrides {
     case scan: InMemoryTableScanExec
         if scan.relation.cacheBuilder.serializer.getClass ==
             classOf[DefaultCachedBatchSerializer] =>
-      // Spark keeps these OnHeap/OffHeap vectors until task completion. Close each batch after
-      // its synchronous copy so a large cache partition does not accumulate every decoded batch.
+      // The default serializer allocates fresh vectors per batch and closes them again at task
+      // completion; vector close is idempotent. Release their backing memory after the synchronous
+      // copy so a large cache partition does not retain every decoded batch's data.
       HostBatchCleanupPolicy.CloseAfterCopy
     case _ =>
       HostBatchCleanupPolicy.ProducerCloses

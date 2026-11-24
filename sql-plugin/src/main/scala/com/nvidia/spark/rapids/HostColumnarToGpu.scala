@@ -209,10 +209,14 @@ object HostColumnarToGpu extends Logging {
   }
 }
 
+// Defines who closes a host input batch after HostToGpuCoalesceIterator consumes it.
 sealed trait HostBatchCleanupPolicy extends Serializable
 
 object HostBatchCleanupPolicy {
+  // The producer retains ownership of the batch.
   case object ProducerCloses extends HostBatchCleanupPolicy
+
+  // The consumer closes the batch after its synchronous copy.
   case object CloseAfterCopy extends HostBatchCleanupPolicy
 }
 
@@ -234,8 +238,8 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     opTime: GpuMetric,
     opName: String,
     useArrowCopyOpt: Boolean,
-    releaseSemaphoreWhilePulling: Boolean = false,
-    inputBatchCleanup: HostBatchCleanupPolicy)
+    inputBatchCleanup: HostBatchCleanupPolicy,
+    releaseSemaphoreWhilePulling: Boolean = false)
   extends AbstractGpuCoalesceIterator(iter,
     goal,
     numInputRows,
@@ -438,6 +442,7 @@ case class HostColumnarToGpu(
 
     // cache in a local to avoid serializing the plan
     val outputSchema = schema
+    val coalesceGoal = goal
     val cleanupPolicy = inputBatchCleanup
 
     val batches = child.executeColumnar()
@@ -446,10 +451,10 @@ case class HostColumnarToGpu(
     val confUseArrow = rapidsConf.useArrowCopyOptimization
     val releaseSemaphore = rapidsConf.hostColumnarToGpuReleaseSemaphore
     batches.mapPartitions { iter =>
-      new HostToGpuCoalesceIterator(iter, goal, outputSchema,
+      new HostToGpuCoalesceIterator(iter, coalesceGoal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,
         streamTime, concatTime, copyBufTime, opTime,
-        "HostColumnarToGpu", confUseArrow, releaseSemaphore, cleanupPolicy)
+        "HostColumnarToGpu", confUseArrow, cleanupPolicy, releaseSemaphore)
     }
   }
 }

@@ -313,8 +313,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
   }
 
   test("host coalesce closes copied cache batches but not the on-deck batch") {
-    class CloseTrackingColumnarBatch(vector: WritableColumnVector)
-        extends ColumnarBatch(Array(vector), 2) {
+    class CloseTrackingColumnarBatch(vector: WritableColumnVector, rows: Int)
+        extends ColumnarBatch(Array(vector), rows) {
       var closeCount: Int = 0
 
       override def close(): Unit = {
@@ -324,15 +324,19 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
     }
 
     Seq(true, false).foreach { onHeap =>
-      val inputs = Seq(Seq(10, 20), Seq(30, 40), Seq(50, 60)).map { values =>
+      val inputValues =
+        Seq(Seq.empty[Int], Seq(10, 20), Seq.empty[Int], Seq(30, 40),
+          Seq(50, 60), Seq.empty[Int])
+      val inputs = inputValues.map { values =>
         val vector: WritableColumnVector = if (onHeap) {
-          new OnHeapColumnVector(2, IntegerType)
+          new OnHeapColumnVector(values.length, IntegerType)
         } else {
-          new OffHeapColumnVector(2, IntegerType)
+          new OffHeapColumnVector(values.length, IntegerType)
         }
-        vector.putInt(0, values.head)
-        vector.putInt(1, values.last)
-        new CloseTrackingColumnarBatch(vector)
+        values.zipWithIndex.foreach { case (value, index) =>
+          vector.putInt(index, value)
+        }
+        new CloseTrackingColumnarBatch(vector, values.length)
       }
       val coalesceIter = new HostToGpuCoalesceIterator(
         inputs.iterator,
@@ -357,34 +361,37 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
         override def getBatchDataSize(batch: ColumnarBatch): Long = batch.numRows() * 250L
       }
 
-      assert(coalesceIter.hasNext)
-      assertResult(Seq(0, 0, 0))(inputs.map(_.closeCount))
-      withResource(coalesceIter.next()) { output =>
-        assertResult(4)(output.numRows())
-        withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
-          assertResult(10)(host.getInt(0))
-          assertResult(20)(host.getInt(1))
-          assertResult(30)(host.getInt(2))
-          assertResult(40)(host.getInt(3))
+      try {
+        assert(coalesceIter.hasNext)
+        assertResult(Seq(1, 0, 0, 0, 0, 0))(inputs.map(_.closeCount))
+        withResource(coalesceIter.next()) { output =>
+          assertResult(4)(output.numRows())
+          withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
+            assertResult(10)(host.getInt(0))
+            assertResult(20)(host.getInt(1))
+            assertResult(30)(host.getInt(2))
+            assertResult(40)(host.getInt(3))
+          }
+          assertResult(Seq(1, 1, 1, 1, 0, 0))(inputs.map(_.closeCount))
         }
-        assertResult(Seq(1, 1, 0))(inputs.map(_.closeCount))
+
+        assert(coalesceIter.hasNext)
+        assertResult(0)(inputs(4).closeCount)
+        withResource(coalesceIter.next()) { output =>
+          assertResult(2)(output.numRows())
+          withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
+            assertResult(50)(host.getInt(0))
+            assertResult(60)(host.getInt(1))
+          }
+          assertResult(Seq.fill(inputs.length)(1))(inputs.map(_.closeCount))
+        }
+        assert(!coalesceIter.hasNext)
+      } finally {
+        // DefaultCachedBatchSerializer closes the batches again at task completion.
+        inputs.foreach(_.close())
       }
 
-      assert(coalesceIter.hasNext)
-      assertResult(0)(inputs.last.closeCount)
-      withResource(coalesceIter.next()) { output =>
-        assertResult(2)(output.numRows())
-        withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
-          assertResult(50)(host.getInt(0))
-          assertResult(60)(host.getInt(1))
-        }
-        assertResult(1)(inputs.last.closeCount)
-      }
-      assert(!coalesceIter.hasNext)
-
-      // DefaultCachedBatchSerializer closes the batches again at task completion.
-      inputs.foreach(_.close())
-      assertResult(Seq(2, 2, 2))(inputs.map(_.closeCount))
+      assertResult(Seq.fill(inputs.length)(2))(inputs.map(_.closeCount))
     }
   }
 
