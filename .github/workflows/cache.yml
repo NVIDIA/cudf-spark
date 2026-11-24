@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Seed the Maven Verify and Spark premerge dependencies on the target branch.
-name: Warm premerge caches
+name: Cache preparation
 
 on:
   push:
@@ -15,7 +15,7 @@ on:
       - '.github/workflows/mvn-verify-check/dependency-key.py'
       - '.github/workflows/mvn-verify-check/action.yml'
       - '.github/workflows/mvn-verify-check.yml'
-      - '.github/workflows/mvn-verify-cache.yml'
+      - '.github/workflows/cache.yml'
       - '.github/workflows/premerge-spark-cache/**'
   schedule:
     # JNI and private SNAPSHOTs can advance without a change in this repository.
@@ -26,11 +26,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: mvn-verify-cache-${{ github.ref }}
+  group: cache-preparation-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  warm:
+  prepare:
+    name: Prepare Scala ${{ matrix.scala }} caches
     if: >-
       github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))

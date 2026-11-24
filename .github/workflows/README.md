@@ -9,7 +9,7 @@ and PRs titled with `[skip ci]` pass without building images.
 
 ## Premerge caches
 
-[Maven Verify](mvn-verify-check.yml) and the [branch warmer](mvn-verify-cache.yml)
+[Maven Verify](mvn-verify-check.yml) and [Cache preparation](cache.yml)
 use the same [Maven cache action](mvn-verify-check/action.yml). A branch seed
 includes the Scala compiler bridge and standalone integration-test dependencies.
 On a cold PR, Verify can prepare a smaller cache without those extra downloads.

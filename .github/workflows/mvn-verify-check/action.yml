@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Share the same Maven dependency cache between the branch warmer and PR checks.
-name: Prepare Maven Verify dependencies
+name: Prepare Spark Maven dependencies
 description: Restore or populate the Maven repository for one Scala binary version.
 inputs:
   scala:
@@ -37,7 +37,7 @@ runs:
         snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER")
         java_major=$(java -XshowSettings:properties -version 2>&1 | awk '$1 == "java.specification.version" {print $3}')
         [[ -n "$java_major" ]] || { echo "Cannot determine Java version for Maven cache" >&2; exit 1; }
-        prefix="mvn-verify-${RUNNER_OS}-${RUNNER_ARCH}-jdk${java_major}-${SCALA_VER}-${BRANCH}-"
+        prefix="spark-maven-${RUNNER_OS}-${RUNNER_ARCH}-jdk${java_major}-${SCALA_VER}-${BRANCH}-"
         stem="${prefix}${INPUT_HASH}-${snapshot_hash}"
         spark=$(jq -er --arg scala "$SCALA_VER" '.[$scala].version' .github/workflows/premerge-spark-cache/releases.json)
         echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
