@@ -79,12 +79,19 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       case kv => kv
     }
 
+  // Delta accepts `delta.*` keys in any case and stores them under the canonical spelling.
+  private def normalizeDeltaKeys(properties: Map[String, String]): Map[String, String] =
+    properties.map { case (k, v) =>
+      DeltaConfigs.normalizeConfigKey(Some(k)).getOrElse(k) -> v
+    }
+
   /**
    * The table properties a new table is created with: the explicit properties, the `delta.*`
    * write options that Delta persists as properties when a write creates the table, and the
    * session's table property defaults for whatever is still unset. Delta normalizes the case of
-   * `delta.*` keys on its own, so the Parquet format version key is normalized before the
-   * defaults are merged, or an explicit value would not replace a default spelled differently.
+   * `delta.*` keys on its own, so all of them are normalized before the defaults are merged, or
+   * an explicit value would not replace a default spelled differently and mixed-case keys would
+   * be missed by the fallback checks that read these properties.
    */
   def creationProperties(
       spark: SparkSession,
@@ -93,8 +100,7 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
     val deltaOptions = writeOptions.filter { case (k, _) =>
       k.toLowerCase(Locale.ROOT).startsWith("delta.")
     }
-    val explicit = normalizeKey(properties, DeltaConfigs.PARQUET_FORMAT_VERSION.key) ++
-      normalizeKey(deltaOptions, DeltaConfigs.PARQUET_FORMAT_VERSION.key)
+    val explicit = normalizeDeltaKeys(properties) ++ normalizeDeltaKeys(deltaOptions)
     DeltaConfigs.mergeGlobalConfigs(spark.sessionState.conf, explicit)
   }
 

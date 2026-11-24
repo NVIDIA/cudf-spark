@@ -345,13 +345,17 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
                     reason="Materialized partition columns were added in OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode,source", [
     ("append", "properties"), ("ctas", "properties"), ("rtas", "properties"),
-    ("ctas", "options"), ("rtas", "options")])
+    ("ctas", "options"), ("rtas", "options"),
+    ("ctas", "mixed_case_options"), ("rtas", "mixed_case_options")])
 def test_delta_43_materialized_partition_columns_fallback(
         spark_tmp_table_factory, write_mode, source):
     """The feature is requested through TBLPROPERTIES, or through a `delta.*` write option, which
     Delta persists as a table property when the write creates the table."""
     base_table = spark_tmp_table_factory.get()
     property_sql = "'delta.enableMaterializePartitionColumnsFeature' = 'true'"
+    # Delta accepts `delta.*` option keys in any case.
+    option_key = "DELTA.ENABLEMATERIALIZEPARTITIONCOLUMNSFEATURE" \
+        if source == "mixed_case_options" else "delta.enableMaterializePartitionColumnsFeature"
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
     if write_mode == "append":
         def create_tables(spark):
@@ -365,10 +369,10 @@ def test_delta_43_materialized_partition_columns_fallback(
         if write_mode == "append":
             spark.sql(
                 f"INSERT INTO {table} SELECT id, CAST(id % 2 AS INT) FROM range(4)")
-        elif source == "options":
+        elif source.endswith("options"):
             writer = spark.sql("SELECT id, CAST(id % 2 AS INT) AS part FROM range(4)") \
                 .writeTo(table).using("delta").partitionedBy(f.col("part")) \
-                .option("delta.enableMaterializePartitionColumnsFeature", "true")
+                .option(option_key, "true")
             writer.create() if write_mode == "ctas" else writer.createOrReplace()
         else:
             command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
@@ -430,12 +434,16 @@ def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
                     reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
 @pytest.mark.parametrize("write_mode,source", [
     ("append", "properties"), ("ctas", "properties"), ("rtas", "properties"),
-    ("ctas", "options"), ("rtas", "options")])
+    ("ctas", "options"), ("rtas", "options"),
+    ("ctas", "mixed_case_options"), ("rtas", "mixed_case_options")])
 def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode, source):
     """Variant shredding is requested through TBLPROPERTIES, or through a `delta.*` write option,
     which Delta persists as a table property when the write creates the table."""
     base_table = spark_tmp_table_factory.get()
     property_sql = "'delta.enableVariantShredding' = 'true'"
+    # Delta accepts `delta.*` option keys in any case.
+    option_key = "DELTA.ENABLEVARIANTSHREDDING" if source == "mixed_case_options" \
+        else "delta.enableVariantShredding"
     query = "SELECT id, parse_json('{\"a\": 1}') AS v FROM range(4)"
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
     if write_mode == "append":
@@ -449,9 +457,9 @@ def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode
     def write_table(spark, table):
         if write_mode == "append":
             spark.sql(f"INSERT INTO {table} {query}")
-        elif source == "options":
+        elif source.endswith("options"):
             writer = spark.sql(query).writeTo(table).using("delta") \
-                .option("delta.enableVariantShredding", "true")
+                .option(option_key, "true")
             writer.create() if write_mode == "ctas" else writer.createOrReplace()
         else:
             command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
