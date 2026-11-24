@@ -66,7 +66,6 @@ if [[ -n "$LOCAL_JAR_PATH" ]]; then
         exit 1
     fi
     cd -- "$LOCAL_JAR_PATH"
-    export LOCAL_JAR_PATH="$PWD"
 else
     cd "$SOURCE_PATH"
 fi
@@ -75,6 +74,11 @@ fi
 source jenkins/databricks/setup.sh
 # Init common variables like SPARK_HOME, spark configs
 source jenkins/databricks/common_vars.sh
+
+# common_vars.sh reimports EXTRA_ENVS. Use the directory selected above for jar lookup.
+if [[ -n "$LOCAL_JAR_PATH" ]]; then
+    export LOCAL_JAR_PATH="$PWD"
+fi
 
 SPARK_READINESS_ONLY=${SPARK_READINESS_ONLY:-0}
 if [[ "$SPARK_READINESS_ONLY" == "1" ]]; then

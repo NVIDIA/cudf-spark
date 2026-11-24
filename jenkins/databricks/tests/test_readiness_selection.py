@@ -34,7 +34,10 @@ class ReadinessSelectionTest(unittest.TestCase):
             db_dir = run_root / "jenkins/databricks"
             db_dir.mkdir(parents=True)
             (db_dir / "setup.sh").write_text(":\n")
-            (db_dir / "common_vars.sh").write_text(":\n")
+            (db_dir / "common_vars.sh").write_text(
+                'if [[ -n "$EXTRA_ENVS" ]]; then\n'
+                "    export ${EXTRA_ENVS//','/' '}\n"
+                'fi\n')
             integration_dir = run_root / "integration_tests"
             integration_dir.mkdir()
             (integration_dir / "run_pyspark_from_build.sh").write_text(
@@ -222,6 +225,12 @@ class ReadinessSelectionTest(unittest.TestCase):
     def test_prebuilt_delta_failure_preserves_pytest_exit_status(self):
         result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars", delta_exit=7)
         self.assertEqual(result.returncode, 7, result.stderr)
+
+    def test_prebuilt_relative_path_from_extra_envs_stays_absolute(self):
+        result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./jars",
+                                 extra_envs="LOCAL_JAR_PATH=./jars")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DELTA_RUN_DIR", result.stdout)
 
     def test_prebuilt_delta_retries_unsafe_report_directory_name(self):
         result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars",
