@@ -299,8 +299,7 @@ object CpuGetJsonObject {
         resultBuilder =>
           val pathLiteral = Literal.create(path, StringType)
           for (i <- 0 until dataHCV.getRowCount.toInt) {
-            // A null json input row must yield null (Spark semantic); reading a
-            // null row via getUTF8String trips cudf's non-null assert.
+            // Guard against null: HostColumnVector.getUTF8String asserts that the row is non-null.
             val json = if (dataHCV.isNullAt(i)) null else dataHCV.getUTF8String(i)
             // In order to use `GetJsonObject` directly,
             // here use a literal json and a literal path

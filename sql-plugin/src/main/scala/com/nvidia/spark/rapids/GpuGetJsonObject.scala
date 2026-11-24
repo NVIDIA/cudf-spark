@@ -253,15 +253,15 @@ case class GpuGetJsonObject(
   // Batch evaluation reads literal paths without evaluating the RHS and skips CPU verification.
   override def batchEligible: Boolean = savePathForVerify.isEmpty && litPathOf(path).isDefined
 
-  // The multi-path API reads only the first input. Structural equality keeps
-  // comparisons from regrouping floating-point arithmetic via canonicalization.
+  // batchEval reads only inputs.head, so wrap `json` to compare by structural
+  // equality (`==`) instead of `semanticEquals` (which canonicalizes FP order).
   @transient private lazy val jsonInputKey = JsonInputKey(json)
   override def batchGroupKey: Any = jsonInputKey
 
   override def batchInput: Expression = json
 
-  // The batch path can see the rhs still alias-wrapped; the per-column path
-  // instead receives a GpuScalar rhs (doColumnar).
+  // Unwrap GpuAlias around a literal path; unlike doColumnar, batchEval
+  // inspects the raw `path` expression before scalar evaluation.
   @scala.annotation.tailrec
   private def litPathOf(exp: Expression): Option[GpuLiteral] = exp match {
     case l: GpuLiteral => Some(l)
@@ -275,10 +275,8 @@ case class GpuGetJsonObject(
       GpuGetJsonObjectMeta.parseLiteralPath(l.value)
     }
     if (hasSeparateWildcard(pathInstructions)) {
-      // A separate wildcard path always returns nulls
       None
     } else {
-      // Filter out the unneeded instructions before handing them to JNI
       pathInstructions.map(JsonPathParser.filterInstructionsForJni)
     }
   }
@@ -289,7 +287,7 @@ case class GpuGetJsonObject(
     val jniPaths = members.map(checkedInstructionsOf)
     val input = inputs.head.getBase
     if (members.length == 1) {
-      // Byte-identical cost to the per-column path: one getJsonObject call
+      // Single-member group: call the single-path JNI entry point directly.
       jniPaths.head match {
         case Some(instructions) =>
           Seq(JSONUtils.getJsonObject(input, JsonPathParser.convertToJniObject(instructions)))

@@ -41,22 +41,16 @@ import org.apache.spark.sql.types.{ArrayType, DataType, IntegerType, StringType,
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
- * CPU/GPU parity for sibling get_json_object projections plus POSITIVE
- * provenance via the `GpuBatchFusion` counter deltas ((firedGroups,
- * batchedMembers, droppedMembers), reset before / snapshot after each GPU run
- * so assertions are order-independent in a shared JVM).
+ * End-to-end CPU/GPU parity and `GpuBatchFusion` counter-delta tests for batched
+ * `get_json_object` projections.
  *
- * Counter deltas assume the tiny table arrives as ONE GPU batch per task (6
- * rows, single part file, default 1GiB batch size); the reduced batch-size
- * case checks members per fired group instead of an absolute delta.
- *
- * Self-contained session setup mirrors the tests-module
- * SparkQueryCompareTestSuite pattern (that module is not on this module's
- * test classpath). Case (e) (a batchInput that evaluates to a non-Gpu
- * ColumnVector) is unreachable from SQL because every GpuExpression.columnarEval
- * returns a GpuColumnVector, so it is exercised by driving `GpuBatchFusion.project`
- * directly with a stub member; there is no case (j) because the batch path is
- * unconditional (no eligibility gate to disable).
+ * Counter deltas `(firedGroups, batchedMembers, droppedMembers)` are captured via
+ * `reset()` and `snapshot()` around each GPU query. The 6-row single-partition
+ * table fits in a single GPU batch at the default 1 GiB batch size; the 1024-byte
+ * batch-target test asserts the member-to-group ratio across multiple batches.
+ * Non-`GpuColumnVector` input dropout and output-close rollback are unreachable
+ * from SQL (`GpuExpression.columnarEval` always returns a `GpuColumnVector`) and
+ * therefore call `GpuBatchFusion.project` directly with `BatchableStub`.
  */
 class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
 
@@ -110,7 +104,7 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
         s"\nGPU: ${rowsOf(gpu).mkString(", ")}")
   }
 
-  /** Row parity OR identical exception class — malformed/invalid-path inputs. */
+  /** Asserts either matching rows or matching exception class on CPU and GPU. */
   private def assertCpuGpuOutcomeParity(sql: String,
       confs: Map[String, String] = Map.empty): Unit = {
     val cpuT = Try(withCpu(confs)(_.sql(sql).collect()))
@@ -160,7 +154,7 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
   private def jsonOf(fields: (String, String)*): String =
     fields.map { case (k, v) => s""""$k":"$v"""" }.mkString("{", ",", "}")
 
-  /** Walmart-shaped wide JSON: the 60 f-fields the 60-extract workload reads. */
+  /** Wide JSON row containing 60 `f0`..`f59` fields for 60-extract projection tests. */
   private def wideJson(a: String, b: String, c: String, prefix: String): String = {
     val fields = Seq(("a", a), ("b", b), ("c", c)) ++
       (0 until 60).map(i => (s"f$i", s"$prefix$i"))
@@ -219,8 +213,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
   private def extracts(n: Int, col: String): String =
     (0 until n).map(i => s"get_json_object($col, '$$.f$i')").mkString(", ")
 
-  // ---- (a) bare 60/5-sibling projections ----------------------------------
-
   test("(a) bare 60- and 5-sibling projections: row parity and one fired group per batch") {
     val sql60 = s"SELECT ${extracts(60, "jsonA")} FROM t"
     assertCpuGpuParity(sql60)
@@ -232,8 +224,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(withGpuDelta(sql5) == ((1L, 5L, 0L)))
   }
 
-  // ---- (b) single-arg COALESCE-wrapped projections -------------------------
-
   test("(b) COALESCE-wrapped siblings: wrapper descends, parity and batching") {
     val wrapped = (n: Int) => "SELECT " +
       (0 until n).map(i => s"coalesce(get_json_object(jsonA, '$$.f$i'))").mkString(", ") +
@@ -244,8 +234,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assertCpuGpuParity(wrapped(5))
     assert(withGpuDelta(wrapped(5)) == ((1L, 5L, 0L)))
   }
-
-  // ---- (c) per-input grouping with a reorderable non-member in between ----
 
   test("(c) different inputs group separately and a reorderable cast does not split them") {
     val sql =
@@ -260,8 +248,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
         s"got ${withGpuDelta(sql)}")
   }
 
-  // ---- (d) a side-effecting sibling seals open groups ----------------------
-
   test("(d) side-effecting cast under ANSI seals open groups: two groups, not one") {
     val sql = "SELECT get_json_object(jsonA, '$.a') AS a1, CAST(numStr AS INT) AS n, " +
       "get_json_object(jsonA, '$.b') AS a2 FROM t"
@@ -271,10 +257,8 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
       s"the side-effecting cast must seal the first group, got ${withGpuDelta(sql, confs)}")
   }
 
-  // ---- (e) dropout: batchInput evaluates to a non-GpuColumnVector ----------
-  // Unreachable from SQL: every GpuExpression.columnarEval returns a
-  // GpuColumnVector, so the hook's drop branch is driven directly.
-
+  // Stub expression used to drive non-GpuColumnVector input dropout and
+  // output-close rollback directly through GpuBatchFusion.project.
   private class BatchableStub(inputExpr: Expression) extends GpuExpression
       with GpuBatchableExpression {
     override def dataType: DataType = StringType
@@ -358,15 +342,11 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  // ---- (f) size-1 group -----------------------------------------------------
-
   test("(f) size-1 group: row parity (cost-neutrality is measured by the benchmark harness)") {
     val sql = "SELECT get_json_object(jsonA, '$.a') FROM t"
     assertCpuGpuParity(sql)
     assert(withGpuDelta(sql) == ((1L, 1L, 0L)))
   }
-
-  // ---- (g) GpuAlias unwrap --------------------------------------------------
 
   test("(g) GpuAlias-wrapped batchable members unwrap and fire") {
     val sql = "SELECT get_json_object(jsonA, '$.a') AS ga, " +
@@ -376,8 +356,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
       s"alias-wrapped siblings must still fire, got ${withGpuDelta(sql)}")
   }
 
-  // ---- (h) None-path: null input / absent path ------------------------------
-
   test("(h) null input and absent path produce all-null columns matching CPU") {
     val sql = "SELECT get_json_object(jsonA, '$.missing') AS absent FROM t"
     assertCpuGpuParity(sql)
@@ -385,8 +363,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(gpu.forall(_.getString(0) == null),
       "an absent path is an all-null column (including the null-input row)")
   }
-
-  // ---- (i) verify-mode stays per-column -------------------------------------
 
   test("(i) verify-mode get_json_object runs per-column: parity, no batch counter") {
     val sql = "SELECT get_json_object(jsonA, '$.a') AS ga, " +
@@ -398,18 +374,14 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
       s"verify-mode members are not batch-eligible, got ${withGpuDelta(sql, confs)}")
   }
 
-  // ---- (k) malformed JSON + invalid paths: outcome parity -------------------
-  // Intra-call error order is unspecified by the plan; only the per-row
+  // Intra-call error order across batched paths is unspecified; only the per-row
   // outcome (rows or exception class) must match the CPU.
-
   test("(k) malformed JSON and invalid paths: rows or exception class match CPU") {
     assertCpuGpuOutcomeParity("SELECT get_json_object(jsonBad, '$.a') AS m FROM t")
     assertCpuGpuOutcomeParity("SELECT get_json_object(jsonA, '$[') AS bad FROM t")
     assertCpuGpuOutcomeParity("SELECT get_json_object(jsonBad, '$.a') AS m1, " +
       "get_json_object(jsonBad, '$.b') AS m2 FROM t")
   }
-
-  // ---- (l) reduced batch-size target ----------------------------------------
 
   test("(l) get_json_object preserves results and full groups at a 1024-byte batch target") {
     val sql = s"SELECT ${extracts(60, "jsonA")} FROM tbig"
@@ -428,8 +400,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(delta._3 == 0L, s"no member should drop out, got $delta")
   }
 
-  // ---- (m) filter context: projection-only hook -----------------------------
-
   test("(m) filter-context siblings evaluate per-column: parity, no batch counter") {
     val sql = "SELECT jsonB FROM t WHERE get_json_object(jsonA, '$.a') = 'V1' " +
       "AND get_json_object(jsonA, '$.b') = 'W1'"
@@ -437,8 +407,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(withGpuDelta(sql) == ((0L, 0L, 0L)),
       s"the hook is projection-only, filter conditions must not fire it, got ${withGpuDelta(sql)}")
   }
-
-  // ---- (n) HOF-fusing projection skips batch fusion --------------------------
 
   test("HOF-fusing projection skips batch fusion") {
     // Two transform siblings over the same array argument form a fusable HOF
@@ -450,8 +418,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(withGpuDelta(sql) == ((0L, 0L, 0L)),
       s"a fused HOF projection must skip batch fusion, got ${withGpuDelta(sql)}")
   }
-
-  // ---- (o) mixed None-path members in one group -----------------------------
 
   test("multi-member none-path member yields all-null column") {
     // '$.*' is a separate wildcard (hasSeparateWildcard) so the batch path maps
@@ -468,8 +434,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
         s"got ${withGpuDelta(sql)}")
   }
 
-  // ---- (p) runtime kill switch: spark.rapids.sql.batchFusion.enabled -------
-
   test("kill switch default ON: batch fusion fires without an explicit conf") {
     val sql = s"SELECT ${extracts(60, "jsonA")} FROM t"
     assertCpuGpuParity(sql)
@@ -480,7 +444,6 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
   test("kill switch OFF: per-column parity and zero batch-fusion activity") {
     val sql = s"SELECT ${extracts(60, "jsonA")} FROM t"
     val confs = Map("spark.rapids.sql.batchFusion.enabled" -> "false")
-    // Per-column fallback: results stay CPU-parity and no group ever fires.
     assertCpuGpuParity(sql, confs)
     assert(withGpuDelta(sql, confs) == ((0L, 0L, 0L)),
       s"disabled conf must not fire any batch-fusion group, got ${withGpuDelta(sql, confs)}")
@@ -490,6 +453,8 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     val confs = Map("spark.rapids.sql.tiered.project.enabled" -> "false",
       "spark.sql.subexpressionElimination.enabled" -> "false",
       "spark.sql.ansi.enabled" -> "false")
+    // For (1.0, 1e16, -1e16), (a + b) + c == 0.0 while a + (b + c) == 1.0;
+    // disabling tiered project and CSE keeps both JSON expressions in GpuBatchFusion.
     withCpu(confs) { s =>
       import s.implicits._
       Seq((1.0, 1e16, -1e16)).toDF("a", "b", "c")

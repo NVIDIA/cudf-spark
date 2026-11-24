@@ -30,57 +30,59 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * A GPU expression that can evaluate a GROUP of sibling instances of its runtime
- * class in ONE native call instead of one call per instance.
+ * A GPU expression that can evaluate a group of sibling instances of its runtime
+ * class in one native call instead of one call per instance.
  *
- * Implementations must be deterministic: the returned columns are stitched back
- * into the projection output at the members' original boundExprs positions, and
- * the whole group is retried as a single unit under split-retry.
+ * Eligible instances must be deterministic and side-effect-free: a group runs at
+ * its first member's position in `boundExprs`, its returned columns are placed at
+ * the members' original positions, and split-retry re-evaluates the group as a unit.
  */
 trait GpuBatchableExpression { self: GpuExpression =>
 
   /**
-   * Per-instance self-check: THIS instance's semantics are supported by the
-   * batch path (whitelisted type pair, no verify-mode side channel). No sibling
-   * context — one ineligible member never disqualifies its peers; it simply
-   * falls to the per-column path while its siblings batch.
+   * Whether this instance's configuration is supported by the batch path (for
+   * example, no per-column debug/verify side channel). Checked per instance: an
+   * ineligible expression falls back to per-column evaluation without
+   * disqualifying eligible siblings.
    */
   def batchEligible: Boolean
 
   /**
-   * Group identity within one runtime class. Members whose keys are equal share
-   * ONE batchEval call. Expression-valued keys are compared with semanticEquals;
-   * all other key types with `==` (precedent: canShareExplode in
-   * higherOrderFunctions.scala).
+   * Group identity within one runtime class. Siblings with equal keys share one
+   * `batchEval` call. Bare `Expression` keys are compared with `semanticEquals`;
+   * all other key types use `==` (wrap an `Expression` when canonicalization must
+   * not merge distinct inputs).
    */
   def batchGroupKey: Any
 
   /**
-   * The EXPLICIT input expression this instance batches over (cast → `child`,
-   * GetJsonObject → `json`). The hook evaluates this expression — not an
-   * implicit `children.head` — and internal nodes are already materialized
-   * when batching begins.
+   * The input expression this instance batches over (for example, `json` in
+   * `GpuGetJsonObject(json, path)`). `GpuBatchFusion` requires this expression to
+   * be deterministic and side-effect-free, evaluates each distinct instance at
+   * most once per projection batch, and passes the resulting column to `batchEval`.
    */
   def batchInput: Expression
 
   /**
-   * Evaluate `siblings` in ONE native call. `siblings` contains ALL group
-   * members (siblings.length == inputs.length); `inputs(i)` is the evaluated
-   * `batchInput` of `siblings(i)`. Returns `siblings.length` owned cudf
-   * `ColumnVector`s in the same order; ownership transfers to the caller. Must
-   * be STATELESS: project is re-invoked on arbitrary row subsets by split-retry
-   * (basicPhysicalOperators.scala projectWithRetrySingleBatch).
+   * Evaluates `siblings` in one native call. `siblings` and `inputs` have the
+   * same length, with `inputs(i)` holding the evaluated `batchInput` of
+   * `siblings(i)` (owned by the caller; implementations must not close `inputs`).
+   * Returns one caller-owned cuDF `ColumnVector` per sibling in the same order.
+   * Must be stateless because split-retry re-invokes projection on sliced batches.
    */
   def batchEval(siblings: Seq[Expression], inputs: Seq[GpuColumnVector]): Seq[ColumnVector]
 }
 
+/**
+ * Projection-level fusion hook for [[GpuBatchableExpression]]. Groups compatible
+ * top-level projection expressions and evaluates each group in one `batchEval`
+ * call while preserving side-effect ordering and per-column fallback semantics.
+ */
 object GpuBatchFusion extends Logging {
 
-  // Positive-provenance counters (overhead contract): `project` runs inside
-  // tasks, so these are per-JVM (all increments visible to a local-mode test
-  // JVM; per-executor on a real cluster). Atomic because tasks of one JVM can
-  // increment concurrently. package-private so GetJsonObjectBatchSuite
-  // asserts deltas order-independently (reset() before, snapshot() after).
+  // Per-JVM task counters (all increments are visible in local mode; per-executor
+  // on a cluster). Atomic because concurrent tasks share an executor JVM;
+  // package-private so tests can assert deltas via reset() and snapshot().
   private[rapids] val firedGroups = new AtomicLong()
   private[rapids] val batchedMembers = new AtomicLong()
   private[rapids] val droppedMembers = new AtomicLong()
@@ -111,11 +113,9 @@ object GpuBatchFusion extends Logging {
   }
 
   /**
-   * Unwrap GpuAlias recursively AND descend single-arg GpuCoalesce
-   * (COALESCE(x) is semantically identity, so the canonical
-   * `COALESCE(get_json_object(...))` workload batches too); boundExprs entries
-   * are alias-wrapped (basicPhysicalOperators.scala GpuProjectExec.bind matches
-   * `case ga: GpuAlias`). Returns the leaf expression.
+   * Strips `GpuAlias` wrappers (top-level `boundExprs` in `GpuProjectExec` are
+   * alias-wrapped) and single-argument `GpuCoalesce` (an identity wrapper common
+   * around `get_json_object`) to expose the underlying candidate expression.
    */
   private[rapids] def unwrap(e: Expression): Expression = e match {
     case a: GpuAlias => unwrap(a.child)
@@ -123,17 +123,13 @@ object GpuBatchFusion extends Logging {
     case other => other
   }
 
-  // Reorderability is tested on the UNWRAPPED expression: GpuAlias overrides
-  // neither hasSideEffects nor deterministic propagation, while side-effect
-  // overrides live on the operators themselves (e.g. GpuCast) — testing the raw
-  // alias would miss them.
   private def isReorderable(e: Expression): Boolean = e match {
     case g: GpuExpression => g.deterministic && !g.hasSideEffects
     case _ => false
   }
 
   private[rapids] def findGroups(boundExprs: Seq[Expression]): Seq[BatchGroup] = {
-    // cheap precheck: pure non-batch projections (the TPC-DS majority) never allocate
+    // Fast path: avoid buffer allocations when no expression is batch-eligible.
     if (!boundExprs.exists { e => unwrap(e) match {
           case g: GpuBatchableExpression => g.batchEligible
           case _ => false } }) {
@@ -144,16 +140,16 @@ object GpuBatchFusion extends Logging {
     boundExprs.zipWithIndex.foreach { case (e, idx) =>
       unwrap(e) match {
         case g: GpuBatchableExpression
-            // member input must be pure: the hook evaluates it ONCE (cached)
-            // instead of once per member — only safe if side-effect-free
+            // Shared inputs are evaluated once per distinct expression node, so
+            // batchInput must be deterministic and side-effect-free.
             if g.batchEligible && isReorderable(g.batchInput) =>
           open.find(_.matches(g)) match {
             case Some(group) => group.members += ((idx, g))
             case None => open += BatchGroup(g, mutable.ArrayBuffer((idx, g)))
           }
         case other =>
-          // non-member that may not be reordered seals every open group, so a
-          // throwing fallback expression keeps its projection-order semantics
+          // A non-reorderable sibling seals open groups so later members are not
+          // hoisted ahead of a side-effecting or nondeterministic expression.
           if (!isReorderable(other)) { closed ++= open; open.clear() }
       }
     }
@@ -166,8 +162,6 @@ object GpuBatchFusion extends Logging {
       evalColumn: Expression => org.apache.spark.sql.vectorized.ColumnVector)
     : Option[ColumnarBatch] = {
     if (!RapidsConf.ENABLE_BATCH_FUSION.get(SQLConf.get)) {
-      // Kill switch: fall through to per-column evaluation (basicPhysicalOperators
-      // .orElse chain) so the runtime toggle covers all batch-fusion groups.
       return None
     }
     val groups = findGroups(boundExprs)
@@ -175,22 +169,19 @@ object GpuBatchFusion extends Logging {
       None
     } else {
       val outputs = new Array[org.apache.spark.sql.vectorized.ColumnVector](boundExprs.length)
-      // Per-child eval cached by input-child IDENTITY: each DISTINCT child is
-      // evaluated EXACTLY ONCE even when N members share it (overhead
-      // contract); evalColumn is the caller's lambda, never leaf.columnarEval
-      // directly.
+      // Cache evaluated batchInput columns by reference identity so shared
+      // Expression nodes are evaluated once via the caller's evalColumn.
       val inputCache =
         new java.util.IdentityHashMap[Expression, GpuColumnVector]()
       def inputFor(e: GpuBatchableExpression): Option[GpuColumnVector] = {
-        val child = e.batchInput // explicit input contract, not children.head
+        val child = e.batchInput
         if (inputCache.containsKey(child)) {
           Some(inputCache.get(child))
         } else {
           evalColumn(child) match {
             case gcv: GpuColumnVector => inputCache.put(child, gcv); Some(gcv)
             case raw =>
-              // member drops out of its group (per-column path); the evaluated
-              // column cannot be reused, so release it here
+              // Non-GPU column cannot be passed to batchEval; release it and fall back per-column.
               raw.safeClose()
               None
           }
@@ -199,18 +190,15 @@ object GpuBatchFusion extends Logging {
       var projectionError: Throwable = null
       try {
         val grouped = mutable.BitSet()
-        // INDEX-WALK execution: groups evaluate at their FIRST member's index —
-        // never all-groups-first, which would hoist a later group across an
-        // earlier side-effecting/throwing leftover.
+        // Evaluate each group at its first member's index so a later group is never
+        // hoisted ahead of an earlier side-effecting non-member.
         val firstIndexOf = groups.flatMap(g => g.members.map(_._1 -> g)).toMap
         val doneGroups = mutable.HashSet.empty[BatchGroup]
         boundExprs.indices.foreach { idx =>
           firstIndexOf.get(idx) match {
             case Some(g) if !doneGroups.contains(g) =>
               doneGroups += g
-              // GpuBatchableExpression is a self-typed trait (self: GpuExpression),
-              // so the members need an explicit cast to satisfy batchEval's
-              // Seq[Expression]; inputFor keeps the trait view
+              // GpuBatchableExpression uses a self-type (self: GpuExpression), not subtyping.
               val members = g.members.map(_._2)
               val exprMembers = members.map(_.asInstanceOf[Expression])
               val inputs = members.map(inputFor)
@@ -230,28 +218,23 @@ object GpuBatchFusion extends Logging {
                     }
                 }
                 grouped ++= g.members.map(_._1)
-                // POSITIVE PROVENANCE (overhead contract): one INFO line per
-                // fired group; GetJsonObjectBatchSuite asserts counter deltas,
-                // and the benchmark harness greps them from driver AND
-                // executor logs before timing. `project` runs per
-                // batch, so the line count is groups x batches x partitions.
+                // Record one counter increment and INFO line per fired group per batch
+                // (used by tests and benchmark provenance checks).
                 val n = members.length
                 firedGroups.incrementAndGet()
                 batchedMembers.addAndGet(n)
                 logInfo(s"batch-fusion: ${g.receiver.getClass.getSimpleName} " +
                     s"x$n at index ${g.members.head._1}")
               } else {
-                // some member inputs did not evaluate to a GpuColumnVector:
-                // the whole group falls back per-column at its members'
-                // positions below (never null)
+                // If any member input is not a GpuColumnVector, the group drops out and
+                // its members evaluate individually at their original indices below.
                 droppedMembers.addAndGet(members.length)
               }
             case _ => // non-first member position or already-handled group
           }
           if (!grouped.contains(idx)) {
-            // Non-grouped position (or a member whose input eval failed):
-            // ORIGINAL alias-wrapped expression — matches project's own
-            // boundExprs.safeMap(evalColumn) fallback shape.
+            // Evaluate ungrouped expressions (and dropped group members) via their
+            // original alias-wrapped boundExprs entry.
             outputs(idx) = evalColumn(boundExprs(idx))
           }
         }
