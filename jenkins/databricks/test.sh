@@ -150,7 +150,7 @@ run_delta_tests() {
         mkdir -p integration_tests/target
         while true; do
             delta_run_dir=$(mktemp -d "$PWD/integration_tests/target/run_dir-delta-XXXXXX")
-            # Match the pytest launcher's directory-name guard for SPARK-44242.
+            # Reject generated names that can trigger SPARK-44242.
             if [[ ! "${delta_run_dir##*/}" =~ [xX][mM][xXsS] ]]; then
                 break
             fi
