@@ -199,10 +199,9 @@ class GpuRowLevelWritingSparkTaskSuite extends RmmSparkRetrySuiteBase {
       val task = new ReplaceTask(projs, metrics)
 
       val batch = buildReplaceBatch()
-      // Inject OOM during COPY counting (after UPDATE counting already ran) to verify the retry
-      // block does not double-count or leak batch resources. Task owns and closes the input batch.
+      // Inject CPU OOM on copyToHost() to verify host-side retry does not double-count or leak.
       RmmSpark.forceRetryOOM(
-        RmmSpark.getCurrentThreadId, 1, RmmSpark.OomInjectionType.GPU.ordinal, 2)
+        RmmSpark.getCurrentThreadId, 1, RmmSpark.OomInjectionType.CPU.ordinal, 0)
       task.writeBatch(writer, batch)
       task.finishTask()
 
@@ -213,6 +212,30 @@ class GpuRowLevelWritingSparkTaskSuite extends RmmSparkRetrySuiteBase {
       assert(updatedMetric.value === 2L)
       assert(copiedMetric.value === 3L)
     }
+  }
+
+  test("GpuReplaceDataWritingSparkTask handles nullable operation column") {
+    val projs = ReplaceDataProjections(ProjectingInternalRow(rowSchema, Seq(1, 2)), None)
+    val updatedMetric = newMetric()
+    val copiedMetric = newMetric()
+    val task = new ReplaceTask(projs, Map(
+      GpuRowLevelWriteExec.NUM_UPDATED_ROWS -> updatedMetric,
+      GpuRowLevelWriteExec.NUM_COPIED_ROWS -> copiedMetric))
+    val writer = new RecordingDataWriter
+    val batchWithNullOp = withResource(new Table.TestBuilder()
+      .column(Int.box(UPDATE_OPERATION), null.asInstanceOf[java.lang.Integer], COPY_OPERATION)
+      .column(Int.box(0), 1, 2)
+      .column(Long.box(10L), 20L, 30L)
+      .column(Long.box(100L), 200L, 300L)
+      .build()) { table =>
+      GpuColumnVector.from(table,
+        Array[DataType](IntegerType, IntegerType, LongType, LongType))
+    }
+    task.writeBatch(writer, batchWithNullOp)
+    task.finishTask()
+    assert(writer.writtenRows === 3L)
+    assert(updatedMetric.value === 1L)
+    assert(copiedMetric.value === 1L)
   }
 
   test("GpuReplaceDataWritingSparkTask handles DELETE, empty batch, MERGE, and write failures") {

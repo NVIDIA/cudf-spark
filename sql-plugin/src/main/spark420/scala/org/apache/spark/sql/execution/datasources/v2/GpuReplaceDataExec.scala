@@ -19,7 +19,6 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import ai.rapids.cudf.{DType, Scalar => CudfScalar}
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuDataWriter, GpuDataWriterFactory, GpuMetric,
   GpuWrite}
 import com.nvidia.spark.rapids.Arm.withResource
@@ -76,11 +75,47 @@ case class GpuReplaceDataWritingSparkTask(
       .asInstanceOf[GpuDataWriter]
   }
 
-  private def countOperation(batch: ColumnarBatch, op: Int): Long = {
-    withResource(CudfScalar.fromInt(op)) { cudfOp =>
-      withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(cudfOp)) { mask =>
-        withResource(mask.sum(DType.INT64)) { s =>
-          if (s.isValid) s.getLong else 0L
+  // Copy only the 4-byte operation column to host once to avoid per-batch GPU reduction
+  // allocations and multiple stream-synchronizing Scalar.getLong round trips.
+  private def countOperations(
+      batch: ColumnarBatch,
+      trackUpdated: Boolean,
+      trackCopied: Boolean): (Long, Long) = {
+    val numRows = batch.numRows()
+    val opCol = batch.column(0).asInstanceOf[GpuColumnVector].getBase
+    if (opCol.getNullCount == numRows) {
+      (0L, 0L)
+    } else {
+      withRetryNoSplit {
+        withResource(opCol.copyToHost()) { hcv =>
+          var updated = 0L
+          var copied = 0L
+          if (hcv.getNullCount == 0L) {
+            val buf = hcv.getData
+            var offset = 0L
+            val end = numRows.toLong * 4L
+            while (offset < end) {
+              buf.getInt(offset) match {
+                case UPDATE_OPERATION => updated += 1L
+                case COPY_OPERATION => copied += 1L
+                case _ =>
+              }
+              offset += 4L
+            }
+          } else {
+            var i = 0
+            while (i < numRows) {
+              if (!hcv.isNull(i)) {
+                hcv.getInt(i) match {
+                  case UPDATE_OPERATION => updated += 1L
+                  case COPY_OPERATION => copied += 1L
+                  case _ =>
+                }
+              }
+              i += 1
+            }
+          }
+          (if (trackUpdated) updated else 0L, if (trackCopied) copied else 0L)
         }
       }
     }
@@ -93,11 +128,7 @@ case class GpuReplaceDataWritingSparkTask(
     val trackCopied = sparkMetrics.contains(GpuRowLevelWriteExec.NUM_COPIED_ROWS)
     val (numUpdated, numCopied) = withResource(batch) { _ =>
       val counts = if (batch.numRows() > 0 && (trackUpdated || trackCopied)) {
-        withRetryNoSplit {
-          val updated = if (trackUpdated) countOperation(batch, UPDATE_OPERATION) else 0L
-          val copied = if (trackCopied) countOperation(batch, COPY_OPERATION) else 0L
-          (updated, copied)
-        }
+        countOperations(batch, trackUpdated, trackCopied)
       } else {
         (0L, 0L)
       }
