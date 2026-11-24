@@ -21,6 +21,7 @@ import ai.rapids.cudf.ast.{AstExpression, AstJitProgram, CompiledExpression}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.ProjectAstTestUtils.collectExpressions
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -34,6 +35,7 @@ import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{ArrayType, BinaryType, ByteType, DataType, DateType,
   Decimal, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType,
   TimestampType}
+import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.TaskCompletionListener
 
 class GpuProjectAstJitSuite extends AnyFunSuite {
@@ -975,15 +977,63 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(GpuLiteral(null, StringType).selfSupportsAstJit)
     assert(GpuLiteral(null, DecimalType(10, 2)).selfSupportsAstJit)
 
-    // Verify AST conversion does not NPE on null string/decimal/date/timestamp literals
-    withResource(GpuLiteral(null, StringType).convertToAst(Int.MaxValue).compileJit()) { _ => }
-    withResource(GpuLiteral(null, DecimalType(10, 2)).convertToAst(Int.MaxValue).compileJit()) {
-      _ =>
+    // Execute literal AST JIT trees via AstJitProgram.computeTable and verify types, scales,
+    // values, and nulls across String, DECIMAL32/64/128, Date, and Timestamp.
+    val dec32Type = DecimalType(9, 2)
+    val dec64Type = DecimalType(18, 3)
+    val dec128Type = DecimalType(25, 2)
+    val dec128Expected = new java.math.BigDecimal("123456789012345678901.23")
+    val literalExprs = Seq(
+      GpuLiteral(null, StringType),
+      GpuLiteral(UTF8String.fromString("hello"), StringType),
+      GpuLiteral(null, dec32Type),
+      GpuLiteral(Decimal(12345, 9, 2), dec32Type),
+      GpuLiteral(null, dec64Type),
+      GpuLiteral(Decimal(123456789012L, 18, 3), dec64Type),
+      GpuLiteral(null, dec128Type),
+      GpuLiteral(Decimal(BigDecimal(dec128Expected), 25, 2), dec128Type),
+      GpuLiteral(null, DateType),
+      GpuLiteral(null, TimestampType))
+    withResource(gpuTable(
+        ColumnVector.fromBoxedInts(1, 2), ColumnVector.fromBoxedInts(3, 4))) { input =>
+      withResource(literalExprs.safeMap(_.convertToAst(Int.MaxValue).compileJit())) { compiled =>
+        withResource(AstJitProgram.compile(input, compiled: _*)) { program =>
+          withResource(program.computeTable(input)) { result =>
+            def checkAllNull(colIdx: Int, expectedType: DType): Unit = {
+              val cv = result.getColumn(colIdx)
+              assertResult(expectedType)(cv.getType)
+              withResource(cv.copyToHost()) { h =>
+                assertResult(2L)(h.getRowCount)
+                assert(h.isNull(0) && h.isNull(1))
+              }
+            }
+            checkAllNull(0, DType.STRING)
+            assertResult(DType.STRING)(result.getColumn(1).getType)
+            withResource(result.getColumn(1).copyToHost()) { h =>
+              assertResult(Seq("hello", "hello"))(Seq(h.getJavaString(0), h.getJavaString(1)))
+            }
+            checkAllNull(2, DType.create(DType.DTypeEnum.DECIMAL32, -2))
+            assertResult(DType.create(DType.DTypeEnum.DECIMAL32, -2))(result.getColumn(3).getType)
+            withResource(result.getColumn(3).copyToHost()) { h =>
+              assertResult(Seq(12345, 12345))(Seq(h.getInt(0), h.getInt(1)))
+            }
+            checkAllNull(4, DType.create(DType.DTypeEnum.DECIMAL64, -3))
+            assertResult(DType.create(DType.DTypeEnum.DECIMAL64, -3))(result.getColumn(5).getType)
+            withResource(result.getColumn(5).copyToHost()) { h =>
+              assertResult(Seq(123456789012L, 123456789012L))(Seq(h.getLong(0), h.getLong(1)))
+            }
+            checkAllNull(6, DType.create(DType.DTypeEnum.DECIMAL128, -2))
+            assertResult(DType.create(DType.DTypeEnum.DECIMAL128, -2))(result.getColumn(7).getType)
+            withResource(result.getColumn(7).copyToHost()) { h =>
+              assertResult(Seq(dec128Expected, dec128Expected))(
+                Seq(h.getBigDecimal(0), h.getBigDecimal(1)))
+            }
+            checkAllNull(8, DType.TIMESTAMP_DAYS)
+            checkAllNull(9, DType.TIMESTAMP_MICROSECONDS)
+          }
+        }
+      }
     }
-    withResource(GpuLiteral(Decimal(12345, 10, 2), DecimalType(10, 2))
-        .convertToAst(Int.MaxValue).compileJit()) { _ => }
-    withResource(GpuLiteral(null, DateType).convertToAst(Int.MaxValue).compileJit()) { _ => }
-    withResource(GpuLiteral(null, TimestampType).convertToAst(Int.MaxValue).compileJit()) { _ => }
 
     // Transparent wrappers pass through AST JIT
     withResource(gpuTable(
