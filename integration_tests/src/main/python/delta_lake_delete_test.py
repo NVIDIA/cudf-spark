@@ -946,15 +946,23 @@ def test_delta_delete_persistent_dv_row_tracking_metadata_only(
     def delete(spark, table):
         return spark.sql(f"DELETE FROM {table}{predicate}").collect()
 
+    def setup(spark):
+        cpu_path = f"{data_path}/CPU"
+        _setup_tracked_persistent_dv_delete_table(spark, cpu_path, column_mapping, partitioned)
+        # Both commits must remove files from the same snapshot, including physical column names.
+        sc = spark.sparkContext
+        hadoop_fs = sc._jvm.org.apache.hadoop.fs
+        config = sc._jsc.hadoopConfiguration()
+        source = hadoop_fs.Path(cpu_path)
+        dest = hadoop_fs.Path(f"{data_path}/GPU")
+        fs = source.getFileSystem(config)
+        assert hadoop_fs.FileUtil.copy(fs, source, fs, dest, False, config)
+        table = f"delta.`{cpu_path}`"
+        return _tracked_delete_rows(spark, table), _tracked_delete_latest_version(spark, table)
+
+    before, version = with_cpu_session(setup, conf=conf)
     for mode in ("CPU", "GPU"):
-        path = f"{data_path}/{mode}"
-        table = f"delta.`{path}`"
-
-        def setup(spark):
-            _setup_tracked_persistent_dv_delete_table(spark, path, column_mapping, partitioned)
-            return _tracked_delete_rows(spark, table), _tracked_delete_latest_version(spark, table)
-
-        before, version = with_cpu_session(setup, conf=conf)
+        table = f"delta.`{data_path}/{mode}`"
         if mode == "CPU":
             affected = with_cpu_session(lambda spark: delete(spark, table), conf=conf)
         else:
