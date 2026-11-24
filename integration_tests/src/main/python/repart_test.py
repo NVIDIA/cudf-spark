@@ -373,8 +373,20 @@ def _assert_union_attribute_map_partitioning(cpu_plan, gpu_plan):
 
 @pytest.mark.skipif(not is_spark_411_or_later(),
                     reason="SPARK-52921 union output partitioning requires Spark 4.1.1+")
+@pytest.mark.parametrize(
+    "final_query",
+    [
+        "SELECT id, count(*) AS cnt FROM union4 GROUP BY id",
+        """
+            SELECT u.id, count(*) AS cnt
+            FROM union4 u
+            JOIN union_attribute_map_aggregate a ON u.id = a.id
+            GROUP BY u.id
+        """,
+    ],
+    ids=["aggregation", "join"])
 @ignore_order
-def test_union_partitioning_attribute_map():
+def test_union_partitioning_attribute_map(final_query):
     def do_it(spark):
         num_parts = 4
         base = spark.range(0, 40).select(
@@ -401,11 +413,8 @@ def test_union_partitioning_attribute_map():
               UNION ALL SELECT * FROM union_attribute_map_joined
               UNION ALL SELECT * FROM union_attribute_map_joined
             )
-            SELECT u.id, count(*) AS cnt
-            FROM union4 u
-            JOIN union_attribute_map_aggregate a ON u.id = a.id
-            GROUP BY u.id
-        """)
+            {}
+        """.format(final_query))
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
