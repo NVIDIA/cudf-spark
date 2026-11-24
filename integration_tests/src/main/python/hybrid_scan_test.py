@@ -27,7 +27,8 @@ from urllib.parse import unquote, urlparse
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
-    assert_gpu_and_cpu_row_counts_equal, assert_spark_exception, collect_plan_nodes, plan_metric
+    assert_gpu_and_cpu_row_counts_equal, assert_metric_unset_or_zero, assert_spark_exception, \
+    collect_plan_nodes, plan_metric
 from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from marks import allow_non_gpu, ignore_order, inject_oom
@@ -300,6 +301,24 @@ def _remove_checksum_files(data_path):
         if os.path.exists(_checksum_file(path)):
             os.remove(_checksum_file(path))
     return local_paths
+
+
+def _gds_required():
+    """Whether the session was launched with GPUDirect Storage ON, as a GDS run is so that KvikIO
+    is set up for cuFile at startup. The GDS ON tests then fail unless reads go to the device."""
+    launch_conf = with_cpu_session(lambda spark: dict(spark.sparkContext.getConf().getAll()))
+    if launch_conf.get('spark.rapids.sql.reader.gpuDirectStorage.mode', 'OFF').upper() != 'ON':
+        return False
+    assert launch_conf.get('spark.rapids.sql.format.parquet.hybridScan.enabled',
+                           'false').lower() == 'true', \
+        'a GDS run must launch with hybrid scan enabled too, or KvikIO is not set up for cuFile'
+    return True
+
+
+def write_gds_data(spark, path):
+    """`write_test_data` in one row group, so its payload column chunks are each several MiB,
+    above KvikIO's default 1 MiB GPUDirect Storage threshold."""
+    write_test_data(spark, path, num_rows=1 << 20, row_group_size=128 << 20)
 
 
 @_metric_reader_modes
@@ -611,22 +630,41 @@ def test_hybrid_scan_legacy_old_date_filter_throws(spark_tmp_path, reader_confs)
         'SparkUpgradeException')
 
 
-@pytest.mark.parametrize('where', [
-    'sorted_int < 500',
-    'filter_int = 7',
-    "filter_str = 'key_500'",
+@pytest.mark.parametrize('where,survives', [
+    ('sorted_int < 500', True),
+    ('filter_int = 7', True),
+    ("filter_str = 'key_500'", False),
 ], ids=['stats', 'dict', 'none_survive_dict'])
 @pytest.mark.parametrize('gds_mode', ['OFF', 'ON', 'AUTO'])
-def test_hybrid_scan_gds_mode(spark_tmp_path, where, gds_mode):
+def test_hybrid_scan_gds_mode(spark_tmp_path, where, survives, gds_mode):
     """With GPUDirect Storage off, a local file is read to host memory through KvikIO. With it on,
     a file is read to the device where KvikIO can, and through host memory where it cannot, the
-    path is not local, or the GPU is busy. The answer is the same either way."""
+    path is not local, or the GPU is busy. The answer is the same either way.
+
+    In a GDS run, ON reads a large local file, in one task so the GPU is never busy, and must
+    read it with GPUDirect Storage: no split falls back, and surviving chunks go to the device."""
+    required = gds_mode == 'ON' and _gds_required()
+
+    def check(cpu_plan, gpu_plan):
+        if not required:
+            return
+        scan = [node for node in collect_plan_nodes(gpu_plan)
+                if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
+        assert_metric_unset_or_zero(scan, 'hybridScanGdsFallbackSplits')
+        device_bytes = plan_metric(scan, 'hybridScanDeviceBytesRead')
+        if survives:
+            assert device_bytes > 0, 'nothing was read with GPUDirect Storage'
+
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
-    with_cpu_session(lambda spark: write_test_data(spark, data_path))
-    _remove_checksum_files(data_path)
-    assert_gpu_and_cpu_are_equal_collect(
+    write = write_gds_data if required else write_test_data
+    with_cpu_session(lambda spark: write(spark, data_path))
+    is_local = _remove_checksum_files(data_path) is not None
+    assert is_local or not required, 'a GDS run needs --tmp_path on a local GDS filesystem'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter(where),
-        conf=hybrid_conf(**{'spark.rapids.sql.reader.gpuDirectStorage.mode': gds_mode}))
+        conf=hybrid_conf(**_pruning_metrics_conf,
+                         **{'spark.rapids.sql.reader.gpuDirectStorage.mode': gds_mode}),
+        gpu_plan_assertion=check)
 
 
 @pytest.mark.parametrize('reader_mode', ['PERFILE', 'MULTITHREADED'])
