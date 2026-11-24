@@ -20,6 +20,16 @@ import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids.jni.Protobuf._
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Alias, Ascending, Attribute, AttributeReference,
+  ElementAt, Expression, GetArrayItem, GetArrayStructFields, GetStructField, GreaterThan,
+  IsNotNull, Literal, NamedExpression, SortOrder, UnaryExpression}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Count, Partial}
+import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
+import org.apache.spark.sql.execution.{FilterExec, LeafExecNode, LocalLimitExec, ProjectExec,
+  SortExec, SparkPlan}
+import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.rapids.protobuf._
 import org.apache.spark.sql.types._
 
@@ -610,5 +620,133 @@ class ProtobufSchemaSuite extends AnyFunSuite {
         defaultString = null, enumValidValues = null, enumNames = null))
     val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(fields.toArray)
     assert(arrays.toJniDescriptor.numFields() == 3)
+  }
+
+  private case class FakeScan(override val output: Seq[Attribute]) extends LeafExecNode {
+    override protected def doExecute(): RDD[InternalRow] =
+      throw new UnsupportedOperationException("not needed")
+  }
+
+  private case class FakeDecode(
+      child: Expression,
+      override val dataType: StructType,
+      isDeterministic: Boolean = true) extends UnaryExpression {
+    override lazy val deterministic: Boolean = isDeterministic
+    override def nullable: Boolean = true
+    override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode =
+      throw new UnsupportedOperationException("not needed")
+    override protected def withNewChildInternal(newChild: Expression): Expression =
+      copy(child = newChild)
+  }
+
+  private def analyzeReads(
+      plans: Seq[SparkPlan],
+      decode: Expression,
+      isDecode: Option[Expression => Boolean] = None): FieldReads = {
+    val pred = isDecode.getOrElse((e: Expression) => (e eq decode) || e.semanticEquals(decode))
+    FieldReads.analyzePlans(plans, pred)
+  }
+
+  private val itemStructType = StructType(Seq(
+    StructField("a", IntegerType, nullable = true),
+    StructField("b", StringType, nullable = true)))
+  private val nestedRootType = StructType(Seq(
+    StructField("top", IntegerType, nullable = true),
+    StructField("child", itemStructType, nullable = true),
+    StructField("items", ArrayType(itemStructType, containsNull = false), nullable = true)))
+
+  test("field reads trace carried struct through project, filter, sort, and aggregate") {
+    import FieldReads._
+    val bin = AttributeReference("bin", BinaryType, nullable = true)()
+    val scan = FakeScan(Seq(bin))
+    val decode = FakeDecode(bin, nestedRootType)
+    val decodedAlias = Alias(decode, "d")()
+    val d = decodedAlias.toAttribute
+    val decodeProj = ProjectExec(Seq(decodedAlias), scan)
+
+    // Project (alias) -> Project (pass-through) -> Filter -> Sort -> Project
+    val passProj = ProjectExec(Seq(d), decodeProj)
+    val itemsA = GetArrayStructFields(GetStructField(d, 2, Some("items")),
+      itemStructType("a"), 0, 2, containsNull = true)
+    val filter = FilterExec(IsNotNull(itemsA), passProj)
+    val sort = SortExec(Seq(SortOrder(GetStructField(d, 0, Some("top")), Ascending)),
+      global = false, filter)
+    val topProj = ProjectExec(
+      Seq(Alias(GetStructField(GetStructField(d, 1, Some("child")), 1, Some("b")), "cb")()),
+      sort)
+    assert(analyzeReads(Seq(decodeProj, passProj, filter, sort, topProj), decode) ==
+      path(Seq("top")).merge(path(Seq("child", "b"))).merge(path(Seq("items", "a"))))
+
+    // Project (alias) -> HashAggregate (grouping, aggregate function arg, aggregate filter)
+    val groupKey = Alias(GetStructField(GetStructField(d, 1, Some("child")), 0, Some("a")), "ca")()
+    val itemsB = GetArrayStructFields(GetStructField(d, 2, Some("items")),
+      itemStructType("b"), 1, 2, containsNull = true)
+    val aggFilter = GreaterThan(GetStructField(d, 0, Some("top")), Literal(0))
+    val aggExpr = AggregateExpression(Count(Seq(itemsB)), Partial, isDistinct = false,
+      filter = Some(aggFilter), resultId = NamedExpression.newExprId)
+    val agg = HashAggregateExec(
+      requiredChildDistributionExpressions = None,
+      isStreaming = false,
+      numShufflePartitions = None,
+      groupingExpressions = Seq(groupKey),
+      aggregateExpressions = Seq(aggExpr),
+      aggregateAttributes = Seq(aggExpr.resultAttribute),
+      initialInputBufferOffset = 0,
+      resultExpressions = Seq(groupKey.toAttribute, aggExpr.resultAttribute),
+      child = decodeProj)
+    assert(analyzeReads(Seq(decodeProj, agg), decode) ==
+      path(Seq("top")).merge(path(Seq("child", "a"))).merge(path(Seq("items", "b"))))
+
+    // Whole struct as a grouping key reads every field.
+    val wholeAgg = HashAggregateExec(
+      requiredChildDistributionExpressions = None,
+      isStreaming = false,
+      numShufflePartitions = None,
+      groupingExpressions = Seq(d),
+      aggregateExpressions = Nil,
+      aggregateAttributes = Nil,
+      initialInputBufferOffset = 0,
+      resultExpressions = Seq(d),
+      child = decodeProj)
+    assert(analyzeReads(Seq(decodeProj, wholeAgg), decode) == All)
+  }
+
+  test("field reads trace ElementAt, dynamic indices, boundaries, and non-deterministic decodes") {
+    import FieldReads._
+    val bin = AttributeReference("bin", BinaryType, nullable = true)()
+    val scan = FakeScan(Seq(bin))
+    val decode = FakeDecode(bin, nestedRootType)
+
+    // ElementAt on an array with a dynamic index that reads another field of the same struct.
+    val elemAt = new ElementAt(GetStructField(decode, 2, Some("items")),
+      GetStructField(decode, 0, Some("top")))
+    val elemProj = ProjectExec(Seq(Alias(GetStructField(elemAt, 1, Some("b")), "b")()), scan)
+    assert(analyzeReads(Seq(elemProj), decode) == path(Seq("top")).merge(path(Seq("items", "b"))))
+
+    // GetArrayItem on an array element.
+    val arrayItem = GetArrayItem(GetStructField(decode, 2, Some("items")), Literal(0),
+      failOnError = false)
+    val itemProj = ProjectExec(Seq(Alias(GetStructField(arrayItem, 0, Some("a")), "a")()), scan)
+    assert(analyzeReads(Seq(itemProj), decode) == path(Seq("items", "a")))
+
+    val decodedAlias = Alias(decode, "d")()
+    val decodeProj = ProjectExec(Seq(decodedAlias), scan)
+    // Query output and unsupported plans read the struct as a whole.
+    assert(analyzeReads(Seq(decodeProj), decode) == All)
+    assert(analyzeReads(Seq(decodeProj, LocalLimitExec(5, decodeProj)), decode) == All)
+    // Carrying the struct to a projection that drops it leaves every field unread.
+    val dropProj = ProjectExec(Seq(Alias(Literal(1), "one")()), decodeProj)
+    assert(analyzeReads(Seq(decodeProj, dropProj), decode) == Unread)
+    // Failing to locate the decode expression in its own plan fails closed to All.
+    assert(analyzeReads(Seq(elemProj), decode, isDecode = Some(_ => false)) == All)
+
+    // Non-deterministic decode expressions do not match semanticEquals, so reference identity
+    // must still trace their field reads (and never fall through to Unread).
+    val nonDetDecode = FakeDecode(bin, nestedRootType, isDeterministic = false)
+    val nonDetProj = ProjectExec(
+      Seq(Alias(GetStructField(nonDetDecode, 0, Some("top")), "top")()), scan)
+    assert(analyzeReads(Seq(nonDetProj), nonDetDecode) == path(Seq("top")))
+    assert(analyzeReads(Seq(nonDetProj), nonDetDecode,
+      isDecode = Some(_.semanticEquals(nonDetDecode))) == All)
   }
 }

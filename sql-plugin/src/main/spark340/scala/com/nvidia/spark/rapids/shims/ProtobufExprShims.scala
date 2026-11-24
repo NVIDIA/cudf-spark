@@ -90,11 +90,12 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           _ <- checkSupportedOptions(exprInfo.options)
           msgDesc <- SparkProtobufCompat.resolveMessageDescriptor(exprInfo)
           // Fields the query does not read are still validated, like Spark does, but are
-          // returned as nulls. Semantically equal copies read the union, so they stay equal.
-          reads = FieldReads.analyze(this, _.semanticEquals(e))
+          // returned as nulls. Semantically equal copies read the union so they stay equal;
+          // reference identity still matches non-deterministic inputs where semanticEquals fails.
+          reads = FieldReads.analyze(this, expr => (expr eq e) || expr.semanticEquals(e))
           flatFields <- flattenMessage(schema, msgDesc, exprInfo.messageName,
-            plannerOptions.enumsAsInts, reads, parentIdx = -1, depth = 0, pathPrefix = "",
-            Vector.empty)
+            plannerOptions.enumsAsInts, reads, parentVisible = true, parentIdx = -1, depth = 0,
+            pathPrefix = "", Vector.empty)
           arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields.toArray)
           // The JNI constructor validates the schema; fail here rather than on executors.
           _ <- Try(arrays.toJniDescriptor).toEither.left.map { t =>
@@ -135,6 +136,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             messageName: String,
             enumsAsInts: Boolean,
             reads: FieldReads,
+            parentVisible: Boolean,
             parentIdx: Int,
             depth: Int,
             pathPrefix: String,
@@ -152,7 +154,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
             result <- schema.fields.foldLeft(empty) { (fields, sf) =>
               fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
-                enumsAsInts, reads.child(sf.name), parentIdx, depth, pathOf(sf.name), _))
+                enumsAsInts, reads.child(sf.name), parentVisible, parentIdx, depth,
+                pathOf(sf.name), _))
             }
           } yield result
         }
@@ -164,6 +167,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             messageName: String,
             enumsAsInts: Boolean,
             reads: Option[FieldReads],
+            parentVisible: Boolean,
             parentIdx: Int,
             depth: Int,
             path: String,
@@ -179,11 +183,14 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             case ArrayType(elemType, _) => GpuFromProtobuf.sparkTypeToCudfIdOpt(elemType)
             case other => GpuFromProtobuf.sparkTypeToCudfIdOpt(other)
           }
+          // Non-nullable fields (proto2 required) stay output under a visible parent so
+          // UnsafeProjection never dereferences nulls in nullable=false struct slots.
+          val isVisible = reads.isDefined || (parentVisible && !sf.nullable)
           for {
             outputType <- outputTypeOpt.toRight(
               s"Unsupported Spark type for protobuf field '$path': ${sf.dataType}")
             flatField <- ProtobufSchemaValidator.toFlattenedFieldDescriptor(
-              path, sf, info, parentIdx, depth, outputType, isOutput = reads.isDefined)
+              path, sf, info, parentIdx, depth, outputType, isOutput = isVisible)
             withField = flatFields :+ flatField
             result <- nestedSchema match {
               case Some(st) =>
@@ -193,8 +200,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
                       s"Failed to resolve the message type of protobuf field '$path'")
                   // The children of a field that is not read are not read either.
                   fields <- flattenMessage(st, childDesc, s"$messageName.${sf.name}",
-                    enumsAsInts, reads.getOrElse(FieldReads.Unread), parentIdx = flatFields.size,
-                    depth + 1, path, withField)
+                    enumsAsInts, reads.getOrElse(FieldReads.Unread), parentVisible = isVisible,
+                    parentIdx = flatFields.size, depth + 1, path, withField)
                 } yield fields
               case None => Right(withField)
             }

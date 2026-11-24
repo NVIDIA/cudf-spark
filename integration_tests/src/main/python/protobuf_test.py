@@ -20,6 +20,7 @@ import struct
 import pytest
 
 from asserts import (
+    assert_cpu_and_gpu_are_equal_collect_with_capture,
     assert_gpu_and_cpu_are_equal_collect,
     assert_gpu_and_cpu_error,
     assert_gpu_fallback_collect,
@@ -153,8 +154,9 @@ def _gpu_output_paths(df):
 
     def visit_expr(expr):
         if expr.getClass().getSimpleName() == "GpuFromProtobuf":
-            paths = struct_paths(json.loads(expr.dataType().json()))
+            paths = list(struct_paths(json.loads(expr.dataType().json())))
             is_output = list(expr.schema().isOutput())
+            assert len(paths) == len(is_output)
             decodes.append(frozenset(p for p, out in zip(paths, is_output) if out))
         children = expr.children().iterator()
         while children.hasNext():
@@ -1065,11 +1067,23 @@ def _read_leaf_of_every_item(decoded, df):
 
 
 def _read_through_alias(decoded, df):
-    return df.select(decoded.alias("d")).select(f.col("d.child.b"))
+    # Two references to the aliased struct keep CollapseProject from folding the projections.
+    return df.select(decoded.alias("d")).select(f.col("d.top"), f.col("d.child.b"))
+
+
+def _read_element_at(decoded, df):
+    return df.select(decoded.alias("d")).select(f.expr("try_element_at(d.items, 1).b"))
 
 
 def _filter_then_read(decoded, df):
     return df.select(decoded.alias("d")).where(f.col("d.top") > 0).select(f.col("d.child.a"))
+
+
+def _filter_carried_then_read(decoded, df):
+    # Referencing mid blocks predicate pushdown so FilterExec carries d to the outer project.
+    return df.select(decoded.alias("d"), f.monotonically_increasing_id().alias("mid")) \
+        .where(f.when(f.col("mid") >= 0, f.col("d.top")) > 0) \
+        .select(f.col("d.child.a"))
 
 
 def _sort_then_read(decoded, df):
@@ -1098,9 +1112,11 @@ _field_read_cases = [
     pytest.param(_read_top_and_leaves, [["top", "child", "child.a", "items", "items.b"]],
                  id="top_and_leaves"),
     pytest.param(_read_leaf_of_every_item, [["items", "items.a"]], id="leaf_of_every_item"),
-    pytest.param(_read_through_alias, [["child", "child.b"]], id="through_alias"),
+    pytest.param(_read_through_alias, [["top", "child", "child.b"]], id="through_alias"),
+    pytest.param(_read_element_at, [["items", "items.b"]], id="element_at"),
     # Spark pushes the filter below the projection, so the filter decodes on its own.
     pytest.param(_filter_then_read, [["top"], ["child", "child.a"]], id="filter"),
+    pytest.param(_filter_carried_then_read, [["top", "child", "child.a"]], id="filter_carried"),
     pytest.param(_sort_then_read, [["top", "items", "items.a", "items.b"]], id="sort"),
     pytest.param(_aggregate_one_field, [["child", "child.a"]], id="aggregate"),
     pytest.param(_read_whole_struct, [_nested_smoke_all_paths], id="whole_struct"),
@@ -1124,6 +1140,121 @@ def test_from_protobuf_outputs_only_fields_read(
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
     _assert_gpu_output_paths(run_on_spark, decodes)
+
+
+@pytest.mark.parametrize("select_fn,expected", [
+    pytest.param(lambda d, df: df.select(d.alias("d")), [_nested_smoke_all_paths],
+                 id="whole_struct"),
+    pytest.param(lambda d, df: df.select(d.getField("top").alias("top")), [["top"]],
+                 id="single_field"),
+])
+@ignore_order(local=True)
+def test_from_protobuf_non_deterministic_input(
+        nested_smoke_desc, from_protobuf_fn, select_fn, expected):
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc)
+    encoded = [(row[-1],) for row in fixture_rows]
+    desc_path, desc_bytes = nested_smoke_desc
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(encoded, ["bin"])
+        non_det_bin = f.when(f.monotonically_increasing_id() >= 0, f.col("bin"))
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, non_det_bin, "test.Root", desc_path, desc_bytes)
+        return select_fn(decoded, df)
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_output_paths(run_on_spark, expected)
+
+
+def _build_required_nested_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "required_nested.proto", [
+        _msg("ReqInner", [
+            _field("s", 1, "STRING", label="required"),
+            _field("k", 2, "INT32"),
+        ]),
+        _msg("WithRequiredNested", [
+            _field("req_str", 1, "STRING", label="required"),
+            _field("req_inner", 2, "MESSAGE", label="required", type_name=".test.ReqInner"),
+            _field("opt_inner", 3, "MESSAGE", type_name=".test.ReqInner"),
+            _field("a", 4, "INT32"),
+            _field("b", 5, "INT32"),
+        ]),
+    ])
+
+
+def _required_nested_rows():
+    inner = _encode_length_delimited_field(1, "inner") + _encode_varint_field(2, 9)
+    row_with_opt = (
+        _encode_length_delimited_field(1, "req") +
+        _encode_length_delimited_field(2, inner) +
+        _encode_length_delimited_field(3, inner) +
+        _encode_varint_field(4, 10) +
+        _encode_varint_field(5, 20))
+    row_without_opt = (
+        _encode_length_delimited_field(1, "req2") +
+        _encode_length_delimited_field(2, inner) +
+        _encode_varint_field(4, 30) +
+        _encode_varint_field(5, 40))
+    return [(row_with_opt,), (row_without_opt,), (None,)]
+
+
+@ignore_order(local=True)
+def test_from_protobuf_keeps_required_fields_under_visible_parents(
+        local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "required_nested.desc", _build_required_nested_descriptor_set_bytes)
+    rows = _required_nested_rows()
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, desc, "WithRequiredNested")
+        return spark.createDataFrame(rows, schema="bin binary") \
+            .select(decoded.alias("d")) \
+            .select(f.col("d.a"), f.col("d.b"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    # Non-nullable required fields under visible parents stay output; optional children and
+    # required fields inside hidden optional messages are still skipped.
+    _assert_gpu_output_paths(run_on_spark, [["req_str", "req_inner", "req_inner.s", "a", "b"]])
+
+
+@allow_non_gpu("Add", "GetStructField")
+@ignore_order(local=True)
+def test_from_protobuf_required_fields_with_cpu_bridge(local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "required_nested.desc", _build_required_nested_descriptor_set_bytes)
+    rows = _required_nested_rows()
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, desc, "WithRequiredNested")
+        return spark.createDataFrame(rows, schema="bin binary") \
+            .select(decoded.alias("d")) \
+            .select((f.col("d.a") + f.col("d.b")).alias("sum_ab"))
+
+    conf = {
+        "spark.rapids.sql.expression.Add": "false",
+        "spark.rapids.sql.expression.cpuBridge.enabled": "true",
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuFromProtobuf,GpuCpuBridgeExpression", conf=conf)
+
+
+@allow_non_gpu("FilterExec", "GreaterThan", "CaseWhen", "GreaterThanOrEqual", "GetStructField")
+@ignore_order(local=True)
+def test_from_protobuf_required_fields_with_cpu_filter_fallback(local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "required_nested.desc", _build_required_nested_descriptor_set_bytes)
+    rows = _required_nested_rows()
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, desc, "WithRequiredNested")
+        return spark.createDataFrame(rows, schema="bin binary") \
+            .select(decoded.alias("d"), f.monotonically_increasing_id().alias("mid")) \
+            .where(f.when(f.col("mid") >= 0, f.col("d.a")) > 0) \
+            .select(f.col("d.a"))
+
+    assert_gpu_fallback_collect(
+        run_on_spark, "FilterExec", conf={"spark.rapids.sql.exec.FilterExec": "false"})
 
 
 # ===========================================================================

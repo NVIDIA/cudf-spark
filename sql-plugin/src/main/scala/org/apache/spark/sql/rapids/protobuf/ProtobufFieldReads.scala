@@ -20,9 +20,8 @@ import scala.annotation.tailrec
 
 import com.nvidia.spark.rapids.{RapidsMeta, SparkPlanMeta}
 
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference,
-  ElementAt, Expression, ExprId, GetArrayItem, GetArrayStructFields, GetStructField,
-  NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, ElementAt, Expression,
+  ExprId, GetArrayItem, GetArrayStructFields, GetStructField, NamedExpression}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SortExec, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
 import org.apache.spark.sql.types.{ArrayType, StructType}
@@ -66,48 +65,69 @@ object FieldReads {
    * the struct reaching the query output reads it as a whole.
    */
   def analyze(meta: RapidsMeta[_, _, _], isDecode: Expression => Boolean): FieldReads =
-    planMetaOf(meta).map(trace(_, isDecode, Unread)).getOrElse(All)
+    planMetaOf(meta).map(pm => analyzePlans(planChain(pm), isDecode)).getOrElse(All)
+
+  /**
+   * Traces field reads along a bottom-up chain of plans starting from the plan that evaluates
+   * `isDecode` up to the root of the plan tree.
+   */
+  def analyzePlans(plans: Seq[SparkPlan], isDecode: Expression => Boolean): FieldReads =
+    if (plans.isEmpty) All else trace(plans.toList, isDecode, Unread, matched = false)
 
   @tailrec
   private def trace(
-      planMeta: SparkPlanMeta[_],
+      plans: List[SparkPlan],
       isSource: Expression => Boolean,
-      reads: FieldReads): FieldReads = {
-    val plan = planMeta.wrapped.asInstanceOf[SparkPlan]
-    expressionsOf(plan) match {
-      case None => All
-      case Some(exprs) =>
-        // Project aliases and pass-through references carry the struct to the next plan.
-        val (carriers, uses) = plan match {
-          case _: ProjectExec => exprs.partition {
-            case Alias(child, _) => isSource(child)
-            case attr: Attribute => isSource(attr)
-            case _ => false
+      reads: FieldReads,
+      matched: Boolean): FieldReads = plans match {
+    // The struct is part of the query output.
+    case Nil => All
+    case plan :: rest =>
+      expressionsOf(plan) match {
+        case None => All
+        case Some(exprs) =>
+          // Project aliases and pass-through references carry the struct to the next plan.
+          val (carriers, uses) = plan match {
+            case _: ProjectExec => exprs.partition {
+              case Alias(child, _) => isSource(child)
+              case attr: Attribute => isSource(attr)
+              case _ => false
+            }
+            case _ => (Seq.empty, exprs)
           }
-          case _ => (Seq.empty, exprs)
-        }
-        val allReads = uses.foldLeft(reads)((r, expr) => r.merge(readsIn(expr, isSource)))
-        val carried: Set[ExprId] = plan match {
-          case _: ProjectExec => carriers.collect { case n: NamedExpression => n.exprId }.toSet
-          case _ => plan.output.filter(isSource).map(_.exprId).toSet
-        }
-        if (allReads == All || carried.isEmpty) {
-          allReads
-        } else {
-          planMeta.parent match {
-            case Some(next: SparkPlanMeta[_]) =>
-              val isCarried: Expression => Boolean = {
-                case attr: AttributeReference => carried.contains(attr.exprId)
-                case _ => false
-              }
-              trace(next, isCarried, allReads)
-            // The struct is part of the query output.
-            case _ => All
+          val allReads = uses.foldLeft(reads)((r, expr) => r.merge(readsIn(expr, isSource)))
+          val carried: Set[ExprId] = plan match {
+            case _: ProjectExec => carriers.collect { case n: NamedExpression => n.exprId }.toSet
+            case _ => plan.output.filter(isSource).map(_.exprId).toSet
           }
-        }
+          val found = matched || allReads != Unread || carried.nonEmpty
+          if (!found) {
+            // Never hide fields when the decode expression was not found in its own plan.
+            All
+          } else if (allReads == All || carried.isEmpty) {
+            allReads
+          } else {
+            val isCarried: Expression => Boolean = {
+              case attr: Attribute => carried.contains(attr.exprId)
+              case _ => false
+            }
+            trace(rest, isCarried, allReads, matched = true)
+          }
+      }
+  }
+
+  @tailrec
+  private def planChain(
+      planMeta: SparkPlanMeta[_],
+      acc: List[SparkPlan] = Nil): List[SparkPlan] = {
+    val next = planMeta.wrapped.asInstanceOf[SparkPlan] :: acc
+    planMeta.parent match {
+      case Some(p: SparkPlanMeta[_]) => planChain(p, next)
+      case _ => next.reverse
     }
   }
 
+  @tailrec
   private def planMetaOf(meta: RapidsMeta[_, _, _]): Option[SparkPlanMeta[_]] =
     meta.parent match {
       case Some(p: SparkPlanMeta[_]) => Some(p)
