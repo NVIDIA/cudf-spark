@@ -877,6 +877,60 @@ def test_exceptAll(data_gen):
                 # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
                 'spark.sql.adaptive.enabled': False})
 
+@approximate_float
+@ignore_order
+@incompat
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='SPARK-51262: fails in the Spark optimizer before 4.2.0')
+# AQE may fold an empty set-operation result (e.g., _grpkey_nulls) to EmptyRelationExec.
+@allow_non_gpu('EmptyRelationExec')
+@pytest.mark.parametrize('op', ['exceptAll', 'intersectAll', 'subtract', 'intersect'])
+@pytest.mark.parametrize('data_gen', _init_list_with_decimalbig, ids=idfn)
+def test_set_op_after_drop_duplicates_subset(data_gen, op):
+    def do_it(spark):
+        # dropDuplicates(subset) rewrites to Aggregate(First(...)); use num_slices=1 for
+        # deterministic first-row selection between CPU and GPU.
+        left = gen_df(spark, data_gen, length=100, num_slices=1).dropDuplicates(['a'])
+        zero = f.lit(0).cast(left.schema['b'].dataType)
+        right = gen_df(spark, data_gen, length=100, num_slices=1).filter(f.col('b') > zero)
+        return getattr(left, op)(right)
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        # Disable radix sort so CPU SortAggregate uses a stable sort before First.
+        conf={'spark.sql.sort.enableRadixSort': False})
+
+@ignore_order
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='SPARK-51262: fails in the Spark optimizer before 4.2.0')
+@pytest.mark.parametrize('case', [
+    'same_relation_subtract',
+    'rhs_drop_duplicates_exceptAll',
+    'rhs_drop_duplicates_intersectAll',
+    'both_sides_multi_col_exceptAll',
+    'both_sides_multi_col_intersectAll',
+])
+def test_set_op_after_drop_duplicates_subset_variants(case):
+    data_gen = _grpkey_longs_with_nulls
+    def do_it(spark):
+        base = gen_df(spark, data_gen, length=100, num_slices=1)
+        if case == 'same_relation_subtract':
+            # Same deduped relation on both sides exercises ReplaceExceptWithFilter.
+            dedup = base.dropDuplicates(['a'])
+            return dedup.subtract(dedup.filter('b > 0'))
+        elif case == 'rhs_drop_duplicates_exceptAll':
+            return base.unionAll(base).exceptAll(base.filter('b > 0').dropDuplicates(['a']))
+        elif case == 'rhs_drop_duplicates_intersectAll':
+            return base.unionAll(base).intersectAll(base.filter('b > 0').dropDuplicates(['a']))
+        elif case == 'both_sides_multi_col_exceptAll':
+            return base.dropDuplicates(['a', 'b']).exceptAll(
+                base.filter('b > 0').dropDuplicates(['a', 'b']))
+        else:
+            return base.dropDuplicates(['a', 'b']).intersectAll(
+                base.filter('b > 0').dropDuplicates(['a', 'b']))
+    assert_gpu_and_cpu_are_equal_collect(
+        do_it,
+        conf={'spark.sql.sort.enableRadixSort': False})
+
 # Spark fails to sort some decimal values due to overflow when calculating the sorting prefix.
 # See https://issues.apache.org/jira/browse/SPARK-40129
 # Since pivot orders by value, avoid generating these extreme values for this test.
