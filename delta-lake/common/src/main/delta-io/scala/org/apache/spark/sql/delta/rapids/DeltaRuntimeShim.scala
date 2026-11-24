@@ -125,7 +125,7 @@ object DeltaRuntimeShim {
   }
 
   private[rapids] def isDelta431OrLater(deltaVersion: String): Boolean = deltaVersion match {
-    case DELTA_43_VERSION(patch) => patch.toInt >= 1
+    case DELTA_43_VERSION(patch) => BigInt(patch) >= 1
     case _ => false
   }
 
@@ -149,9 +149,9 @@ object DeltaRuntimeShim {
   private[rapids] def getDelta43ShimClassName(
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
-    if (isDelta43Version(deltaVersion)) {
+    if (deltaVersion.startsWith("4.3.")) {
       parseSparkVersion(sparkVersion) match {
-        case (4, 0, 1) | (4, 1, 1) =>
+        case (4, 0, 1) | (4, 1, 1) if isDelta43Version(deltaVersion) =>
           Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
         case _ =>
           throw new IllegalStateException(

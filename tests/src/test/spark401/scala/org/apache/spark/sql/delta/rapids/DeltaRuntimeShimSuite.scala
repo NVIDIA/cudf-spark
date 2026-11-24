@@ -25,10 +25,11 @@ import java.util
 
 import scala.annotation.nowarn
 
-import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite, TestUtils}
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
@@ -103,7 +104,9 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("4.3.0", "4.0.0"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
-      ("4.3.2.2", "4.1.2"))
+      ("4.3.2.2", "4.1.2"),
+      ("4.3.", "4.0.1"),
+      ("4.3.x", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
       val error = intercept[IllegalStateException] {
@@ -120,7 +123,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       assert(DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, "4.0.1").isEmpty)
     }
     assert(DeltaRuntimeShim.getDelta42ShimClassName("4.3.0", "4.0.1").isEmpty)
-    Seq("4.2.0", "4.3.", "4.3.x", "4.4.0").foreach { deltaVersion =>
+    Seq("4.2.0", "4.3", "4.4.0").foreach { deltaVersion =>
       assert(DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, "4.0.1").isEmpty, deltaVersion)
     }
   }
@@ -238,27 +241,33 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     Seq("4.2.0", "4.3.", "4.3.x", "4.3.0", "4.3.0-rc1", "4.3.0-SNAPSHOT", "4.4.0").foreach {
       version => assert(!DeltaRuntimeShim.isDelta431OrLater(version), version)
     }
-    Seq("4.3.1", "4.3.1-SNAPSHOT", "4.3.2", "4.3.2.2", "4.3.10").foreach { version =>
-      assert(DeltaRuntimeShim.isDelta431OrLater(version), version)
+    Seq("4.3.1", "4.3.1-SNAPSHOT", "4.3.2", "4.3.2.2", "4.3.10", "4.3.2147483648").foreach {
+      version => assert(DeltaRuntimeShim.isDelta431OrLater(version), version)
     }
     if (isDelta43) {
       assert(DeltaRuntimeShim.filterIsManagedLocationProperty ==
         DeltaRuntimeShim.isDelta431OrLater(io.delta.VERSION))
+    } else {
+      assert(!DeltaRuntimeShim.filterIsManagedLocationProperty)
     }
   }
 
-  test("Delta 4.3 GPU catalog matches CPU is_managed_location metadata behavior") {
-    assume(isDelta43)
+  test("GPU Delta catalog matches CPU is_managed_location metadata behavior") {
     val schema = StructType(Seq(StructField("id", IntegerType)))
-    withGpuSparkSession { spark =>
-      val catalogObj = spark.sessionState.catalogManager.catalog("spark_catalog")
-      assert(catalogObj.isInstanceOf[DeltaCatalog],
-        s"Expected DeltaCatalog for spark_catalog, got ${catalogObj.getClass.getName}")
-      val cpuCatalog = catalogObj.asInstanceOf[DeltaCatalog]
-      val gpuCatalog = DeltaRuntimeShim.getGpuDeltaCatalog(
-        cpuCatalog, new RapidsConf(spark.sessionState.conf))
+    withTempPath { rootDir =>
+      val warehouseDir = new java.io.File(rootDir, "warehouse")
+      val conf = new SparkConf()
+        .set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .set("spark.sql.warehouse.dir", warehouseDir.getAbsolutePath)
+      TestUtils.withGpuSparkSession(conf) { spark =>
+        val catalogObj = spark.sessionState.catalogManager.catalog("spark_catalog")
+        assert(catalogObj.isInstanceOf[DeltaCatalog],
+          s"Expected DeltaCatalog for spark_catalog, got ${catalogObj.getClass.getName}")
+        val cpuCatalog = catalogObj.asInstanceOf[DeltaCatalog]
+        val gpuCatalog = DeltaRuntimeShim.getGpuDeltaCatalog(
+          cpuCatalog, new RapidsConf(spark.sessionState.conf))
 
-      withTempPath { rootDir =>
         val cpuDir = new java.io.File(rootDir, "cpu_tbl")
         val gpuDir = new java.io.File(rootDir, "gpu_tbl")
         val suffix = java.util.UUID.randomUUID().toString.replace("-", "")
