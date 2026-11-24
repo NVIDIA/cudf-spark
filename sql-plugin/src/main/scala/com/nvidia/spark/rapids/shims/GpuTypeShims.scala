@@ -64,6 +64,7 @@ object GpuTypeShims {
     otherType match {
       case DayTimeIntervalType(_, _) => true
       case YearMonthIntervalType(_, _) => true
+      case t if VariantTypeShims.isVariantType(t) => true
       case _ => false
     }
   }
@@ -81,6 +82,8 @@ object GpuTypeShims {
       case (DayTimeIntervalType(_, _), false) => NotNullLongConverter
       case (YearMonthIntervalType(_, _), true) => IntConverter
       case (YearMonthIntervalType(_, _), false) => NotNullIntConverter
+      case (otherType, isNullable) if VariantTypeShims.isVariantType(otherType) =>
+        VariantTypeShims.getRowToColumnConverter(isNullable)
       case _ => throw new RuntimeException(s"No converter is found for type $t.")
     }
   }

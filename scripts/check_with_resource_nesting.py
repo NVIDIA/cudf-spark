@@ -555,10 +555,10 @@ def write_raw_report(path, classified, stale, directive_errors, max_depth):
             ("resource", item.violation.resource),
         )) for item in classified]),
         ("staleBaselineEntries", [collections.OrderedDict((
-            ("path", path),
+            ("path", source_path),
             ("fingerprint", fingerprint),
             ("count", count),
-        )) for (path, fingerprint), count in sorted(stale.items())]),
+        )) for (source_path, fingerprint), count in sorted(stale.items())]),
         ("directiveErrors", list(directive_errors)),
     ))
     with io.open(path, "w", encoding="utf-8") as report_file:

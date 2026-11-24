@@ -202,6 +202,10 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
 
   override def sql: String = s"(- ${child.sql})"
 
+  override def selfSupportsAstJit: Boolean = !failOnError && dataType.isInstanceOf[IntegralType]
+
+  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
+
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
@@ -242,8 +246,16 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
     }
   }
 
+  // AST cannot raise the ANSI overflow error.
+  override def selfConvertsToAst: Boolean = (dataType match {
+    case ByteType | ShortType | LongType | FloatType | DoubleType | IntegerType => true
+    case _ => false
+  }) && !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val literalZero = dataType match {
+      case ByteType => ast.Literal.ofByte(0.toByte)
+      case ShortType => ast.Literal.ofShort(0.toShort)
       case LongType => ast.Literal.ofLong(0)
       case FloatType => ast.Literal.ofFloat(0)
       case DoubleType => ast.Literal.ofDouble(0)
@@ -266,6 +278,8 @@ case class GpuUnaryPositive(child: Expression) extends GpuUnaryExpression
 
   override def doColumnar(input: GpuColumnVector) : ColumnVector = input.getBase.incRefCount()
 
+  override def selfConvertsToAst: Boolean = true
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
   }
@@ -278,6 +292,15 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
   override def dataType: DataType = child.dataType
 
   override def unaryOp: UnaryOp = UnaryOp.ABS
+
+  // AST cannot check overflow, which ANSI integral and interval results need.
+  override def selfConvertsToAst: Boolean = super.selfConvertsToAst &&
+    !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) &&
+    !GpuTypeShims.isSupportedDayTimeType(dataType) &&
+    !GpuTypeShims.isSupportedYearMonthType(dataType)
+
+  override protected def astJitCompatible: Boolean =
+    !failOnError && dataType.isInstanceOf[IntegralType]
 
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
@@ -314,6 +337,15 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
   override def binaryOp: BinaryOp = BinaryOp.ADD
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.ADD)
 
+  // AST cannot check overflow, which ANSI integral, interval, and decimal results need.
+  override def selfConvertsToAst: Boolean = super.selfConvertsToAst &&
+    !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) &&
+    !GpuTypeShims.isSupportedDayTimeType(dataType) &&
+    !GpuTypeShims.isSupportedYearMonthType(dataType) && !dataType.isInstanceOf[DecimalType]
+
+  override protected def astJitCompatible: Boolean =
+    !failOnError && dataType.isInstanceOf[IntegralType]
+
   override def hasSideEffects: Boolean =
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) || super.hasSideEffects
 
@@ -345,6 +377,15 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
 
   override def binaryOp: BinaryOp = BinaryOp.SUB
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.SUB)
+
+  // AST cannot check overflow, which ANSI integral, interval, and decimal results need.
+  override def selfConvertsToAst: Boolean = super.selfConvertsToAst &&
+    !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) &&
+    !GpuTypeShims.isSupportedDayTimeType(dataType) &&
+    !GpuTypeShims.isSupportedYearMonthType(dataType) && !dataType.isInstanceOf[DecimalType]
+
+  override protected def astJitCompatible: Boolean =
+    !failOnError && dataType.isInstanceOf[IntegralType]
 
   private[this] def decimalOpOverflowCheck(
       lhs: BinaryOperable,
@@ -443,28 +484,8 @@ trait GpuDecimalMultiplyBase extends GpuExpression {
           CastOptions.getArithmeticCastOptions(failOnError))
       }
       withResource(castRhs) { castRhs =>
-        withResource(castLhs.mul(castRhs,
-          GpuColumnVector.getNonNestedRapidsType(intermediateResultType))) { mult =>
-          if (useLongMultiply) {
-            withResource(DecimalMultiplyChecks
-                .checkForOverflow(castLhs, castRhs)) { wouldOverflow =>
-              if (failOnError) {
-                withResource(wouldOverflow.any()) { anyOverflow =>
-                  if (anyOverflow.isValid && anyOverflow.getBoolean) {
-                    throw new IllegalStateException(GpuCast.INVALID_INPUT_MESSAGE)
-                  }
-                }
-                mult.incRefCount()
-              } else {
-                withResource(GpuScalar.from(null, intermediateResultType)) { nullVal =>
-                  wouldOverflow.ifElse(nullVal, mult)
-                }
-              }
-            }
-          } else {
-            mult.incRefCount()
-          }
-        }
+        castLhs.mul(castRhs,
+          GpuColumnVector.getNonNestedRapidsType(intermediateResultType))
       }
     }
     withResource(ret) { ret =>
@@ -598,45 +619,6 @@ object DecimalMultiplyChecks {
     DecimalType(precision,
       math.min(outputType.scale + 1, DType.DECIMAL128_MAX_PRECISION))
   }
-
-  private[this] lazy val max128Int = new BigInteger(Array(2.toByte)).pow(127)
-      .subtract(BigInteger.ONE)
-  private[this] lazy val min128Int = new BigInteger(Array(2.toByte)).pow(127)
-      .negate()
-
-  def checkForOverflow(a: ColumnView, b: ColumnView): ColumnVector = {
-    assert(a.getType.isDecimalType)
-    assert(b.getType.isDecimalType)
-    // a > MAX_INT / b || a < MIN_INT / b
-    // So to do this we need the unscaled value, but we have to get it in terms of a
-    // DECIMAL_128 with a scale of 0
-    withResource(a.bitCastTo(DType.create(DType.DTypeEnum.DECIMAL128, 0))) { castA =>
-      withResource(b.bitCastTo(DType.create(DType.DTypeEnum.DECIMAL128, 0))) { castB =>
-        val isNotZero = withResource(Scalar.fromDecimal(0, BigInteger.ZERO)) { zero =>
-          castB.notEqualTo(zero)
-        }
-        withResource(isNotZero) { isNotZero =>
-          val gt = withResource(Scalar.fromDecimal(0, max128Int)) { maxDecimal =>
-            withResource(maxDecimal.div(castB)) { divided =>
-              castA.greaterThan(divided)
-            }
-          }
-          withResource(gt) { gt =>
-            val lt = withResource(Scalar.fromDecimal(0, min128Int)) { minDecimal =>
-              withResource(minDecimal.div(castB)) { divided =>
-                castA.lessThan(divided)
-              }
-            }
-            withResource(lt) { lt =>
-              withResource(lt.or(gt)) { ored =>
-                ored.and(isNotZero)
-              }
-            }
-          }
-        }
-      }
-    }
-  }
 }
 
 object GpuDivModLike {
@@ -769,6 +751,13 @@ case class GpuMultiply(
 
   override def binaryOp: BinaryOp = BinaryOp.MUL
   override def astOperator: Option[BinaryOperator] = Some(ast.BinaryOperator.MUL)
+
+  // AST cannot raise the ANSI overflow error.
+  override def selfConvertsToAst: Boolean = super.selfConvertsToAst &&
+    !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
+
+  override protected def astJitCompatible: Boolean =
+    !failOnError && dataType.isInstanceOf[IntegralType]
 
   private def multiplyOverflowError(msg: String): ArithmeticException = {
     RapidsErrorUtils.arithmeticOverflowError(msg, origin)

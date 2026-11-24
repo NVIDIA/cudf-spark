@@ -44,6 +44,7 @@ import com.nvidia.spark.rapids.io.async._
 import com.nvidia.spark.rapids.jni.{CastStrings, GpuTimeZoneDB, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuOrcDataReader, NullOutputStreamShim, OrcCastingShims, OrcReadingShims, OrcShims, ShimFilePartitionReaderFactory}
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.output.CountingOutputStream
@@ -92,11 +93,11 @@ case class GpuOrcScan(
     dataFilters: Seq[Expression],
     rapidsConf: RapidsConf,
     queryUsesInputFile: Boolean = false)
-  extends FileScan with GpuScan with Logging {
+  extends FileScan with GpuScan with HistorySizedFileScan with Logging {
 
   override def isSplitable(path: Path): Boolean = true
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     // Unset any serialized search argument setup by Spark's OrcScanBuilder as
     // it will be incompatible due to shading and potential ORC classifier mismatch.
     hadoopConf.unset(OrcConf.KRYO_SARG.getAttribute)
@@ -167,6 +168,23 @@ object GpuOrcScan {
     }
 
     FileFormatChecks.tag(meta, schema, OrcFormatType, ReadFileOp)
+  }
+
+  private[rapids] def failIfRequestedColumnsAreEncrypted(
+      orcReader: Reader,
+      fileIncluded: Array[Boolean]): Unit = {
+    val hasRequestedEncryptedColumns = orcReader.getColumnEncryptionKeys.exists { key =>
+      key.getEncryptionRoots.exists { variant =>
+        val root = variant.getRoot
+        (math.max(1, root.getId) to root.getMaximumId).exists(fileIncluded)
+      } && key.isAvailable
+    }
+    if (hasRequestedEncryptedColumns) {
+      throw new QueryExecutionException(
+        "The GPU does not support decrypting encrypted ORC columns. " +
+          "To read ORC files with available encryption keys, disable the GPU ORC reader via " +
+          s"${RapidsConf.ENABLE_ORC_READ.key}.")
+    }
   }
 
   private lazy val numericLevels = Seq(
@@ -290,7 +308,7 @@ object GpuOrcScan {
   : ColumnView = {
     val fromDt = col.getType
     val toDt = GpuColumnVector.getNonNestedRapidsType(targetType)
-    if (fromDt == toDt &&
+    if (fromDt == toDt && !DecimalUtil.narrowsPrecision(originalFromDt, targetType) &&
        !(targetType == StringType && originalFromDt.isInstanceOf[CharType])) {
       return col
     }
@@ -441,9 +459,10 @@ object GpuOrcScan {
         }
 
       case (f: DType, t: DType) if f.isDecimalType && t.isDecimalType =>
+        // ORC can decode into a wider type than the file schema specifies. Keep the
+        // physical source type, but use the requested precision for overflow checks.
         val fromDataType = DecimalType(f.getDecimalMaxPrecision, -f.getScale)
-        val toDataType = DecimalType(t.getDecimalMaxPrecision, -t.getScale)
-        GpuCast.doCast(col, fromDataType, toDataType)
+        GpuCast.doCast(col, fromDataType, targetType)
 
       case (DType.STRING, DType.STRING) if originalFromDt.isInstanceOf[CharType] =>
         // Trim trailing whitespace off of output strings, to match CPU output.
@@ -452,6 +471,25 @@ object GpuOrcScan {
       // TODO more types, tracked in https://github.com/NVIDIA/spark-rapids/issues/5895
       case (f, t) =>
         throw new QueryExecutionException(s"Unsupported type casting: $f -> $t")
+    }
+  }
+
+  private[rapids] def rebaseAndEvolveSchemaWithRetryAndClose(
+      table: Table,
+      tableSchema: StructType,
+      readDataSchema: StructType,
+      isSchemaCaseSensitive: Boolean,
+      writerTimezone: String,
+      writerUsedProlepticGregorian: Boolean): Table = {
+    val spillableTable = closeOnExcept(table) { _ =>
+      SpillableTable(table, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+    withRetryNoSplit(spillableTable) { attempt =>
+      val attemptTable = attempt.getTable()
+      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+        attemptTable, writerTimezone, writerUsedProlepticGregorian)
+      SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
+        readDataSchema, isSchemaCaseSensitive, Some(castColumnTo))
     }
   }
 
@@ -705,10 +743,11 @@ case class GpuOrcMultiFilePartitionReaderFactory(
    */
   override def buildBaseColumnarReaderForCoalescing(files: Array[PartitionedFile],
       conf: Configuration): PartitionReader[ColumnarBatch] = {
-    // Coalescing reading can't coalesce orc files with different compression kind, which means
-    // we must split the different compress files into different ColumnarBatch.
-    // So here try the best to group the same compression files together before hand.
-    val compressionAndStripes = LinkedHashMap[CompressionKind, ArrayBuffer[OrcSingleStripeMeta]]()
+    // Coalescing reading can't coalesce ORC files with different compression settings, which
+    // means we must split them into different ColumnarBatches. Try to group files with the same
+    // compression kind and block size together beforehand.
+    val compressionAndStripes =
+      LinkedHashMap[(CompressionKind, Int), ArrayBuffer[OrcSingleStripeMeta]]()
 
     metrics.getOrElse(FILTER_TIME, NoopMetric).ns {
       metrics.getOrElse(SCAN_TIME, NoopMetric).ns {
@@ -719,7 +758,11 @@ case class GpuOrcMultiFilePartitionReaderFactory(
             // filterStripes returns null for an empty ORC file; it has no stripes to
             // contribute, so skip it (the single-file path uses an EmptyPartitionReader).
             if (orcPartitionReaderContext != null) {
-              compressionAndStripes.getOrElseUpdate(orcPartitionReaderContext.compressionKind,
+              val compressionKey = (orcPartitionReaderContext.compressionKind,
+                OrcCommonFunctions.compressionSizeForCombining(
+                  orcPartitionReaderContext.compressionKind,
+                  orcPartitionReaderContext.compressionSize))
+              compressionAndStripes.getOrElseUpdate(compressionKey,
                 new ArrayBuffer[OrcSingleStripeMeta]) ++=
                 orcPartitionReaderContext.blockIterator.map(block =>
                   OrcSingleStripeMeta(
@@ -848,7 +891,7 @@ case class OrcOutputStripe(
  * @param readerOpts  options for creating a RecordReader.
  * @param blockIterator an iterator over the ORC output stripes
  * @param requestedMapping the optional requested column ids
- * @param writerTimezone the resolved writer timezone from ORC stripe footers
+ * @param writerTimezone the writer timezone ID from ORC stripe footers
  * @param writerUsedProlepticGregorian whether the writer used the proleptic Gregorian calendar
  */
 case class OrcPartitionReaderContext(
@@ -863,15 +906,16 @@ case class OrcPartitionReaderContext(
     readerOpts: Reader.Options,
     blockIterator: BufferedIterator[OrcOutputStripe],
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId,
+    writerTimezone: String,
     writerUsedProlepticGregorian: Boolean)
 
 case class OrcBlockMetaForSplitCheck(
     filePath: Path,
     typeDescription: TypeDescription,
     compressionKind: CompressionKind,
+    compressionSize: Int,
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId,
+    writerTimezone: String,
     writerUsedProlepticGregorian: Boolean) {
 }
 
@@ -881,6 +925,7 @@ object OrcBlockMetaForSplitCheck {
       singleBlockMeta.filePath,
       singleBlockMeta.schema.schema,
       singleBlockMeta.dataBlock.stripeMeta.ctx.compressionKind,
+      singleBlockMeta.dataBlock.stripeMeta.ctx.compressionSize,
       singleBlockMeta.extraInfo.requestedMapping,
       singleBlockMeta.extraInfo.writerTimezone,
       singleBlockMeta.extraInfo.writerUsedProlepticGregorian)
@@ -888,11 +933,32 @@ object OrcBlockMetaForSplitCheck {
 
   def apply(filePathStr: String, typeDescription: TypeDescription,
       compressionKind: CompressionKind,
+      compressionSize: Int,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: ZoneId,
+      writerTimezone: String,
       writerUsedProlepticGregorian: Boolean): OrcBlockMetaForSplitCheck = {
     OrcBlockMetaForSplitCheck(new Path(new URI(filePathStr)), typeDescription,
-      compressionKind, requestedMapping, writerTimezone, writerUsedProlepticGregorian)
+      compressionKind, compressionSize, requestedMapping, writerTimezone,
+      writerUsedProlepticGregorian)
+  }
+}
+
+private[rapids] object OrcCommonFunctions {
+  def compressionSizeForCombining(
+      compressionKind: CompressionKind,
+      compressionSize: Int): Int = {
+    if (compressionKind == CompressionKind.NONE) 0 else compressionSize
+  }
+
+  def buildPostscript(
+      sourcePostscript: OrcProto.PostScript,
+      footerLength: Long): OrcProto.PostScript = {
+    OrcProto.PostScript.newBuilder(sourcePostscript)
+      .setFooterLength(footerLength)
+      .setMetadataLength(0)
+      // Stripe statistics are not copied into the synthetic file.
+      .clearStripeStatisticsLength()
+      .build()
   }
 }
 
@@ -980,10 +1046,8 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
 
     // 2) Write the PostScript (uncompressed)
     val footerLen = outStream.getPos - posBeforeFooter
-    val postscript = OrcProto.PostScript.newBuilder(ctx.fileTail.getPostscript)
-      .setFooterLength(footerLen)
-      .setMetadataLength(0)
-      .build()
+    val postscript =
+      OrcCommonFunctions.buildPostscript(ctx.fileTail.getPostscript, footerLen)
     postscript.writeTo(outStream)
     val postScriptLength = outStream.getPos - posBeforeFooter - footerLen
     if (postScriptLength > 255) {
@@ -1036,6 +1100,17 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     buffer.toArray
   }
 
+  private def hasDottedFieldName(schema: TypeDescription): Boolean = {
+    schema.getCategory match {
+      case TypeDescription.Category.STRUCT =>
+        schema.getFieldNames.asScala.exists(_.contains(".")) ||
+          schema.getChildren.asScala.exists(hasDottedFieldName)
+      case TypeDescription.Category.LIST | TypeDescription.Category.MAP =>
+        schema.getChildren.asScala.exists(hasDottedFieldName)
+      case _ => false
+    }
+  }
+
   def getORCOptionsAndSchema(
       memFileSchema: TypeDescription,
       requestedMapping: Option[Array[Int]],
@@ -1043,17 +1118,25 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     val tableSchema = buildReaderSchema(memFileSchema, requestedMapping)
     val includedColumns = tableSchema.getFieldNames.asScala.toSeq
     val decimal128Fields = filterDecimal128Fields(includedColumns.toArray, readDataSchema)
-    val parseOpts = ORCOptions.builder()
+    val builder = ORCOptions.builder()
       .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
       .withNumPyTypes(false)
-      .includeColumn(includedColumns: _*)
-      .decimal128Column(decimal128Fields: _*)
       // Read timestamps as UTC, ignoring the writer timezone in stripe footers.
       // Date/time rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcDateTime,
       // which handles legacy dates and both same-TZ and cross-TZ timestamps, including DST.
       .ignoreTimezoneInStripeFooter()
-      .build()
-    (parseOpts, tableSchema)
+    // Decimal overrides also use flattened paths, so a literal dot can widen an unrelated
+    // decimal (e.g. a.b at precision 15 beside "a.b" at precision 25). Let cuDF infer widths
+    // from the prepared footer in that case; schema evolution still handles requested casts.
+    if (decimal128Fields.nonEmpty && !hasDottedFieldName(tableSchema)) {
+      builder.decimal128Column(decimal128Fields: _*)
+    }
+    // The in-memory footer already has tableSchema's columns in the required order.
+    // Avoid cuDF's ambiguous dotted-path name selector for literal dotted root names.
+    if (!includedColumns.exists(_.contains("."))) {
+      builder.includeColumn(includedColumns: _*)
+    }
+    (builder.build(), tableSchema)
   }
 
   protected final def isNeedToSplitDataBlock(
@@ -1069,6 +1152,17 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     if (nextMeta.compressionKind != curMeta.compressionKind) {
       logInfo(s"ORC File compression for the next file ${nextMeta.filePath}" +
         s" doesn't match current ${curMeta.filePath}, splitting it into another batch!")
+      return true
+    }
+
+    val currentCompressionSize = OrcCommonFunctions.compressionSizeForCombining(
+      curMeta.compressionKind, curMeta.compressionSize)
+    val nextCompressionSize = OrcCommonFunctions.compressionSizeForCombining(
+      nextMeta.compressionKind, nextMeta.compressionSize)
+    if (nextCompressionSize != currentCompressionSize) {
+      logInfo(s"ORC compression block size for the next file ${nextMeta.filePath} " +
+        s"(${nextMeta.compressionSize}) doesn't match current ${curMeta.filePath} " +
+        s"(${curMeta.compressionSize}), splitting it into another batch!")
       return true
     }
 
@@ -1093,8 +1187,9 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       return true
     }
 
-    if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(
-        Seq(curMeta.writerTimezone, nextMeta.writerTimezone))) {
+    val writerTimezones = Seq(curMeta.writerTimezone, nextMeta.writerTimezone)
+      .map(GpuOrcTimezoneUtils.resolveWriterTimezone)
+    if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(writerTimezones)) {
       // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
       // across files don't trigger a spurious split. Mirrors the intra-file check in
       // buildOutputStripes.
@@ -1477,6 +1572,7 @@ private case class GpuOrcFileFilterHandler(
     isOrcFloatTypesToStringEnable: Boolean) {
 
   private[rapids] val isCaseSensitive = sqlConf.caseSensitiveAnalysis
+  private val orcFilterPushDown = sqlConf.orcFilterPushDown
 
   def filterStripes(
       partFile: PartitionedFile,
@@ -1548,9 +1644,11 @@ private case class GpuOrcFileFilterHandler(
       fullSchema: StructType): Reader.Options = {
     val readerOpts = OrcInputFormat.buildOptions(
       conf, orcReader, partFile.start, partFile.length)
-    // create the search argument if we have pushed filters
-    OrcFiltersWrapper.createFilter(fullSchema, pushedFilters).foreach { f =>
-      readerOpts.searchArgument(f, fullSchema.fieldNames)
+    // Spark can pass pushed filters even when ORC predicate pushdown is disabled.
+    if (orcFilterPushDown) {
+      OrcFiltersWrapper.createFilter(fullSchema, pushedFilters).foreach { f =>
+        readerOpts.searchArgument(f, fullSchema.fieldNames)
+      }
     }
     readerOpts
   }
@@ -1579,6 +1677,8 @@ private case class GpuOrcFileFilterHandler(
 
       val (updatedReadSchema, fileIncluded) = checkSchemaCompatibility(orcReader.getSchema,
         readerOpts.getSchema, isCaseSensitive, isOrcFloatTypesToStringEnable)
+      val memFileIncluded = resolveMemFileIncluded(fileIncluded, requestedMapping)
+      GpuOrcScan.failIfRequestedColumnsAreEncrypted(orcReader, memFileIncluded)
       // GPU has its own read schema, so unset the reader include to read all the columns
       // specified by its read schema.
       readerOpts.include(null)
@@ -1592,8 +1692,7 @@ private case class GpuOrcFileFilterHandler(
         s.getOffset >= partFile.start && s.getOffset < partFile.start + partFile.length)
       val (stripes, writerTz) = buildOutputStripes(splitStripes.toSeq, evolution,
         sargApp, sargColumns, OrcConf.IGNORE_NON_UTF8_BLOOM_FILTERS.getBoolean(conf),
-        orcReader.getWriterVersion, updatedReadSchema,
-        resolveMemFileIncluded(fileIncluded, requestedMapping))
+        orcReader.getWriterVersion, updatedReadSchema, memFileIncluded)
       OrcPartitionReaderContext(filePath, conf, orcReader.getSchema, updatedReadSchema, evolution,
         orcReader.getFileTail, orcReader.getCompressionSize, orcReader.getCompressionKind,
         readerOpts, stripes.iterator.buffered, requestedMapping, writerTz,
@@ -1673,26 +1772,28 @@ private case class GpuOrcFileFilterHandler(
         ignoreNonUtf8BloomFilter: Boolean,
         writerVersion: OrcFile.WriterVersion,
         updatedReadSchema: TypeDescription,
-        fileIncluded: Array[Boolean]): (Seq[OrcOutputStripe], ZoneId) = {
+        fileIncluded: Array[Boolean]): (Seq[OrcOutputStripe], String) = {
       val columnMapping = columnRemap(fileIncluded)
       val outputStripes = OrcShims.filterStripes(stripes, conf, orcReader, dataReader,
         buildOutputStripe, evolution,
         sargApp, sargColumns, ignoreNonUtf8BloomFilter,
         writerVersion, fileIncluded, columnMapping).toSeq
-      val distinctTzs = if (needsTimezoneRebase) {
+      val distinctTzIds = if (needsTimezoneRebase) {
         outputStripes.map { stripe =>
           if (stripe.footer.hasWriterTimezone) stripe.footer.getWriterTimezone else ""
-        }.distinct.map(GpuOrcTimezoneUtils.resolveWriterTimezone)
+        }.distinct
       } else {
         Seq.empty
       }
       // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
       // across stripes don't trigger a spurious failure.
-      val writerTz = distinctTzs.headOption.getOrElse(ZoneId.systemDefault())
-      if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(distinctTzs)) {
+      val resolvedTzs = distinctTzIds.map(GpuOrcTimezoneUtils.resolveWriterTimezone)
+      val writerTz = distinctTzIds.headOption.filter(_.nonEmpty)
+        .getOrElse(ZoneId.systemDefault().getId)
+      if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(resolvedTzs)) {
         throw new IOException(
           s"ORC file has stripes with different writer timezones: " +
-          s"${distinctTzs.mkString(", ")}. This is not supported on GPU. Set " +
+          s"${distinctTzIds.mkString(", ")}. This is not supported on GPU. Set " +
           s"spark.cudf.sql.format.orc.read.enabled=false to fall back to the CPU ORC reader.")
       }
       (outputStripes, writerTz)
@@ -2321,8 +2422,9 @@ class MultiFileCloudOrcPartitionReader(
       override val bytesRead: Long,
       updatedReadSchema: TypeDescription,
       compressionKind: CompressionKind,
+      compressionSize: Int,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: ZoneId,
+      writerTimezone: String,
       writerUsedProlepticGregorian: Boolean,
       override val allPartValues: Option[Array[(Long, InternalRow)]] = None)
     extends HostMemoryBuffersWithMetaDataBase
@@ -2404,8 +2506,8 @@ class MultiFileCloudOrcPartitionReader(
                 HostMemoryEmptyMetaData(partFile, 0, bytesRead, readDataSchema)
               } else {
                 HostMemoryBuffersWithMetaData(partFile, hostBuffers.toArray, bytesRead,
-                  ctx.updatedReadSchema, ctx.compressionKind, ctx.requestedMapping,
-                  ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
+                  ctx.updatedReadSchema, ctx.compressionKind, ctx.compressionSize,
+                  ctx.requestedMapping, ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
               }
             }
           }
@@ -2536,7 +2638,7 @@ class MultiFileCloudOrcPartitionReader(
       isCaseSensitive: Boolean,
       partedFile: PartitionedFile,
       allPartValues: Option[Array[(Long, InternalRow)]],
-      writerTimezone: ZoneId,
+      writerTimezone: String,
       writerUsedProlepticGregorian: Boolean) : Iterator[ColumnarBatch] = {
     val (parseOpts, tableSchema) = closeOnExcept(hostBuffer) { _ =>
       getORCOptionsAndSchema(memFileSchema, requestedMapping, readDataSchema)
@@ -2687,11 +2789,12 @@ class MultiFileCloudOrcPartitionReader(
       nextMeta: HostMemoryBuffersWithMetaData): Boolean = {
     isNeedToSplitDataBlock(
       OrcBlockMetaForSplitCheck(curMeta.partitionedFile.filePath.toString(),
-        curMeta.updatedReadSchema, curMeta.compressionKind, curMeta.requestedMapping,
-        curMeta.writerTimezone, curMeta.writerUsedProlepticGregorian),
+        curMeta.updatedReadSchema, curMeta.compressionKind, curMeta.compressionSize,
+        curMeta.requestedMapping, curMeta.writerTimezone, curMeta.writerUsedProlepticGregorian),
       OrcBlockMetaForSplitCheck(nextMeta.partitionedFile.filePath.toString(),
-        nextMeta.updatedReadSchema, nextMeta.compressionKind, nextMeta.requestedMapping,
-        nextMeta.writerTimezone, nextMeta.writerUsedProlepticGregorian))
+        nextMeta.updatedReadSchema, nextMeta.compressionKind, nextMeta.compressionSize,
+        nextMeta.requestedMapping, nextMeta.writerTimezone,
+        nextMeta.writerUsedProlepticGregorian))
   }
 
   private def computeCombinedHmbMeta(
@@ -2803,12 +2906,6 @@ trait OrcCodecWritingHelper {
   }
 }
 
-// Orc schema wrapper
-private case class OrcSchemaWrapper(schema: TypeDescription) extends SchemaBase {
-
-  override def isEmpty: Boolean = schema.getFieldNames.isEmpty
-}
-
 case class OrcStripeWithMeta(stripe: OrcOutputStripe, ctx: OrcPartitionReaderContext)
     extends OrcCodecWritingHelper {
 
@@ -2834,12 +2931,6 @@ private[rapids] case class OrcDataStripe(stripeMeta: OrcStripeWithMeta) extends 
 
   override def getBlockSize: Long = stripeMeta.stripeLength
 }
-
-/** Orc extra information containing the requested column ids for the current coalescing stripes */
-case class OrcExtraInfo(
-    requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId,
-    writerUsedProlepticGregorian: Boolean) extends ExtraInfo
 
 // Contains meta about a single stripe of an ORC file
 private case class OrcSingleStripeMeta(
@@ -2892,8 +2983,8 @@ class MultiFileOrcPartitionReader(
     poolConf: ThreadPoolConf,
     isCaseSensitive: Boolean)
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedStripes,
-    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-    skipReadEstimate, poolConf, execMetrics)
+    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
+    maxGpuColumnSizeBytes, skipReadEstimate, poolConf, execMetrics)
     with OrcCommonFunctions {
 
   // implicit to convert SchemaBase to Orc TypeDescription
@@ -3134,7 +3225,7 @@ object MakeOrcTableProducer extends Logging {
       splits: Array[PartitionedFile],
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
-      writerTimezone: ZoneId,
+      writerTimezone: String,
       writerUsedProlepticGregorian: Boolean
   ): GpuDataProducer[Table] = {
     debugDumpPrefix.foreach { prefix =>
@@ -3176,10 +3267,9 @@ object MakeOrcTableProducer extends Logging {
         }
       }
       metrics(NUM_OUTPUT_BATCHES) += 1
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
-        table, writerTimezone, writerUsedProlepticGregorian)
-      val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
-        readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+      val evolvedSchemaTable = GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+        table, tableSchema, readDataSchema, isSchemaCaseSensitive,
+        writerTimezone, writerUsedProlepticGregorian)
       GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       new SingleGpuDataProducer(evolvedSchemaTable)
     }
@@ -3201,7 +3291,7 @@ case class OrcTableReader(
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean,
-    writerTimezone: ZoneId,
+    writerTimezone: String,
     writerUsedProlepticGregorian: Boolean) extends GpuDataProducer[Table] with Logging {
 
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
@@ -3238,10 +3328,9 @@ case class OrcTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
-      table, writerTimezone, writerUsedProlepticGregorian)
-    val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
-      readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+    val evolvedSchemaTable = GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+      table, catalystTableSchema, readDataSchema, isSchemaCaseSensitive,
+      writerTimezone, writerUsedProlepticGregorian)
     GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
     evolvedSchemaTable
   }

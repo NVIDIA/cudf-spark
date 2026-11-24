@@ -29,6 +29,9 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   private val fixtureSuiteName = classOf[ParallelUnitTestRunnerExpectedFailureFixtureSuite].getName
@@ -526,6 +529,83 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       SparkSession.clearActiveSession()
       SparkSession.clearDefaultSession()
       FileUtil.fullyDelete(tmpDir.toFile)
+    }
+  }
+
+  test("worker cleanup clears retry task state that a suite left behind") {
+    val tmpDir = Files.createTempDirectory("retry-state-regression")
+    // Like a suite that sets a mock task context itself instead of using
+    // TestUtils.withTaskContext, which resets the callbacks: the task never completes.
+    val leaked = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    var leakedCallbackRan = false
+    try {
+      TrampolineUtil.setTaskContext(leaked)
+      try {
+        TaskRegistryTracker.registerDedicatedThreadForRetry()
+        ScalableTaskCompletion.onTaskCompletion(leaked) {
+          leakedCallbackRan = true
+        }
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
+      ParallelUnitTestRunner.cleanupWorkerState(tmpDir)
+      assert(leakedCallbackRan)
+
+      // A later task with the same id on the same thread registers and completes on its own
+      val next = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+      TrampolineUtil.setTaskContext(next)
+      try {
+        TaskRegistryTracker.registerDedicatedThreadForRetry()
+        assert(TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+        next.markTaskComplete()
+        assert(!TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
+    } finally {
+      try ParallelUnitTestRunner.cleanupWorkerState(tmpDir) finally {
+        FileUtil.fullyDelete(tmpDir.toFile)
+      }
+    }
+  }
+
+  test("worker cleanup disables inherited plan capture but explicit capture still works") {
+    val tmpDir = Files.createTempDirectory("capture-boundary-regression")
+    def session(name: String): SparkSession = {
+      val conf = new SparkConf(false)
+          .setAppName(name)
+          .setMaster("local[1]")
+          .set("spark.driver.host", "127.0.0.1")
+          .set("spark.ui.enabled", "false")
+          .set("spark.plugins", "")
+          .set("spark.rapids.sql.enabled", "false")
+          .set("spark.sql.warehouse.dir", tmpDir.resolve(name).toString)
+          .set("spark.sql.queryExecutionListeners",
+            "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
+      val spark = SparkSession.builder().config(conf).getOrCreate()
+      spark
+    }
+    try {
+      val first = session("first-suite")
+      ExecutionPlanCaptureCallback.startCapture()
+      assert(first.range(1).collect().length == 1)
+      ParallelUnitTestRunner.cleanupWorkerState(tmpDir)
+
+      val next = session("next-suite")
+      assert(next.range(2).collect().length == 2)
+      val inheritedPlans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+      assert(inheritedPlans.isEmpty,
+        s"Worker inherited active capture from its preceding suite: ${inheritedPlans.length} plans")
+
+      ExecutionPlanCaptureCallback.startCapture()
+      assert(next.range(3).collect().length == 3)
+      val explicitPlans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+      assert(explicitPlans.length == 1, "An explicit capture in the new suite must still work")
+    } finally {
+      try ParallelUnitTestRunner.cleanupWorkerState(tmpDir) finally {
+        ExecutionPlanCaptureCallback.endCapture()
+        FileUtil.fullyDelete(tmpDir.toFile)
+      }
     }
   }
 }

@@ -986,7 +986,7 @@ trait GpuUnboundToUnboundWindowWithFixer {
  * This is used to tag a GpuAggregateFunction that it has been tested to work properly
  * with `GpuUnboundedToUnboundedAggWindowExec`.
  *
- * Implementations may opt out when their hash-agg [[GpuAggregateFunction.inputProjection]]
+ * Implementations may opt out when their hash-agg `GpuAggregateFunction.inputProjection`
  * is incompatible with the unbounded-agg shortcut (which only accepts BoundReference/Literal).
  */
 trait GpuUnboundedToUnboundedWindowAgg extends GpuAggregateFunction {

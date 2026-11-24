@@ -13,19 +13,22 @@
 # limitations under the License.
 
 import json
+from urllib.parse import unquote
 
 import pytest
+from conftest import spark_jvm
 from pyspark.sql import Row
 from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_collect, \
     assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, \
-    deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, delta_reorg_xfail
-from marks import allow_non_gpu, delta_lake, ignore_order
+    deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, delta_reorg_xfail, \
+    is_oss_delta_lake_42
+from marks import allow_non_gpu, allow_non_gpu_conditional, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
-    is_spark_320_or_later, is_spark_340_or_later, \
+    is_spark_320_or_later, is_spark_340_or_later, is_spark_350_or_later, \
     supports_delta_lake_deletion_vectors, is_spark_412_or_later, \
     gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
 
@@ -169,6 +172,52 @@ def do_test_delta_deletion_vector_read(data_path, use_cdf, conf, test_sql, post_
     _assert_delta_dv_read_sql(test_sql, conf)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.parametrize('keep_order', [True, False])
+@pytest.mark.skipif(not gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scan support is required")
+def test_delta_deletion_vector_combine_files_missing_all_requested_cols(
+        spark_tmp_path, keep_order):
+    data_path = spark_tmp_path + '/DELTA_DATA'
+    conf = {
+        'spark.databricks.delta.delete.deletionVectors.persistent': 'true',
+        'spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED',
+        'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '1M',
+        'spark.rapids.sql.reader.multithreaded.combine.waitTime': '10000',
+        'spark.rapids.sql.reader.multithreaded.read.keepOrder': str(keep_order),
+        'spark.sql.files.maxPartitionBytes': '1G',
+        'spark.sql.files.openCostInBytes': '1',
+        'spark.sql.files.minPartitionNum': '1',
+    }
+
+    def setup_tables(spark):
+        setup_delta_dest_table(
+            spark, data_path,
+            dest_table_func=lambda spark: spark.range(0, 20, 1, 1)
+                .selectExpr('CAST(id AS INT) AS a', 'CAST(id DIV 10 AS INT) AS key'),
+            use_cdf=False, enable_deletion_vectors=True, partition_columns=['key'])
+        spark.sql(f'DELETE FROM delta.`{data_path}` WHERE a % 5 = 0').collect()
+        metrics = _latest_delta_history(spark, data_path)['operationMetrics']
+        assert int(metrics.get('numDeletionVectorsAdded', '0')) == 2
+
+        spark.range(20, 40, 1, 1) \
+            .selectExpr('CAST(id AS INT) AS a', 'CAST(id * 10 AS INT) AS b', '2 AS key') \
+            .write.format('delta').mode('append').option('mergeSchema', 'true').save(data_path)
+        spark.sql(f'DELETE FROM delta.`{data_path}` WHERE a >= 20 AND a % 5 = 0').collect()
+        metrics = _latest_delta_history(spark, data_path)['operationMetrics']
+        assert int(metrics.get('numDeletionVectorsAdded', '0')) == 1
+        assert len(spark.read.format('delta').load(data_path).inputFiles()) == 3
+
+    with_cpu_session(setup_tables, conf=conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.format('delta').load(data_path).select('b', 'key'),
+        exist_classes=r"Gpu(FileSourceScanExec|FileGpuScan)",
+        conf=conf)
+
+
 @allow_non_gpu("FileSourceScanExec", "ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
@@ -239,6 +288,75 @@ def test_delta_cdf_read_stays_columnar(spark_tmp_path, column_mapping):
         exist_classes="GpuFileSourceScanExec,GpuHashAggregateExec",
         non_exist_classes="RowDataSourceScanExec",
         conf=conf)
+
+
+# AQE can replace the final aggregate over an empty CDF with an empty CPU relation.
+@allow_non_gpu("RDDScanExec", "EmptyRelationExec", "LocalTableScanExec", *delta_meta_allow)
+@allow_non_gpu_conditional(is_databricks_runtime(), "RowDataSourceScanExec")
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="GPU CDF reads require OSS Delta 3.3+")
+@pytest.mark.parametrize("aqe_enabled", ["true", "false"])
+@pytest.mark.parametrize("optimize_only", [True, False], ids=["empty_cdf", "nonempty_cdf"])
+@pytest.mark.parametrize("project_and_filter", [False, True], ids=["metadata", "renamed_filtered"])
+def test_delta_cdf_optimize_range_preserves_attributes(
+        spark_tmp_path, aqe_enabled, optimize_only, project_and_filter):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = {
+        "spark.sql.adaptive.enabled": aqe_enabled,
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+    }
+
+    def setup(spark):
+        spark.range(20).repartition(2).write.format("delta") \
+            .option("delta.enableChangeDataFeed", "true").save(data_path)
+        spark.sql(f"OPTIMIZE delta.`{data_path}`").collect()
+        history = spark.sql(f"DESCRIBE HISTORY delta.`{data_path}` LIMIT 1").first()
+        assert history.operation == "OPTIMIZE"
+        assert int(history.operationMetrics["numRemovedFiles"]) == 2
+        return history.version
+
+    optimize_version = with_cpu_session(setup, conf=conf)
+
+    def read_cdf(spark):
+        changes = spark.read.format("delta") \
+            .option("readChangeFeed", "true") \
+            .option("startingVersion", optimize_version if optimize_only else 0) \
+            .option("endingVersion", optimize_version).load(data_path)
+        if project_and_filter:
+            # Preserve pushed predicates and reordered/renamed outputs as well as metadata IDs.
+            return changes.where("id >= 10 AND _change_type = 'insert'") \
+                .selectExpr("_change_type AS change", "_commit_version AS version") \
+                .groupBy("version", "change").count()
+        return changes.groupBy("_commit_version", "_change_type").count()
+
+    expected = [] if optimize_only else [
+        Row(version=0, change="insert", count=10) if project_and_filter else
+        Row(_commit_version=0, _change_type="insert", count=20)]
+    assert with_cpu_session(lambda spark: read_cdf(spark).collect(), conf=conf) == expected
+
+    def assert_gpu_plan(cpu_plan, gpu_plan):
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        if optimize_only and aqe_enabled == "true":
+            # AQE can eliminate the aggregate entirely. Its initial CPU plan still proves that
+            # the CDF strategy exposed the internal read instead of retaining an opaque row scan.
+            if not is_databricks_runtime() and \
+                    gpu_plan.getClass().getSimpleName() == "AdaptiveSparkPlanExec":
+                callback.assertNotContain(gpu_plan.initialPlan(), "RowDataSourceScanExec")
+        else:
+            callback.assertContains(gpu_plan, "GpuHashAggregateExec")
+        if not optimize_only and not is_databricks_runtime():
+            callback.assertContains(gpu_plan, "GpuFileSourceScanExec")
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_cdf,
+        # Databricks uses native CDF planning, which can retain a CPU row scan. OSS must use
+        # the strategy under test rather than silently falling back to that opaque scan.
+        non_exist_classes="" if is_databricks_runtime() else "RowDataSourceScanExec",
+        conf=conf,
+        gpu_plan_assertion=assert_gpu_plan)
 
 
 def _test_delta_deletion_vector_read_with_cdf(
@@ -1629,6 +1747,28 @@ def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
     _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled=False)
 
 
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime(), reason="Smoke test uses OSS Delta bitmap classes")
+@pytest.mark.skipif(not is_spark_350_or_later(), reason="Smoke test covers the Delta 3.x+ matrix")
+@pytest.mark.parametrize("serialization_format", ["Native", "Portable"])
+def test_delta_bitmap_serialization_java_compatibility(serialization_format):
+    def round_trip(spark):
+        deletion_vectors = spark._jvm.org.apache.spark.sql.delta.deletionvectors
+        bitmap = deletion_vectors.RoaringBitmapArray()
+        # Exercise both bitmap containers, including a row index beyond 32 bits.
+        row_indices = [1, (1 << 32) + 2]
+        for row_index in row_indices:
+            bitmap.add(row_index)
+        bitmap_format = getattr(deletion_vectors.RoaringBitmapArrayFormat, serialization_format)()
+        serialized = bitmap.serializeAsByteArray(bitmap_format)
+        restored = deletion_vectors.RoaringBitmapArray.readFrom(serialized)
+        assert restored.cardinality() == len(row_indices)
+        for row_index in row_indices:
+            assert restored.contains(row_index)
+
+    with_cpu_session(round_trip)
+
+
 # This covers the CPU bridge path: the filter expression runs on the CPU while
 # GpuFilterExec remains in the plan. FilterExec still has to be allowed because
 # Delta metadata queries run on the CPU by default, and their plans include
@@ -1750,6 +1890,69 @@ def test_db173_missing_row_index_filter_assertion_guard():
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
+@pytest.mark.parametrize("with_plain_file", [False, True], ids=idfn)
+@pytest.mark.parametrize("chunked", [False, True], ids=idfn)
+@pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "COALESCING", "MULTITHREADED"], ids=idfn)
+@pytest.mark.parametrize("footer_type", ["NATIVE", "JAVA"], ids=idfn)
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
+                    reason="Delta Lake deletion vector support is required")
+@pytest.mark.skipif(is_before_spark_353(),
+                    reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
+def test_delta_deletion_vector_count_empty_splits(
+        spark_tmp_path, parquet_reader_type, footer_type, with_plain_file, chunked):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    num_rows = 4096
+    split_size = 4096
+    conf = {
+        "spark.databricks.delta.optimizeMetadataQuery.enabled": "false",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.format.parquet.reader.type": parquet_reader_type,
+        "spark.rapids.sql.format.parquet.reader.footer.type": footer_type,
+        "spark.rapids.sql.reader.chunked": str(chunked).lower(),
+        "spark.sql.files.maxPartitionBytes": str(split_size),
+    }
+
+    def setup_table(spark):
+        # Wide rows make each file span several splits, including splits containing no
+        # row-group midpoint. COUNT(*) prunes all data columns from these empty splits.
+        spark.range(num_rows).selectExpr(
+            "id", "sha2(CAST(id AS STRING), 256) AS payload"
+        ).repartition(8).write.format("delta") \
+            .option("delta.enableDeletionVectors", "true").save(data_path)
+        spark.sql(f"DELETE FROM delta.`{data_path}` WHERE pmod(id, 17) = 0").collect()
+        if with_plain_file:
+            # Include a file without a DV in the same scan.
+            spark.range(num_rows, num_rows + 128).selectExpr(
+                "id", "sha2(CAST(id AS STRING), 256) AS payload"
+            ).coalesce(1).write.format("delta").mode("append").save(data_path)
+        actions = spark.read.json(data_path + "/_delta_log/*.json")
+        dv_files = actions.where("add.deletionVector IS NOT NULL").select("add.path").collect()
+        assert dv_files
+        # Check the fixture actually produces splits without row groups; otherwise the
+        # invalid-offset regression can pass without exercising the offending path.
+        data_file = data_path + "/" + unquote(dv_files[0][0])
+        midpoints = parquet_row_group_midpoints(spark, data_file)
+        assert midpoints and min(midpoints) >= split_size
+
+    with_cpu_session(setup_table, conf=conf)
+
+    def read_count(spark):
+        df = spark.sql(f"SELECT count(*) FROM delta.`{data_path}`")
+        assert df.collect() == [Row(count=3855 + (128 if with_plain_file else 0))]
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_count,
+        exist_classes=r"GpuFileGpuScan parquet .* ReadSchema: struct<>",
+        conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
 @ignore_order(local=True)
 @pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "COALESCING", "MULTITHREADED"],
                          ids=idfn)
@@ -1805,3 +2008,214 @@ def test_delta_deletion_vector_native_footer_multi_row_group_zero_column_aggrega
         lambda spark: spark.sql(query.format(path=data_path)),
         exist_classes=r"GpuFileGpuScan parquet .* ReadSchema: struct<>",
         conf=read_conf)
+
+
+@delta_lake
+@ignore_order
+@allow_non_gpu(*delta_meta_allow)
+@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Requires OSS Delta Lake 4.2")
+@pytest.mark.parametrize("stats_state", ["missing_stats", "with_stats", "mixed_stats"])
+@pytest.mark.parametrize("force_stats", [False, True], ids=["default", "forced"])
+@pytest.mark.parametrize("predicate, expected_rows, data_filter, prunes_missing_stats", [
+    (None, 100, False, False),
+    ("true", 100, False, False),
+    ("part = 1", 25, False, True),
+    ("part = 0", 25, False, False),
+    ("id = 50", 100, True, False),
+    ("part = 1 AND id = 49", 25, True, True),
+], ids=["no_filter", "true_filter", "partition_with_stats", "partition_without_stats",
+        "data_filter", "partition_and_data_filter"])
+def test_delta_force_statistics_collection(
+        spark_tmp_path, stats_state, force_stats, predicate, expected_rows, data_filter,
+        prunes_missing_stats):
+    # Model Delta's PreparedDeltaFileIndexRowCountSuite: the Spark setting sums
+    # existing numRecords during planning and leaves missing statistics unknown.
+    # https://github.com/delta-io/delta/pull/5888
+    path = spark_tmp_path + "/force_stats"
+
+    def setup(spark):
+        df = spark.range(100).selectExpr("id", "id % 4 AS part").coalesce(1)
+        initial = df.where("part != 0") if stats_state == "mixed_stats" else df
+        initial.write.format("delta").partitionBy("part") \
+            .option("delta.enableDeletionVectors", "false").save(path)
+        if stats_state == "mixed_stats":
+            # Only partition 0 lacks stats. Pruning it should recover known row counts;
+            # retaining it must leave the total unknown instead of returning a partial sum.
+            spark.conf.set("spark.databricks.delta.stats.collect", "false")
+            df.where("part = 0").write.format("delta").mode("append").save(path)
+        spark._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+
+    with_cpu_session(setup, conf={
+        "spark.databricks.delta.stats.collect": str(stats_state != "missing_stats").lower()})
+
+    def read_and_check_stats(spark):
+        df = spark.read.format("delta").load(path)
+        if predicate is not None:
+            df = df.where(predicate)
+        scans = []
+
+        def find_scans(plan):
+            if plan.getClass().getSimpleName() == "LogicalRelation":
+                index = plan.relation().location()
+                if index.getClass().getSimpleName() == "PreparedDeltaFileIndex":
+                    scans.append(index.preparedScan())
+            children = plan.children().iterator()
+            while children.hasNext():
+                find_scans(children.next())
+
+        find_scans(df._jdf.queryExecution().optimizedPlan())
+        assert len(scans) == 1, "Expected one prepared Delta scan"
+        stats_available = stats_state == "with_stats" or \
+            (stats_state == "mixed_stats" and prunes_missing_stats)
+        for count in [scans[0].scanned().rows(), scans[0].scanned().logicalRows()]:
+            if stats_available and (force_stats or data_filter):
+                assert count.isDefined(), "Expected collected scan row counts"
+                assert count.get() == expected_rows
+            else:
+                assert count.isEmpty(), "Expected scan row counts to remain unknown"
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_and_check_stats,
+        exist_classes="GpuFileSourceScanExec",
+        require_non_empty=True,
+        conf={"spark.databricks.delta.alwaysCollectStats.enabled": str(force_stats).lower()})
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scan support is required")
+@pytest.mark.parametrize("parquet_reader_type", ["PERFILE", "COALESCING", "MULTITHREADED"],
+                         ids=idfn)
+@pytest.mark.parametrize("footer_type", ["NATIVE", "JAVA"], ids=idfn)
+@pytest.mark.parametrize("deletion_pattern", [
+    "middle_row_group", "consecutive_row_groups", "first_row_group",
+    "last_two_row_groups", "entire_first_split"
+], ids=idfn)
+def test_delta_deletion_vector_count_star_after_empty_batch(
+        spark_tmp_path, parquet_reader_type, footer_type, deletion_pattern):
+    """Check zero-column counts and data reads after fully deleted row groups.
+
+    Each deletion pattern is applied to every original file:
+    - middle_row_group: delete the third group, keeping the fourth group in the same split.
+    - consecutive_row_groups: delete the second and third groups, keeping the fourth group
+      in the same split to check that reading continues after consecutive empty batches.
+    - first_row_group: delete the first group, keeping the second group in the same split
+      to check that reading continues when the initial batch is empty.
+    - last_two_row_groups: delete the final two groups to check clean termination after
+      empty trailing batches, including the potentially short final group.
+    - entire_first_split: delete all groups in the first split, retaining live groups in
+      later splits to check that a split with no surviving rows is handled correctly.
+
+    Other groups lose three rows each. Small batches keep full-sized groups in separate
+    batches. Two plain files are appended to check mixed DV/non-DV input. Reader and footer
+    parameters exercise all three Parquet readers with both native and Java footer handling.
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    num_rows = 16384
+    appended_rows = 512
+    split_bytes = 16384
+    conf = {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.optimizeMetadataQuery.enabled": "false",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.rapids.sql.format.parquet.reader.type": parquet_reader_type,
+        "spark.rapids.sql.format.parquet.reader.footer.type": footer_type,
+        "spark.rapids.sql.reader.batchSizeRows": "100",
+        "spark.rapids.sql.reader.chunked": "false",
+        "spark.sql.files.maxPartitionBytes": str(split_bytes),
+    }
+    write_conf = copy_and_update(conf, {
+        "parquet.block.size": "4096",
+        "parquet.page.size": "1024",
+        "parquet.enable.dictionary": "false",
+    })
+
+    def setup_tables(spark):
+        spark.range(0, num_rows, 1, 4).selectExpr("id", "id AS payload1", "id AS payload2") \
+            .write.format("delta").option("delta.enableDeletionVectors", "true") \
+            .save(data_path)
+        original_files = spark.read.format("delta").load(data_path).inputFiles()
+        assert len(original_files) == 4
+        deleted_ids = set()
+        jvm = spark.sparkContext._jvm
+        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+        for file_path in original_files:
+            reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
+                hadoop_conf, jvm.org.apache.hadoop.fs.Path(file_path))
+            try:
+                blocks = list(reader.getFooter().getBlocks())
+                assert len(blocks) > 4, "Need multiple empty batches followed by live groups"
+                assert sum(b.getRowCount() for b in blocks) == num_rows // 4
+                midpoints = [b.getStartingPos() + b.getCompressedSize() // 2 for b in blocks]
+                split_ids = [midpoint // split_bytes for midpoint in midpoints]
+                if deletion_pattern == "middle_row_group":
+                    empty_groups = {2}
+                    assert split_ids[2] == split_ids[3]
+                elif deletion_pattern == "consecutive_row_groups":
+                    empty_groups = {1, 2}
+                    assert split_ids[1] == split_ids[2] == split_ids[3]
+                elif deletion_pattern == "first_row_group":
+                    empty_groups = {0}
+                    assert split_ids[0] == split_ids[1]
+                elif deletion_pattern == "last_two_row_groups":
+                    # Include the preceding group so even a short final group follows
+                    # an empty batch. There are no live groups left at end-of-input.
+                    empty_groups = {len(blocks) - 2, len(blocks) - 1}
+                else:
+                    assert deletion_pattern == "entire_first_split"
+                    empty_groups = {i for i, split_id in enumerate(split_ids)
+                                    if split_id == split_ids[0]}
+                    assert len(empty_groups) < len(blocks), "Keep live rows in later splits"
+                for index, block in enumerate(blocks):
+                    stats = block.getColumns().get(0).getStatistics()
+                    first_id = int(stats.genericGetMin())
+                    last_id = int(stats.genericGetMax())
+                    assert last_id - first_id + 1 == block.getRowCount()
+                    assert block.getRowCount() > 3
+                    if index in empty_groups:
+                        if index != len(blocks) - 1:
+                            assert block.getRowCount() > 100, "Deleted group must fill a batch"
+                        deleted_ids.update(range(first_id, last_id + 1))
+                    else:
+                        deleted_ids.update((first_id, first_id + 1, last_id))
+            finally:
+                reader.close()
+
+        delete_list = ",".join(str(i) for i in sorted(deleted_ids))
+        spark.sql(f"DELETE FROM delta.`{data_path}` WHERE id IN ({delete_list})").collect()
+        metrics = _latest_delta_history(spark, data_path)["operationMetrics"]
+        assert int(metrics.get("numDeletionVectorsAdded", "0")) == 4
+        assert set(spark.read.format("delta").load(data_path).inputFiles()) == set(original_files)
+        spark.range(num_rows, num_rows + appended_rows, 1, 2) \
+            .selectExpr("id", "id AS payload1", "id AS payload2") \
+            .write.format("delta").mode("append").save(data_path)
+        assert len(spark.read.format("delta").load(data_path).inputFiles()) == 6
+        expected_ids = set(range(num_rows + appended_rows)) - deleted_ids
+        actual_ids = {r.id for r in spark.read.format("delta").load(data_path).collect()}
+        assert actual_ids == expected_ids
+        return sorted(expected_ids)
+
+    expected_ids = with_cpu_session(setup_tables, conf=write_conf)
+    expected_count = len(expected_ids)
+    query = f"SELECT COUNT(*) AS n FROM delta.`{data_path}`"
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(query),
+        exist_classes=r"GpuFileGpuScan parquet .* ReadSchema: struct<>",
+        conf=conf)
+    assert with_cpu_session(lambda spark: spark.sql(query).collect(), conf=conf) == \
+        [Row(n=expected_count)]
+    assert with_gpu_session(lambda spark: spark.sql(query).collect(), conf=conf) == \
+        [Row(n=expected_count)]
+
+    # Exercise the same reader loops when actual Parquet columns are decoded.
+    data_query = f"SELECT id FROM delta.`{data_path}`"
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(data_query),
+        exist_classes=r"GpuFileGpuScan parquet .* ReadSchema: struct<id:bigint>",
+        conf=conf)
+    gpu_ids = with_gpu_session(lambda spark: spark.sql(data_query).collect(), conf=conf)
+    assert sorted(row.id for row in gpu_ids) == expected_ids

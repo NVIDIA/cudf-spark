@@ -26,10 +26,12 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, RapidsConf, RapidsReaderType,
   SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.Arm.withResource
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
-import org.apache.orc.{CompressionKind, OrcFile, TypeDescription}
+import org.apache.orc.{CompressionKind, OrcFile, OrcProto, TypeDescription}
 import org.apache.orc.impl.{RecordReaderImpl, WriterImpl}
+import org.apache.orc.impl.ReaderImpl.StripeInformationImpl
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -44,6 +46,7 @@ import org.apache.spark.sql.types.{IntegerType, StructField, StructType, Timesta
  *   - `America/Los_Angeles`
  *   - `Asia/Shanghai`
  *   - `Europe/Paris`
+ *   - `Pacific/Port_Moresby`
  *   - `US/Pacific` (alias of `America/Los_Angeles`)
  *   - `PST` (legacy short ID)
  *
@@ -91,6 +94,10 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
   // Exact pre-first-transition values from non-UTC schema-evolution failures.
   private val newYorkHistoricalTsUs = -2957649381472612L
   private val shanghaiHistoricalTsUs = -3649379812521628L
+  // Exact CPU value from #15895, inside New York's 1883 LMT-to-EST transition window.
+  private val newYorkLmtTransitionTsUs = -2717655338076025L
+  // Exercises a zone whose legacy TimeZone has no transitions but whose ZoneRules has LMT.
+  private val portMoresbyHistoricalTsUs = -3155673600000000L
 
   // Includes legacy/alias IDs ("US/Pacific", "PST") alongside canonical region IDs to
   // exercise the read path against the kinds of writer-timezone strings ORC footers can
@@ -102,6 +109,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "America/Los_Angeles",
     "Asia/Shanghai",
     "Europe/Paris",
+    "Pacific/Port_Moresby",
     "US/Pacific",
     "PST"
   )
@@ -143,6 +151,8 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     Seq(
       newYorkHistoricalTsUs,
       shanghaiHistoricalTsUs,
+      newYorkLmtTransitionTsUs,
+      portMoresbyHistoricalTsUs,
       ShanghaiEpochBorrowTsUs,
       minTs,
       maxTs) ++ dstBoundaries ++ firstTransitionBoundaries
@@ -251,6 +261,103 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  private def rewriteEmptyWriterTimezone(
+      conf: Configuration,
+      sourceFile: File,
+      outputFile: File,
+      explicitEmpty: Boolean): Unit = {
+    val sourcePath = new Path(sourceFile.getCanonicalPath)
+    withResource(OrcFile.createReader(sourcePath, OrcFile.readerOptions(conf))) { reader =>
+      assert(reader.getCompressionKind === CompressionKind.NONE)
+      withResource(reader.rows().asInstanceOf[RecordReaderImpl]) { rows =>
+        withResource(OrcFile.createWriter(new Path(outputFile.getCanonicalPath),
+            OrcFile.writerOptions(conf).setSchema(reader.getSchema)
+              .compress(CompressionKind.NONE)).asInstanceOf[WriterImpl]) { writer =>
+          withResource(sourcePath.getFileSystem(conf).open(sourcePath)) { in =>
+            reader.getStripes.asScala.zip(reader.getStripeStatistics.asScala)
+              .foreach { case (stripe, stats) =>
+                val footer = rows.readStripeFooter(stripe).toBuilder
+                if (explicitEmpty) {
+                  footer.setWriterTimezone("")
+                } else {
+                  footer.clearWriterTimezone()
+                }
+                val footerBytes = footer.build().toByteArray
+                val dataLength = Math.toIntExact(stripe.getIndexLength + stripe.getDataLength)
+                val stripeBytes = new Array[Byte](dataLength + footerBytes.length)
+                in.readFully(stripe.getOffset, stripeBytes, 0, dataLength)
+                System.arraycopy(footerBytes, 0, stripeBytes, dataLength, footerBytes.length)
+                val stripeInfo = OrcProto.StripeInformation.newBuilder()
+                  .setOffset(stripe.getOffset)
+                  .setIndexLength(stripe.getIndexLength)
+                  .setDataLength(stripe.getDataLength)
+                  .setFooterLength(footerBytes.length)
+                  .setNumberOfRows(stripe.getNumberOfRows)
+                  .build()
+                writer.appendStripe(stripeBytes, 0, stripeBytes.length,
+                  new StripeInformationImpl(stripeInfo, stripe.getStripeId,
+                    stripe.getEncryptionStripeId, stripe.getEncryptedLocalKeys), Array(stats))
+              }
+          }
+        }
+      }
+    }
+    withResource(OrcFile.createReader(new Path(outputFile.getCanonicalPath),
+        OrcFile.readerOptions(conf))) { reader =>
+      withResource(reader.rows().asInstanceOf[RecordReaderImpl]) { rows =>
+        assert(!reader.getStripes.isEmpty)
+        reader.getStripes.asScala.foreach { stripe =>
+          val footer = rows.readStripeFooter(stripe)
+          assert(footer.hasWriterTimezone === explicitEmpty)
+          assert(footer.getWriterTimezone.isEmpty)
+        }
+      }
+    }
+  }
+
+  for {
+    explicitEmpty <- Seq(false, true)
+    timezone <- Seq("UTC", "Asia/Shanghai")
+    readerType <- Seq(
+      RapidsReaderType.PERFILE,
+      RapidsReaderType.COALESCING,
+      RapidsReaderType.MULTITHREADED)
+  } {
+    test(s"default writer timezone: empty=$explicitEmpty timezone=$timezone reader=$readerType") {
+      val originalTimeZone = TimeZone.getDefault
+      val conf = baseConf("orc")
+        .set(RapidsConf.ORC_READER_TYPE.key, readerType.toString)
+      try {
+        withTempPath { root =>
+          val sourceDir = new File(root, "source")
+          val rewrittenFile = new File(root, "empty-writer-timezone.orc")
+          val expected = withCpuSparkSession(spark => {
+            setSessionTimeZone(spark, timezone)
+            timestampDataFrame(spark, Seq(-1L, 1421323200000000L, 1435752000123456L))
+              .coalesce(1).write.option("compression", "none").orc(sourceDir.getCanonicalPath)
+            rewriteEmptyWriterTimezone(spark.sparkContext.hadoopConfiguration,
+              getOrcFile(sourceDir), rewrittenFile, explicitEmpty)
+            spark.read.orc(sourceDir.getCanonicalPath).orderBy("id").collect()
+          }, conf = conf)
+          val (fromCpu, fromGpu) = runOnCpuAndGpu(
+            spark => {
+              setSessionTimeZone(spark, timezone)
+              spark.read.orc(rewrittenFile.getCanonicalPath)
+            },
+            _.orderBy("id"),
+            conf = conf,
+            repart = 0,
+            skipCanonicalizationCheck = true,
+            existClasses = "GpuFileSourceScanExec")
+          compareResults(false, 0.0, expected, fromCpu)
+          compareResults(false, 0.0, expected, fromGpu)
+        }
+      } finally {
+        TimeZone.setDefault(originalTimeZone)
+      }
+    }
+  }
+
   private val timestampSourceTypes = Seq(
     "boolean" -> Seq("NULL", "false", "true"),
     "tinyint" -> Seq("NULL", "-1", "0", "1"),
@@ -281,6 +388,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
         "NULL",
         Math.floorDiv(newYorkHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
         Math.floorDiv(shanghaiHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
+        Math.floorDiv(portMoresbyHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
         "-2208988800", // 1900-01-01T00:00:00Z, before Asia/Shanghai's first transition
         Int.MinValue.toString,
         Int.MaxValue.toString,
@@ -330,6 +438,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "America/New_York" -> "UTC",
     "UTC" -> "Asia/Shanghai",
     "Asia/Shanghai" -> "UTC",
+    "UTC" -> "Pacific/Port_Moresby",
     "UTC" -> "Europe/Paris",
     "Europe/Paris" -> "UTC",
     "America/New_York" -> "Asia/Shanghai",

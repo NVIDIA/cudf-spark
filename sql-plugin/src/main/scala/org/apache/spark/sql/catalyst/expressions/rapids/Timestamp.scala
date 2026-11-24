@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ object TimeStamp {
       (a, conf, p, r) => new UnixTimeExprMeta[GetTimestamp](a, conf, p, r) {
         override def isTimeZoneSupported = true
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = {
-          GpuGetTimestamp(lhs, rhs, sparkFormat, strfFormat, a.timeZoneId)
+          GpuGetTimestamp(lhs, rhs, sparkFormat, strfFormat, a.timeZoneId, a.failOnError)
         }
       })
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap

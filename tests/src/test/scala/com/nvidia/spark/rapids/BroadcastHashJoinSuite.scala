@@ -19,12 +19,88 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.catalyst.plans.physical.BroadcastDistribution
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.joins.HashedRelationBroadcastMode
 import org.apache.spark.sql.functions.{broadcast, col}
+import org.apache.spark.sql.rapids.GpuScalarSubquery
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.{DataFrame, SparkSession}
 
 class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
+  for (aqe <- Seq(false, true); reuse <- Seq(false, true)) {
+    test(s"scalar subquery in build-side projection: aqe=$aqe, reuse=$reuse") {
+      val conf = new SparkConf()
+        .set("spark.sql.adaptive.enabled", aqe.toString)
+        .set("spark.sql.shuffle.partitions", "8")
+        .set("spark.sql.ansi.enabled", "false")
+        .set("spark.rapids.sql.join.hashTable.reuse", reuse.toString)
+        .set("spark.rapids.sql.join.buildSide", "FIXED")
+        .set("spark.rapids.sql.metrics.level", "DEBUG")
+      withTempPath { path =>
+        val query = """
+          |WITH s AS (SELECT id, sum(value) AS total FROM source GROUP BY id)
+          |SELECT /*+ BROADCAST(s) */ a.id, s.total
+          |FROM source a LEFT JOIN s ON a.id = s.id
+          |WHERE s.total IS NOT NULL
+          |  AND (s.total > (SELECT avg(total) FROM s) OR a.name = 'name_1')
+          |""".stripMargin
+        val expected = withCpuSparkSession({ spark =>
+          spark.range(10).selectExpr("id", "concat('name_', cast(id as string)) AS name",
+            "id + 1 AS value").write.parquet(path.toString)
+          spark.read.parquet(path.toString).createOrReplaceTempView("source")
+          try {
+            spark.sql(query).collect().sortBy(_.getLong(0))
+          } finally {
+            spark.catalog.dropTempView("source")
+          }
+        }, conf)
+        assert(expected.map(_.getLong(0)).toSeq == Seq(1L, 5L, 6L, 7L, 8L, 9L))
+        withGpuSparkSession({ spark =>
+          spark.read.parquet(path.toString).createOrReplaceTempView("source")
+          try {
+            val df = spark.sql(query)
+            val actual = df.collect().sortBy(_.getLong(0))
+            assert(actual.toSeq == expected.toSeq)
+            val plan = df.queryExecution.executedPlan
+            val joinWithScalarSubquery = findOperator(plan, {
+              case join: GpuBroadcastHashJoinExec =>
+                val build = join.buildSide match {
+                  case GpuBuildLeft => join.left
+                  case GpuBuildRight => join.right
+                }
+                buildProjectHasScalarSubquery(build)
+              case _ => false
+            })
+            assert(joinWithScalarSubquery.nonEmpty,
+              s"Expected a scalar subquery in a broadcast build-side projection:\n$plan")
+            val join = joinWithScalarSubquery.get
+            // Databricks executor broadcast uses a different broadcast mode.
+            val standardBroadcast = join.requiredChildDistribution.exists {
+              case BroadcastDistribution(_: HashedRelationBroadcastMode) => true
+              case _ => false
+            }
+            if (reuse && standardBroadcast) {
+              assert(join.metrics("hashTableBuilds").value > 0L,
+                s"Expected a cached hash table build for the broadcast join:\n$plan")
+            }
+          } finally {
+            spark.catalog.dropTempView("source")
+          }
+        }, conf)
+      }
+    }
+  }
+
+  private def buildProjectHasScalarSubquery(plan: SparkPlan): Boolean = plan match {
+    case project: GpuProjectExec =>
+      project.projectList.exists(_.exists(_.isInstanceOf[GpuScalarSubquery])) ||
+        buildProjectHasScalarSubquery(project.child)
+    case _ => false
+  }
+
   private def broadcastReuseConf: SparkConf = new SparkConf()
     .set("spark.sql.adaptive.enabled", "false")
     .set("spark.sql.autoBroadcastJoinThreshold", "-1")
@@ -159,6 +235,24 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     (probe, build) => probe.join(broadcast(build), Seq("join_key"), "inner")
   }
 
+  for (joinType <- Seq("leftsemi", "leftanti");
+       distinct <- Seq(false, true);
+       nullSafe <- Seq(false, true)) {
+    IGNORE_ORDER_testSparkResultsAreEqual2(
+      s"broadcast $joinType reuse nullable keys distinct=$distinct nullSafe=$nullSafe",
+      nullableProbeDf,
+      nullableDistinctBuildDf,
+      conf = broadcastReuseConf) { (probe, build) =>
+      val broadcastBuild = broadcast(if (distinct) build else build.union(build))
+      val condition = if (nullSafe) {
+        probe("join_key").eqNullSafe(broadcastBuild("join_key"))
+      } else {
+        probe("join_key") === broadcastBuild("join_key")
+      }
+      probe.join(broadcastBuild, condition, joinType)
+    }
+  }
+
   IGNORE_ORDER_testSparkResultsAreEqual2(
     "broadcast hash join reuse distinct inner nullable keys build left",
     nullableDistinctBuildDf,
@@ -207,6 +301,20 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     }, conf)
   }
 
+  Seq("leftsemi", "leftanti").foreach { joinType =>
+    IGNORE_ORDER_testSparkResultsAreEqual2(
+      s"broadcast hash join reuse conditional $joinType",
+      streamedProbeDf,
+      nonDistinctBuildDf,
+      conf = broadcastReuseConf) { (probe, build) =>
+      probe.alias("p").join(
+        broadcast(build.alias("b")),
+        col("p.join_key") === col("b.join_key") &&
+          col("p.probe_value") < col("b.build_value"),
+        joinType)
+    }
+  }
+
   test("AUTO admits a cold broadcast hash build after repeated smaller numeric probes") {
     withGpuSparkSession(spark => {
       val probe = spark.range(0, 512, 1, 8).selectExpr(
@@ -223,5 +331,44 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
       assertResult(1L)(bhj.metrics("hashTableBuilds").value)
       assert(bhj.metrics("hashTableReuses").value > 0L)
     }, broadcastAutoReuseConf)
+  }
+
+  Seq(false, true).foreach { distinct =>
+    val conf = broadcastReuseConf
+      .set("spark.sql.exchange.reuse", "true")
+      .set("spark.rapids.sql.metrics.level", "DEBUG")
+    IGNORE_ORDER_testSparkResultsAreEqualWithCapture(
+      s"semi/anti share a filtered build separately from inner distinct=$distinct",
+      streamedProbeDf,
+      conf = conf) { probe =>
+      val buildData = if (distinct) {
+        distinctBuildDf(probe.sparkSession)
+      } else {
+        nonDistinctBuildDf(probe.sparkSession)
+      }
+      val build = broadcast(buildData.select("join_key"))
+      val inner = probe.join(build, Seq("join_key"), "inner")
+      val semi = probe.filter(col("probe_value") % 2 === 0)
+        .join(build, Seq("join_key"), "leftsemi")
+      val anti = probe.filter(col("probe_value") % 2 === 1)
+        .join(build, Seq("join_key"), "leftanti")
+      inner.union(semi).union(anti)
+    } { (_, gpuPlan) =>
+      val joins = PlanUtils.findOperators(gpuPlan, _.isInstanceOf[GpuBroadcastHashJoinExec])
+        .map(_.asInstanceOf[GpuHashJoin])
+      assertResult(3)(joins.size)
+      assert(PlanUtils.findOperators(gpuPlan, _.isInstanceOf[ReusedExchangeExec]).nonEmpty)
+      def builds(join: GpuHashJoin): Long = join.metrics("hashTableBuilds").value
+      def reuses(join: GpuHashJoin): Long = join.metrics("hashTableReuses").value
+      val (inner, semiAnti) = joins.partition(_.joinType == Inner)
+      assertResult(1)(inner.size)
+      assertResult(1L)(builds(inner.head))
+      // Whichever of semi/anti probes first builds the shared filtered artifact; the other must
+      // reuse it without building.
+      assertResult(1L)(semiAnti.map(builds).sum)
+      val summary = semiAnti.map(j => s"${j.joinType}: builds=${builds(j)} reuses=${reuses(j)}")
+      assert(semiAnti.exists(j => builds(j) == 0L && reuses(j) > 0L),
+        s"expected semi/anti to share one filtered build: ${summary.mkString(", ")}")
+    }
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -133,7 +133,8 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
 
     val deviceAllocator: Long => BaseDeviceMemoryBuffer = (size: Long) => {
       // CUDA async allocator is not compatible with GPUDirectRDMA, so need to use `cudaMalloc`.
-      if (rapidsConf.rmmPool.equalsIgnoreCase("ASYNC")) {
+      // GpuDeviceManager.computeRmmPoolSize reserves this memory beside the pool.
+      if (GpuDeviceManager.ucxDeviceBounceBuffersOutsideRmm(rapidsConf)) {
         CudaMemoryBuffer.allocate(size)
       } else {
         DeviceMemoryBuffer.allocate(size)
@@ -304,6 +305,9 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
       null,
       () => RmmSpark.removeAllCurrentThreadAssociation()))
 
+  // servers made here, whose sends still in flight at close are released by this transport
+  private[this] val servers = new ConcurrentLinkedQueue[RapidsShuffleServer]()
+
   /**
    * Construct a server instance
    *
@@ -311,7 +315,7 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
    * @return the server instance
    */
   override def makeServer(requestHandler: RapidsShuffleRequestHandler): RapidsShuffleServer = {
-    new RapidsShuffleServer(
+    val server = new RapidsShuffleServer(
       this,
       ucx.getServerConnection,
       shuffleServerId,
@@ -319,6 +323,8 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
       serverExecutor,
       bssExecutor,
       rapidsConf)
+    servers.add(server)
+    server
   }
 
   /**
@@ -525,11 +531,10 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
 
   override def queuePending(reqs: Seq[PendingTransferRequest]): Unit =
     altList.synchronized {
-      import scala.collection.JavaConverters._
-      validHandlers.add(reqs.head.handler)
-      altList.addAll(reqs.asJava)
-      logDebug(s"THROTTLING ${altList.size} queued requests")
-      altList.notifyAll()
+      if (UCXShuffleTransport.admit(altList, validHandlers, reqs)) {
+        logDebug(s"THROTTLING ${altList.size} queued requests")
+        altList.notifyAll()
+      }
     }
 
   override def cancelPending(handler: RapidsShuffleFetchHandler): Unit = {
@@ -588,6 +593,11 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
     }
 
     ucx.close()
+    // If the progress thread terminated, no send callback can come after this, so the sends
+    // that never got one are released here, before their bounce buffers' pools are freed.
+    // Otherwise they are leaked, since UCX may still read those buffers.
+    val transportStopped = ucx.isProgressThreadTerminated
+    servers.forEach(_.releaseAbandoned(transportStopped))
     freeBounceBufferPools()
   }
 
@@ -599,6 +609,32 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
     val client = clients.remove(conn.getPeerExecutorId)
     if (client != null) {
       client.close()
+    }
+  }
+}
+
+object UCXShuffleTransport extends Logging {
+  /**
+   * Queues `reqs` for the throttle, and records their reader as one whose requests may be put
+   * back, unless the reader is done. The caller holds `altList`'s lock, which the reader's
+   * cleaner takes after it marks the reader done. So a done reader's requests are refused here,
+   * or removed by its `cancelPending` unless the throttle took them first. The throttle may
+   * still issue those, and the reader rejects their batches.
+   * @return whether it queued them
+   */
+  private[ucx] def admit(
+      altList: HashedPriorityQueue[PendingTransferRequest],
+      validHandlers: mutable.HashSet[RapidsShuffleFetchHandler],
+      reqs: Seq[PendingTransferRequest]): Boolean = {
+    import scala.collection.JavaConverters._
+    val handler = reqs.head.handler
+    if (handler.isDone) {
+      logDebug(s"Not queueing ${reqs.size} transfer requests of $handler, whose task is done")
+      false
+    } else {
+      validHandlers.add(handler)
+      altList.addAll(reqs.asJava)
+      true
     }
   }
 }

@@ -21,7 +21,6 @@ import java.math.RoundingMode
 import ai.rapids.cudf.{ColumnVector, Cuda, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.RmmSpark
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -53,7 +52,7 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
    * them if needed so the results need to be closed.
    */
   private def extractColumnVectors(batch: ColumnarBatch): Array[ColumnVector] = {
-    if (GpuPackedTableColumn.isBatchPacked(batch)) {
+    if (TestUtils.isBatchPacked(batch)) {
       val packedColumn = batch.column(0).asInstanceOf[GpuPackedTableColumn]
       val table = packedColumn.getContiguousTable.getTable
       // The contiguous table is still responsible for closing these columns.
@@ -169,8 +168,6 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
     CoalesceReadOption(
       kudoEnabled = true,
       kudoMode = RapidsConf.ShuffleKudoMode.GPU,
-      kudoDebugMode = DumpOption.Never,
-      kudoDebugDumpPrefix = None,
       useAsync = false
     )
   }

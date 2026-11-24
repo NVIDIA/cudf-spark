@@ -31,6 +31,33 @@ case class GpuWriteIntoDelta(
     extends GpuWriteIntoDeltaBase(gpuDeltaLog, cpuWrite)
       with GpuWriteIntoDeltaLike {
 
+  override protected def getFilesToRemoveForOverwrite(
+      txn: org.apache.spark.sql.delta.OptimisticTransaction,
+      addFiles: Seq[org.apache.spark.sql.delta.actions.AddFile],
+      useDynamicPartitionOverwriteMode: Boolean):
+      Seq[org.apache.spark.sql.delta.actions.Action] = {
+    if (useDynamicPartitionOverwriteMode) {
+      val updatePartitions = addFiles.map(_.partitionValues).toSet
+      txn.filterFiles(updatePartitions).map(_.remove)
+    } else {
+      txn.filterFiles().map(_.remove)
+    }
+  }
+
+  override protected def registerWriteOperationMetrics(
+      sparkSession: org.apache.spark.sql.SparkSession,
+      txn: org.apache.spark.sql.delta.OptimisticTransaction,
+      newFiles: Seq[org.apache.spark.sql.delta.actions.FileAction],
+      deletedFiles: Seq[org.apache.spark.sql.delta.actions.Action],
+      replaceWhere: Option[Seq[org.apache.spark.sql.catalyst.expressions.Expression]],
+      replaceOnDataColsEnabled: Boolean): Unit = {
+    if (replaceWhere.nonEmpty && replaceOnDataColsEnabled &&
+        sparkSession.conf.get(
+          org.apache.spark.sql.delta.sources.DeltaSQLConf.REPLACEWHERE_METRICS_ENABLED)) {
+      registerReplaceWhereMetrics(sparkSession, txn, newFiles, deletedFiles)
+    }
+  }
+
   override protected def buildCommitMetadata: DeltaOperations.Operation = {
     DeltaRuntimeShim.buildWriteOperation(
       cpuWrite.mode, cpuWrite.partitionColumns, cpuWrite.options)

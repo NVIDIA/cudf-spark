@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.FileUtil
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
@@ -640,7 +641,14 @@ object ParallelUnitTestRunner {
       }
     }
     cleanup(cleanupSparkSessionAndContext())
+    cleanup(ExecutionPlanCaptureCallback.endCapture())
     cleanup(TestUtils.clearCachedBatchSerializer())
+    // Retry task registrations and task-completion callbacks are keyed by task attempt and native
+    // thread ids, which later suites reuse. State that a suite leaves behind, for example after
+    // acquiring the GPU semaphore under a mock task that never completes, can keep a later
+    // task's thread from being associated with its task.
+    cleanup(ScalableTaskCompletion.reset())
+    cleanup(TaskRegistryTracker.clearRegistry())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
           .filter(file => file.isDirectory && file.getName.startsWith(SPARK_WAREHOUSE_PREFIX))

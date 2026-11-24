@@ -80,24 +80,22 @@ abstract class CudfBinaryPredicateWithSideEffect extends CudfBinaryOperator with
    */
   def columnarEvalWithSideEffects(batch: ColumnarBatch): GpuColumnVector = {
     val leftExpr = left.asInstanceOf[GpuExpression]
-    withResource(GpuColumnVector.from(batch)) { tbl =>
-      withResource(leftExpr.columnarEval(batch)) { lhsBool =>
-        if (shouldShortCircuit(lhsBool)) {
-          applyShortCircuit(lhsBool)
-        } else {
-          val rightExpr = right.asInstanceOf[GpuExpression]
-          val colTypes = GpuColumnVector.extractTypes(batch)
-          // Process the LHS. It may imply replacing null values (if any) with true.
-          withResource(processLHS(lhsBool.getBase)) { lhsNoNulls =>
-            val rEval = withResource(filterBatch(tbl, lhsNoNulls, colTypes)) { leftTrueBatch =>
-              rightExpr.columnarEval(leftTrueBatch)
-            }
-            withResource(rEval) { rEval =>
-              withResource(gather(lhsNoNulls, rEval)) { combinedVector =>
-                GpuColumnVector.from(
-                  doColumnar(lhsBool, GpuColumnVector.from(combinedVector, dataType)),
-                  dataType)
-              }
+    withResource(leftExpr.columnarEval(batch)) { lhsBool =>
+      if (shouldShortCircuit(lhsBool)) {
+        applyShortCircuit(lhsBool)
+      } else {
+        val rightExpr = right.asInstanceOf[GpuExpression]
+        val colTypes = GpuColumnVector.extractTypes(batch)
+        // Process the LHS. It may imply replacing null values (if any) with true.
+        withResource(processLHS(lhsBool.getBase)) { lhsNoNulls =>
+          val rEval = withResource(GpuColumnVector.filter(batch, colTypes, lhsNoNulls)) {
+            leftTrueBatch => rightExpr.columnarEval(leftTrueBatch)
+          }
+          withResource(rEval) { rEval =>
+            withResource(gather(lhsNoNulls, rEval)) { combinedVector =>
+              GpuColumnVector.from(
+                doColumnar(lhsBool, GpuColumnVector.from(combinedVector, dataType)),
+                dataType)
             }
           }
         }
@@ -224,6 +222,8 @@ case class GpuEqualTo(left: Expression, right: Expression) extends CudfBinaryCom
     evaluateAndFixFloatingPointResult(super.doColumnar(lhs, rhs), lhs.getBase.isNan,
       Scalar.fromBool(rhs.isNan))
   }
+
+  override def selfConvertsToAst: Boolean = left.dataType == right.dataType
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     // Currently AST computeColumn assumes nulls compare true for EQUAL, but NOT_EQUAL will

@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async.{AsyncRunner, UnboundedAsyncRunner}
 import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.ShimFilePartitionReaderFactory
 import org.apache.avro.Schema
 import org.apache.avro.file.DataFileConstants.SYNC_SIZE
@@ -106,10 +107,10 @@ case class GpuAvroScan(
     rapidsConf: RapidsConf,
     partitionFilters: Seq[Expression] = Seq.empty,
     dataFilters: Seq[Expression] = Seq.empty,
-    queryUsesInputFile: Boolean = false) extends FileScan with GpuScan {
+    queryUsesInputFile: Boolean = false) extends FileScan with GpuScan with HistorySizedFileScan {
   override def isSplitable(path: Path): Boolean = true
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val caseSensitiveMap = options.asCaseSensitiveMap.asScala.toMap
     // Hadoop Configurations are case sensitive.
     val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(caseSensitiveMap)
@@ -308,9 +309,9 @@ case class GpuAvroMultiFilePartitionReaderFactory(
     }
     val poolConf = poolConfBuilder.build()
     new GpuMultiFileAvroPartitionReader(conf, files, clippedBlocks.toSeq, readDataSchema,
-      partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-      skipReadEstimate, poolConf, debugDumpPrefix, debugDumpAlways, metrics,
-      mapPathHeader.toMap)
+      partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
+      maxGpuColumnSizeBytes, skipReadEstimate, poolConf, debugDumpPrefix, debugDumpAlways,
+      metrics, mapPathHeader.toMap)
   }
 
 }
@@ -921,6 +922,7 @@ class GpuMultiFileAvroPartitionReader(
     partitionSchema: StructType,
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
+    targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
@@ -929,8 +931,8 @@ class GpuMultiFileAvroPartitionReader(
     execMetrics: Map[String, GpuMetric],
     mapPathHeader: Map[Path, Header])
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedBlocks,
-    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-    skipReadEstimate, poolConf, execMetrics) with GpuAvroReaderBase {
+    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
+    maxGpuColumnSizeBytes, skipReadEstimate, poolConf, execMetrics) with GpuAvroReaderBase {
 
   override def checkIfNeedToSplitDataBlock(
       currentBlockInfo: SingleDataBlockInfo,
@@ -1108,29 +1110,6 @@ case class AvroBlockMeta(header: Header, headerSize: Long, blocks: Seq[BlockInfo
  * @param length how many bytes to copy
  */
 private case class CopyRange(offset: Long, length: Long)
-
-/** Extra information */
-case class AvroExtraInfo() extends ExtraInfo
-
-/** avro schema wrapper */
-case class AvroSchemaWrapper(schema: Schema) extends SchemaBase {
-  override def isEmpty: Boolean = schema.getFields.isEmpty
-}
-
-/** avro BlockInfo wrapper */
-case class AvroDataBlock(blockInfo: BlockInfo) extends DataBlockBase {
-  override def getRowCount: Long = blockInfo.count
-  override def getReadDataSize: Long = blockInfo.dataSize
-  override def getBlockSize: Long = blockInfo.blockSize
-}
-
-case class AvroSingleDataBlockInfo(
-  filePath: Path,
-  dataBlock: AvroDataBlock,
-  partitionValues: InternalRow,
-  schema: AvroSchemaWrapper,
-  readSchema: StructType,
-  extraInfo: AvroExtraInfo) extends SingleDataBlockInfo
 
 case class AvroBatchContext(
   override val origChunkedBlocks: LinkedHashMap[Path, ArrayBuffer[DataBlockBase]],

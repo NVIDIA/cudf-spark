@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.io.async
 
-import java.util.concurrent.{ExecutionException, Executors, ExecutorService, Future, TimeUnit}
+import java.util.concurrent.{Callable, ExecutionException, Executors, ExecutorService, Future, TimeUnit}
 
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.TimeLimitedTests
@@ -146,6 +146,23 @@ class TrafficControllerSuite extends AnyFunSuite with BeforeAndAfterEach with Ti
     // The third task has been completed
     controller.taskCompleted(tasks(2))
     assertResult(0)(controller.numScheduledTasks)
+  }
+
+  test("an interrupted thread still completes its task and keeps its interrupt") {
+    val t1 = new TestTask(10)
+    controller.blockUntilRunnable(t1)
+
+    // A worker completes its task in a finally, possibly after an interrupt has reached it.
+    val stillInterrupted = executor.submit(new Callable[Boolean] {
+      override def call(): Boolean = {
+        Thread.currentThread().interrupt()
+        controller.taskCompleted(t1)
+        Thread.currentThread().isInterrupted
+      }
+    })
+    assert(stillInterrupted.get(1, TimeUnit.SECONDS))
+    assertResult(0)(controller.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
   }
 
   test("shutdown while blocking") {

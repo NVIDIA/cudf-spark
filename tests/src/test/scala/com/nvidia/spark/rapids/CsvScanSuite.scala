@@ -21,9 +21,10 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.catalyst.csv.{CSVOptions => SparkCSVOptions}
 import org.apache.spark.sql.functions.{col, date_add, lit}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{DecimalType, StructField, StructType, TimestampType}
+import org.apache.spark.sql.types.{DecimalType, StringType, StructField, StructType, TimestampType}
 
 class CsvScanSuite extends SparkQueryCompareTestSuite {
   testSparkResultsAreEqual("Test CSV projection with whitespace delimiter between date and time",
@@ -141,6 +142,48 @@ class CsvScanSuite extends SparkQueryCompareTestSuite {
       val minBytes = rows.length.toLong * bytesPerRow
       assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
     })
+  }
+
+  private val bomCases = Seq(
+    ("BOM only", "\uFEFF", Map.empty[String, String]),
+    ("BOM and literal NUL", "\uFEFF\u0000", Map.empty[String, String]),
+    ("custom line separator", "\uFEFF", Map("lineSep" -> "|")),
+    ("custom null value", "\uFEFF", Map("nullValue" -> "NULL")),
+    ("custom null marker", "\uFEFFNULL,tail", Map("nullValue" -> "NULL")),
+    ("quote disabled", "\uFEFF", Map("quote" -> "")),
+    ("quoted delimiter", "\uFEFF\"quoted,value\",tail",
+      Map("lineSep" -> (if (isSpark340OrLater) "\r\n" else "\n"))))
+
+  for ((name, record, options) <- bomCases; numColumns <- Seq(1, 2)) {
+    test(s"BOM record matches the CPU CSV file reader: $name, columns=$numColumns") {
+      val schema = StructType((0 until numColumns).map(i => StructField(s"c$i", StringType)))
+      val readOptions = options ++ Map("header" -> "false", "comment" -> "#")
+      val separator = options.getOrElse("lineSep", "\n")
+      val file = Files.createTempFile("csv-bom-shim", ".csv")
+      try {
+        // Hadoop consumes the file BOM; the following BOM belongs to the first CSV record.
+        Files.write(file, ("\uFEFF" + record + separator)
+          .getBytes(StandardCharsets.UTF_8))
+        withCpuSparkSession({ spark =>
+          val frame = spark.read.schema(schema).options(readOptions).csv(file.toUri.toString)
+          val rows = frame.collect()
+          assert(rows.length == 1)
+          val expected = rows.head.toSeq.map(_.asInstanceOf[String])
+          val factory = new FilterCsvEmptyHostLineBuffererFactory(
+            new SparkCSVOptions(readOptions, false, "UTC"), numColumns, false)
+          val bytes = ("prefix" + record + "suffix").getBytes(StandardCharsets.UTF_8)
+          val actual = factory.parseBomRecord(bytes, "prefix".length,
+            record.getBytes(StandardCharsets.UTF_8).length).toSeq
+          assert(actual == expected)
+          if (record.contains('\u0000')) {
+            assert(actual.head == "\u0000")
+          }
+        }, new SparkConf().set("spark.sql.sources.useV1SourceList", "csv")
+          .set("spark.sql.files.maxPartitionBytes", "1m"))
+      } finally {
+        Files.deleteIfExists(file)
+      }
+    }
   }
 
 }

@@ -402,6 +402,10 @@ trait GpuWindowInPandasExecBase extends ShimUnaryExecNode with GpuPythonExecBase
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val (numInputRows, numInputBatches, numOutputRows, numOutputBatches) = commonGpuMetrics()
     val sessionLocalTimeZone = conf.sessionLocalTimeZone
+    val pythonUdfLogMaxEntries =
+      conf.getConfString("spark.sql.pyspark.udf.logging.maxEntries", "0").toInt
+    val pythonUdfLogLevel =
+      conf.getConfString("spark.sql.pyspark.udf.logging.logLevel", "WARNING")
 
     // 1) Unwrap the expressions and build some info data:
     //    - Map from expression index to frame index
@@ -531,7 +535,9 @@ trait GpuWindowInPandasExecBase extends ShimUnaryExecNode with GpuPythonExecBase
           /* The whole group data should be written in a single call, so here is unlimited */
           Int.MaxValue,
           pythonOutputSchema,
-          udfArgs.argNames)
+          udfArgs.argNames,
+          pythonUdfLogMaxEntries,
+          pythonUdfLogLevel)
 
         val outputIterator = pyRunner.compute(pyInputIterator, context.partitionId(), context)
         new CombiningIterator(batchProducer.getBatchQueue, outputIterator, pyRunner,

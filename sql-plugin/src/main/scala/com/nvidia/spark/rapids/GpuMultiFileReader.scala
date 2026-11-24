@@ -50,7 +50,7 @@ import org.apache.spark.sql.rapids.{GpuTaskMetrics, InputFileUtils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkVector}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
 /**
@@ -105,6 +105,8 @@ trait HostMemoryBuffersWithMetaDataBase extends AutoCloseable {
   private var _bufferTime: Long = 0L
   // Time spent on waiting for (virtual) resource
   private var _scheduleTime: Long = 0L
+  // Parquet row groups fetched, added to the metric on the task thread
+  private var _rowGroupsFetched: Int = 0
 
   /**
    * When it is present, it indicates the partition values stored as an array of
@@ -125,6 +127,16 @@ trait HostMemoryBuffersWithMetaDataBase extends AutoCloseable {
   }
 
   def setScheduleTime(time: Long): Unit = _scheduleTime = time
+
+  def setRowGroupsFetched(count: Int): Unit = _rowGroupsFetched = count
+  def getRowGroupsFetched: Int = _rowGroupsFetched
+
+  /**
+   * Add what the runner counted to the scan's metrics. Called on the task thread, since pool
+   * threads reading the task's other files would race on the same metrics.
+   */
+  def addRunnerMetrics(metrics: Map[String, GpuMetric]): Unit =
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += _rowGroupsFetched)
 
   def getBufferTime: Long = _bufferTime
   def getFilterTime: Long = _filterTime
@@ -413,35 +425,6 @@ abstract class FilePartitionReaderBase(conf: Configuration, execMetrics: Map[Str
   }
 }
 
-case class CombineConf(
-    combineThresholdSize: Long, // The size to combine to when combining small files
-    combineWaitTime: Int) // The amount of time to wait for other files ready for combination.
-
-// TODO: Refactor thread pool components into a common utility, since it is not specific to
-//  multi-file reading.
-trait ThreadPoolConf {
-  /**
-   * The maximum number of threads used by the thread pool, not necessarily the final number
-   */
-  def maxThreadNumber: Int
-
-  /**
-   * Whether to create pools for each Spark stage, only for testing for now
-   */
-  def stageLevelPool: Boolean
-}
-
-case class DefaultThreadPoolConf(
-    maxThreadNumber: Int,
-    stageLevelPool: Boolean) extends ThreadPoolConf
-
-case class MemoryBoundedPoolConf(
-    maxThreadNumber: Int,
-    stageLevelPool: Boolean,
-    memoryCapacity: Long, // The maximum host memory being used in bytes, must be > 0
-    waitMemTimeoutMs: Long // The timeout for acquiring host memory in milliseconds
-) extends ThreadPoolConf
-
 class ThreadPoolConfBuilder(
     private val maxThreadNumber: Int,
     private val isMemoryBounded: Boolean,
@@ -699,8 +682,12 @@ abstract class MultiFileCloudPartitionReaderBase(
         readBatches(fileHostBuffers)
       } catch {
         case e@(_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
-          logWarning(s"Skipped the corrupted file: $file", e)
-          EmptyGpuColumnarBatchIterator
+          // Skip the rest of this file and clear pending buffers before releasing them.
+          currentFileHostBuffers = None
+          withResource(fileHostBuffers) { _ =>
+            logWarning(s"Skipped the corrupted file: $file", e)
+            EmptyGpuColumnarBatchIterator
+          }
       }
       // the data is copied to GPU so submit another task if we were limited
       if (addTaskIfNeeded) addNextTaskIfNeeded()
@@ -726,6 +713,8 @@ abstract class MultiFileCloudPartitionReaderBase(
       }
     }
     taskRet.data.setScheduleTime(taskRet.metrics.scheduleTimeMs)
+    // A result that is only freed still counts, since its IO was done.
+    taskRet.data.addRunnerMetrics(metrics)
     taskRet.data
   }
 
@@ -790,27 +779,29 @@ abstract class MultiFileCloudPartitionReaderBase(
   private def getNextBuffersAndMetaAndCombine(): HostMemoryBuffersWithMetaDataBase = {
     var sizeRead = 0L
     var numRowsRead = 0L
-    val results = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
-    readReadyFiles(0, 0, results)
-    if (results.isEmpty) {
-      // none were ready yet so wait as long as need for first one
-      val hostBuffersWithMeta = if (keepReadsInOrder) {
-        convertAsyncResult(tasks.poll().get())
-      } else {
-        val bufMetaFut = fcs.take()
-        tasks.remove(bufMetaFut)
-        convertAsyncResult(bufMetaFut.get())
-      }
-      sizeRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.bytes).sum
-      numRowsRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.numRows).sum
+    closeOnExcept(ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()) { results =>
+      readReadyFiles(0, 0, results)
+      if (results.isEmpty) {
+        // none were ready yet so wait as long as need for first one
+        val hostBuffersWithMeta = if (keepReadsInOrder) {
+          convertAsyncResult(tasks.poll().get())
+        } else {
+          val bufMetaFut = fcs.take()
+          tasks.remove(bufMetaFut)
+          convertAsyncResult(bufMetaFut.get())
+        }
+        // Own the result before inspecting its metadata, which may itself throw.
+        results.append(hostBuffersWithMeta)
+        sizeRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.bytes).sum
+        numRowsRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.numRows).sum
 
-      filesToRead -= 1
-      results.append(hostBuffersWithMeta)
-      // since we had to wait for one to be ready,
-      // check if more are ready as well
-      readReadyFiles(sizeRead, numRowsRead, results)
+        filesToRead -= 1
+        // since we had to wait for one to be ready,
+        // check if more are ready as well
+        readReadyFiles(sizeRead, numRowsRead, results)
+      }
+      combineHMBs(results.toArray)
     }
-    combineHMBs(results.toArray)
   }
 
   private def getNextBuffersAndMetaSingleFile(): HostMemoryBuffersWithMetaDataBase = {
@@ -841,12 +832,14 @@ abstract class MultiFileCloudPartitionReaderBase(
     val leftOvers = combineLeftOverFiles.get
     // unset leftOverFiles because it will get reset in combineHMBs again if needed
     combineLeftOverFiles = None
-    val results = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
-    val curSize = leftOvers.map(_.memBuffersAndSizes.map(_.bytes).sum).sum
-    val curNumRows = leftOvers.map(_.memBuffersAndSizes.map(_.numRows).sum).sum
-    readReadyFiles(curSize, curNumRows, results)
-    val allReady = leftOvers ++ results
-    val fileBufsAndMeta = combineHMBs(allReady)
+    val fileBufsAndMeta = closeOnExcept(leftOvers) { _ =>
+      closeOnExcept(ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()) { results =>
+        val curSize = leftOvers.map(_.memBuffersAndSizes.map(_.bytes).sum).sum
+        val curNumRows = leftOvers.map(_.memBuffersAndSizes.map(_.numRows).sum).sum
+        readReadyFiles(curSize, curNumRows, results)
+        combineHMBs(leftOvers ++ results)
+      }
+    }
 
     TrampolineUtil.incBytesRead(inputMetrics, fileBufsAndMeta.bytesRead)
     // this is combine mode so input file shouldn't be used at all but update to
@@ -942,7 +935,9 @@ abstract class MultiFileCloudPartitionReaderBase(
           }
         }
 
-        if (batchIter.hasNext || filesToRead == 0 || isDone) {
+        val noPendingFiles = filesToRead == 0 && currentFileHostBuffers.isEmpty &&
+          combineLeftOverFiles.isEmpty
+        if (batchIter.hasNext || noPendingFiles || isDone) {
           continue = false
         }
       }
@@ -985,74 +980,45 @@ abstract class MultiFileCloudPartitionReaderBase(
     // this is more complicated because threads might still be processing files
     // in cases close got called early for like limit() calls
     isDone = true
-    closeCurrentFileHostBuffers()
     batchIter = EmptyGpuColumnarBatchIterator
 
     // clean up Async Readers being left over
     val needToClose = mutable.ArrayBuffer[BufferInfo]()
-    tasks.asScala.foreach {
-      case task if task.isCancelled => // Do nothing if already cancelled
-      case task if task.isDone => // Close all produced hmbs
-        needToClose += convertAsyncResult(task.get())
-      case task => // Task is still running
-        // Note we are not interrupting thread here so it
-        // will finish reading and then just discard. If we
-        // interrupt HDFS logs warnings about being interrupted.
-        task.cancel(false)
+    currentFileHostBuffers.foreach(needToClose += _)
+    currentFileHostBuffers = None
+    combineLeftOverFiles.foreach(needToClose ++= _)
+    combineLeftOverFiles = None
+    closeOnExcept(needToClose) { _ =>
+      var firstError: Throwable = null
+      var task = tasks.poll()
+      while (task != null) {
+        try {
+          task match {
+            case t if t.isCancelled => // Do nothing if already cancelled
+            case t if t.isDone => // Close all produced hmbs
+              needToClose += convertAsyncResult(t.get())
+            case t =>
+              // Let running reads observe isDone without interrupting file system operations.
+              // If completion wins the cancellation race, we still own the result.
+              if (!t.cancel(false) && !t.isCancelled) {
+                needToClose += convertAsyncResult(t.get())
+              }
+          }
+        } catch {
+          case t: Throwable =>
+            if (firstError == null) {
+              firstError = t
+            } else if (firstError ne t) {
+              firstError.addSuppressed(t)
+            }
+        }
+        task = tasks.poll()
+      }
+      if (firstError != null) throw firstError
     }
     needToClose.safeClose()
   }
 }
-
-// A trait to describe a data block info
-trait DataBlockBase {
-  // get the row number of this data block
-  def getRowCount: Long
-  // the data read size
-  def getReadDataSize: Long
-  // the block size to be used to slice the whole HostMemoryBuffer
-  def getBlockSize: Long
-}
-
-/**
- * A common trait for different schema in the MultiFileCoalescingPartitionReaderBase.
- *
- * The sub-class should wrap the real schema for the specific file format
- */
-trait SchemaBase {
-  def isEmpty: Boolean
-}
-
-/**
- * A common trait for the extra information for different file format.
- */
-trait ExtraInfo extends AutoCloseable {
-  override def close(): Unit = {}
-}
-
-/**
- * A single block info of a file,
- * Eg, A parquet file has 3 RowGroup, then it will produce 3 SingleBlockInfoWithMeta
- */
-trait SingleDataBlockInfo {
-  def filePath: Path // file path info
-  def partitionValues: InternalRow // partition value
-  def dataBlock: DataBlockBase // a single block info of a single file
-  def schema: SchemaBase // schema information
-  def readSchema: StructType // read schema information
-  def extraInfo: ExtraInfo // extra information
-}
-
-/**
- * A context lives during the whole process of reading partitioned files
- * to a batch buffer (aka HostMemoryBuffer) to build a memory file.
- * Children can extend this to add more necessary fields.
- * @param origChunkedBlocks mapping of file path to data blocks
- * @param schema schema info
- */
-class BatchContext(
-  val origChunkedBlocks: mutable.LinkedHashMap[Path, ArrayBuffer[DataBlockBase]],
-  val schema: SchemaBase) {}
 
 /**
  * The abstracted multi-file coalescing reading class, which tries to coalesce small
@@ -1082,6 +1048,7 @@ class BatchContext(
  * @param maxReadBatchSizeRows  soft limit on the maximum number of rows the reader reads per batch
  * @param maxReadBatchSizeBytes soft limit on the maximum number of bytes the reader reads per batch
  * @param maxGpuColumnSizeBytes maximum number of bytes for a GPU column
+ * @param targetBatchSizeBytes  the target size of a batch
  * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf              the thread pool configuration
  * @param execMetrics           metrics
@@ -1092,6 +1059,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
     partitionSchema: StructType,
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
+    targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
@@ -1324,7 +1292,8 @@ abstract class MultiFileCoalescingPartitionReaderBase(
       return true
     }
     batchIter = EmptyGpuColumnarBatchIterator
-    if (!isDone) {
+    // Row-level deletes can empty a batch while later row groups still contain live rows.
+    while (!batchIter.hasNext && !isDone) {
       if (!blockIterator.hasNext) {
         isDone = true
       } else {
@@ -1402,18 +1371,11 @@ abstract class MultiFileCoalescingPartitionReaderBase(
       // Compute effective row count.
       val effectiveRowsPerPartition = getRowsPerPartition(
         decodeMeta.rowsPerPartition, decodeMeta.allPartValues, decodeMeta.extraInfo)
-      val totalRows = effectiveRowsPerPartition.sum.toInt
       val iter = try {
-        if (totalRows == 0) {
-          EmptyGpuColumnarBatchIterator
-        } else {
-          // Someone is going to process this data, even if it is just a row count
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          val nullColumns = decodeMeta.readSchema.safeMap(f =>
-            GpuColumnVector.fromNull(totalRows, f.dataType).asInstanceOf[SparkVector])
-          val emptyBatch = new ColumnarBatch(nullColumns.toArray, totalRows)
-          new SingleGpuColumnarBatchIterator(emptyBatch)
-        }
+        // Cap each batch like a decoded one. Partition columns are added to every batch later.
+        val outputSchema = StructType(decodeMeta.readSchema.fields ++ partitionSchema.fields)
+        GpuNullBatchIterator(decodeMeta.readSchema, effectiveRowsPerPartition.sum,
+          GpuNullBatchIterator.maxRows(outputSchema, maxReadBatchSizeRows, targetBatchSizeBytes))
       } finally {
         // No decode phase in the empty-schema path, so close extraInfo resources directly.
         decodeMeta.extraInfo.close()

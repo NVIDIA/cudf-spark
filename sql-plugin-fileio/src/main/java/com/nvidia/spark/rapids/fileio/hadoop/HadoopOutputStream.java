@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import java.io.OutputStream;
 import static java.util.Objects.requireNonNull;
 
 /**
- * A {@link RapidsOutputStream} implementation that wraps a Hadoop {@link FSDataOutputStream}.
+ * A {@code RapidsOutputStream} implementation that wraps a Hadoop {@code FSDataOutputStream}.
  * <br/>
  * This class delegates to the underlying output stream for write and close operations.
  */

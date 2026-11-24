@@ -22,23 +22,35 @@ import com.nvidia.spark.rapids.{RapidsConf, ShimLoader, ShimReflectionUtils, Ver
 import com.nvidia.spark.rapids.delta.{DeltaConfigChecker, DeltaProvider}
 
 import org.apache.spark.SPARK_VERSION
-import org.apache.spark.sql.{DataFrameWriter, SaveMode, SparkSession}
+import org.apache.spark.sql.{DataFrame, DataFrameWriter, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, DeltaUDF, Snapshot}
-import org.apache.spark.sql.delta.actions.Metadata
+import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.Clock
 
 case class StartTransactionArg(log: DeltaLog, conf: RapidsConf, clock: Clock,
     catalogTable: Option[CatalogTable] = None, snapshot: Option[Snapshot] = None)
 
+/** The V1 entry points that prepare an upstream selective replacement command. */
+sealed trait DeltaWriteOrigin
+
+object DeltaWriteOrigin {
+  case object V1Save extends DeltaWriteOrigin
+  case object V1SaveAsTable extends DeltaWriteOrigin
+}
+
 trait DeltaRuntimeShim {
   def getDeltaConfigChecker: DeltaConfigChecker
   def getDeltaProvider: DeltaProvider
+
+  /** Unknown runtimes must not assume that a VARIANT table contains only unshredded files. */
+  def mayContainShreddedVariant(protocol: Protocol): Boolean = true
   def startTransaction(log: DeltaLog, conf: RapidsConf, clock: Clock)
   : GpuOptimisticTransactionBase = {
     startTransaction(StartTransactionArg(log, conf, clock))
@@ -51,6 +63,31 @@ trait DeltaRuntimeShim {
   def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike
+
+  def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta,
+      origin: DeltaWriteOrigin): GpuWriteIntoDeltaLike = createGpuWrite(gpuDeltaLog, cpuWrite)
+
+  def createCpuWrite(
+      deltaLog: DeltaLog,
+      mode: SaveMode,
+      options: DeltaOptions,
+      partitionColumns: Seq[String],
+      configuration: Map[String, String],
+      data: DataFrame,
+      catalogTableOpt: Option[CatalogTable],
+      schemaInCatalog: Option[StructType]): WriteIntoDelta = {
+    require(catalogTableOpt.isEmpty, "Catalog tables require Delta 3.3 or later")
+    WriteIntoDelta(
+      deltaLog,
+      mode,
+      options,
+      partitionColumns,
+      configuration,
+      data,
+      schemaInCatalog = schemaInCatalog)
+  }
 
   def buildWriteOperation(
       mode: SaveMode,
@@ -98,8 +135,25 @@ object DeltaRuntimeShim {
     if (deltaVersion.startsWith("4.2.")) {
       val parsedSparkVersion = parseSparkVersion(sparkVersion)
       (deltaVersion, parsedSparkVersion) match {
-        case ("4.2.0", (4, 0, 1) | (4, 1, 1)) =>
+        case ("4.2.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
           Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
+        case _ =>
+          throw new IllegalStateException(
+            s"Unsupported Delta Lake $deltaVersion and Spark $sparkVersion combination")
+      }
+    } else {
+      None
+    }
+  }
+
+  private[rapids] def getDelta43ShimClassName(
+      deltaVersion: String,
+      sparkVersion: String): Option[String] = {
+    if (deltaVersion.startsWith("4.3.")) {
+      val parsedSparkVersion = parseSparkVersion(sparkVersion)
+      (deltaVersion, parsedSparkVersion) match {
+        case ("4.3.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
+          Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
         case _ =>
           throw new IllegalStateException(
             s"Unsupported Delta Lake $deltaVersion and Spark $sparkVersion combination")
@@ -144,17 +198,23 @@ object DeltaRuntimeShim {
   }
 
   private def getShimClassName: String = {
-    getDelta42ShimClassName(io.delta.VERSION, SPARK_VERSION)
+    getDelta43ShimClassName(io.delta.VERSION, SPARK_VERSION)
+      .orElse(getDelta42ShimClassName(io.delta.VERSION, SPARK_VERSION))
       .getOrElse(getPreDelta42ShimClassName)
   }
 
-  private lazy val shimInstance = {
+  private[rapids] lazy val shimInstance = {
     val shimClassName = getShimClassName
     val shimClass = ShimReflectionUtils.loadClass(shimClassName)
     shimClass.getConstructor().newInstance().asInstanceOf[DeltaRuntimeShim]
   }
 
+  private[rapids] def getShimInstance: DeltaRuntimeShim = shimInstance
+
   def getDeltaProvider: DeltaProvider = shimInstance.getDeltaProvider
+
+  def mayContainShreddedVariant(protocol: Protocol): Boolean =
+    shimInstance.mayContainShreddedVariant(protocol)
 
   def getDeltaConfigChecker: DeltaConfigChecker = {
     shimInstance.getDeltaConfigChecker
@@ -177,6 +237,27 @@ object DeltaRuntimeShim {
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
     shimInstance.createGpuWrite(gpuDeltaLog, cpuWrite)
+  }
+
+  def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta,
+      origin: DeltaWriteOrigin): GpuWriteIntoDeltaLike = {
+    shimInstance.createGpuWrite(gpuDeltaLog, cpuWrite, origin)
+  }
+
+  def createCpuWrite(
+      deltaLog: DeltaLog,
+      mode: SaveMode,
+      options: DeltaOptions,
+      partitionColumns: Seq[String],
+      configuration: Map[String, String],
+      data: DataFrame,
+      catalogTableOpt: Option[CatalogTable],
+      schemaInCatalog: Option[StructType]): WriteIntoDelta = {
+    shimInstance.createCpuWrite(
+      deltaLog, mode, options, partitionColumns, configuration, data,
+      catalogTableOpt, schemaInCatalog)
   }
 
   def buildWriteOperation(

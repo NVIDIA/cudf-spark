@@ -74,6 +74,9 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
   def create(level: MetricsLevel, name: String): GpuMetric =
     createInternal(level, SQLMetrics.createMetric(context, name))
 
+  def create(level: MetricsLevel, metric: => SQLMetric): GpuMetric =
+    createInternal(level, metric)
+
   def createNanoTiming(level: MetricsLevel, name: String): GpuMetric =
     createInternal(level, SQLMetrics.createNanoTimingMetric(context, name))
 
@@ -89,6 +92,12 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
 
 object GpuMetric extends Logging {
   // Metric names.
+  val AST_JIT_PROGRAM_BUILD_ATTEMPTS = "astJitProgramBuildAttempts"
+  val AST_JIT_PROGRAM_CACHE_HITS = "astJitProgramCacheHits"
+  val AST_JIT_PROGRAM_BUILD_TIME = "astJitProgramBuildTime"
+  val AST_JIT_EVAL_ATTEMPTS = "astJitEvalAttempts"
+  val AST_JIT_EVAL_ROWS = "astJitEvalRows"
+  val AST_JIT_EVAL_TIME = "astJitEvalTime"
   val BUFFER_TIME = "bufferTime"
   val BUFFER_TIME_BUBBLE = "bufferTimeBubble"
   val SCAN_TIME = "scanTime"
@@ -135,6 +144,17 @@ object GpuMetric extends Logging {
   val FILECACHE_DATA_RANGE_MISSES_SIZE = "filecacheDataRangeMissesSize"
   val FILECACHE_FOOTER_READ_TIME = "filecacheFooterReadTime"
   val FILECACHE_DATA_RANGE_READ_TIME = "filecacheDataRangeReadTime"
+  val HYBRID_SCAN_SPLITS = "hybridScanSplits"
+  val ROW_GROUPS_IN_INPUT = "rowGroupsInInput"
+  val ROW_GROUPS_PRUNED_BY_STATS = "rowGroupsPrunedByStats"
+  val ROW_GROUPS_PRUNED_BY_DICT = "rowGroupsPrunedByDict"
+  val ROW_GROUPS_FETCHED = "rowGroupsFetched"
+  val HYBRID_SCAN_FOOTER_PARSE_TIME = "hybridScanFooterParseTime"
+  val HYBRID_SCAN_OUTPUT_FILTER_TIME = "hybridScanOutputFilterTime"
+  val HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ = "hybridScanGpuBusyHostBytesRead"
+  val HYBRID_SCAN_BYTES_REQUESTED = "hybridScanBytesRequested"
+  val HYBRID_SCAN_DEVICE_BYTES_READ = "hybridScanDeviceBytesRead"
+  val HYBRID_SCAN_NATIVE_HOST_BYTES_READ = "hybridScanNativeHostBytesRead"
   val DELETION_VECTOR_SCATTER_TIME = "deletionVectorScatterTime"
   val DELETION_VECTOR_SIZE = "deletionVectorSize"
   val CPU_BRIDGE_PROCESSING_TIME = "cpuBridgeProcessingTime"
@@ -148,6 +168,7 @@ object GpuMetric extends Logging {
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
   val GPU_OUTPUT_BATCH_BYTES = "gpuOutputBatchBytes"
+  val ICEBERG_DICT_FILTER_TIME = "icebergDictFilterTime"
   val ICEBERG_DV_BYTES = "icebergDvBytes"
   val ICEBERG_DV_POSITIONS = "icebergDvPositions"
   val ICEBERG_DV_LOAD_TIME = "icebergDvLoadTime"
@@ -199,6 +220,21 @@ object GpuMetric extends Logging {
   val DESCRIPTION_FILECACHE_DATA_RANGE_MISSES_SIZE = "cached data misses size"
   val DESCRIPTION_FILECACHE_FOOTER_READ_TIME = "cached footer read time"
   val DESCRIPTION_FILECACHE_DATA_RANGE_READ_TIME = "cached data read time"
+  val DESCRIPTION_HYBRID_SCAN_SPLITS = "hybrid scan splits read"
+  val DESCRIPTION_ROW_GROUPS_IN_INPUT = "hybrid scan row groups in input"
+  val DESCRIPTION_ROW_GROUPS_PRUNED_BY_STATS = "hybrid scan row groups pruned by statistics"
+  val DESCRIPTION_ROW_GROUPS_PRUNED_BY_DICT = "hybrid scan row groups pruned by dictionary"
+  val DESCRIPTION_ROW_GROUPS_FETCHED = "row groups fetched (Delta V2 and Iceberg not supported)"
+  val DESCRIPTION_HYBRID_SCAN_FOOTER_PARSE_TIME = "hybrid scan total footer (re-)parse time"
+  val DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME =
+    "hybrid scan output filter time (pushed filters only)"
+  val DESCRIPTION_HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ =
+    "hybrid scan bytes read to host instead of with GDS while the GPU was busy"
+  val DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED = "hybrid scan data bytes requested, counting a " +
+    "dictionary page fetched for pruning again with its column chunk"
+  val DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ =
+    "hybrid scan bytes read to device with GDS, including alignment padding"
+  val DESCRIPTION_HYBRID_SCAN_NATIVE_HOST_BYTES_READ = "hybrid scan bytes read to host with KvikIO"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
   val DESCRIPTION_GPU_OUTPUT_BATCH_BYTES = "decoded batch bytes"
@@ -213,6 +249,7 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
+  val DESCRIPTION_ICEBERG_DICT_FILTER_TIME = "Iceberg dictionary filter time"
   val DESCRIPTION_ICEBERG_DV_BYTES = "Iceberg deletion vector bytes loaded"
   val DESCRIPTION_ICEBERG_DV_POSITIONS = "Iceberg deletion vector positions loaded"
   val DESCRIPTION_ICEBERG_DV_LOAD_TIME = "Iceberg deletion vector load time"

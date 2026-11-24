@@ -15,41 +15,38 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["400","420"],"carryForward":"all"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
 import java.util.Optional
 
+import scala.util.Try
+
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantUtils}
 import com.nvidia.spark.Retryable
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, ShortType,
-  StringType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DecimalType, DoubleType,
+  FloatType, IntegerType, LongType, ShortType, StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
-class GpuVariantGetMeta(
+case class GpuVariantGetMeta(
     expr: VariantGet,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
+    override val conf: RapidsConf,
+    p: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends BinaryExprMeta[VariantGet](expr, conf, parent, rule) {
+  extends BinaryExprMeta[VariantGet](expr, conf, p, rule) {
+
+  override def isTimeZoneSupported: Boolean = true
+
+  protected def isCudfAvailable: Boolean = GpuVariantGet.isVariantCudfAvailable(expr.targetType)
 
   override def tagExprForGpu(): Unit = {
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {
@@ -58,21 +55,24 @@ class GpuVariantGetMeta(
 
     if (!GpuVariantGet.isSupportedTargetType(expr.targetType)) {
       willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported; " +
-        "supported types are tinyint, smallint, int, bigint, and string")
+        "supported types are boolean, tinyint, smallint, int, bigint, float, double, string, " +
+        "and decimal with nonnegative scale")
     }
 
     GpuVariantGet.parseSupportedPath(expr.path) match {
       case Some(_) =>
       case None =>
-        willNotWorkOnGpu("path must be a literal object-field path like $.field or $.nested.field")
+        willNotWorkOnGpu("path must be a literal object-field/array-index path like " +
+          "$.field, $.nested.field, or $.items[0].field")
     }
 
     if (expr.failOnError) {
       willNotWorkOnGpu("strict variant_get is not supported; use try_variant_get")
     }
 
-    if (!GpuVariantGet.isVariantCudfAvailable) {
-      willNotWorkOnGpu("cuDF Java was built without Variant extraction APIs")
+    if (!isCudfAvailable) {
+      willNotWorkOnGpu("cuDF Java was built without the required Variant extraction APIs " +
+        s"for ${expr.targetType.simpleString}")
     }
 
     if (!conf.isCpuBridgeEnabled) {
@@ -115,19 +115,29 @@ case class GpuVariantGet(
   }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    val variantStruct = input.getBase
-    require(variantStruct.getType == DType.STRUCT,
-      s"expected Variant struct input, got ${variantStruct.getType}")
-    require(variantStruct.getNumChildren == 2,
-      s"expected Variant struct with value and metadata children, got " +
-        s"${variantStruct.getNumChildren} children")
-
-    withResource(variantStruct.getChildColumnView(0)) { value =>
-      withResource(variantStruct.getChildColumnView(1)) { metadata =>
-        GpuVariantGet.withCudfVariantView(variantStruct, metadata, value) { cudfVariant =>
-          GpuVariantGet.extractVariantField(cudfVariant, path, dataType, input, fallbackBridge)
+    dataType match {
+      case target: DecimalType =>
+        GpuVariantExtraction.extractOrElse(input.getBase, path) { extraction =>
+          GpuVariantDecimal.decode(extraction, target)
+        } {
+          // Release extraction, decoding, and STRING-to-LIST temporaries before CPU conversion.
+          GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
         }
-      }
+      case _ =>
+        val variantStruct = input.getBase
+        require(variantStruct.getType == DType.STRUCT,
+          s"expected Variant struct input, got ${variantStruct.getType}")
+        require(variantStruct.getNumChildren == 2,
+          s"expected Variant struct with value and metadata children, got " +
+            s"${variantStruct.getNumChildren} children")
+
+        withResource(variantStruct.getChildColumnView(0)) { value =>
+          withResource(variantStruct.getChildColumnView(1)) { metadata =>
+            GpuVariantGet.withCudfVariantView(variantStruct, metadata, value) { cudfVariant =>
+              GpuVariantGet.extractVariantField(cudfVariant, path, dataType, input, fallbackBridge)
+            }
+          }
+        }
     }
   }
 
@@ -137,17 +147,37 @@ case class GpuVariantGet(
 }
 
 object GpuVariantGet {
-  private val ObjectFieldPath = """^\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$""".r
+  private val SupportedPath =
+    """^\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])+$""".r
+  private val ArrayIndex = """\[([0-9]+)\]""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
-    case ByteType | ShortType | IntegerType | LongType | StringType => true
+    case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType |
+        DoubleType | StringType => true
+    case target: DecimalType => GpuVariantDecimal.isSupportedTargetType(target)
     case _ => false
   }
 
-  def isVariantCudfAvailable: Boolean = {
+  def isVariantCudfAvailable(target: DataType): Boolean =
+    isVariantCudfAvailable(target, () => isVariantCudfAvailable,
+      () => GpuVariantExtraction.isAvailable)
+
+  def isVariantCudfAvailable: Boolean = hasLegacyApis(
+    name => Class.forName(name, true, Thread.currentThread().getContextClassLoader))
+
+  // The legacy probe intentionally retains its context-loader behavior. The decimal probe
+  // is cached against its provider loader, so a transient context loader cannot poison it.
+  private[rapids] def isVariantCudfAvailable(
+      target: DataType,
+      legacyAvailable: () => Boolean,
+      decimalAvailable: () => Boolean): Boolean = target match {
+    case _: DecimalType => decimalAvailable()
+    case _ => legacyAvailable()
+  }
+
+  private def hasLegacyApis(loadClass: String => Class[_]): Boolean = {
     try {
-      val variantUtils = Class.forName("ai.rapids.cudf.VariantUtils", true,
-        Thread.currentThread().getContextClassLoader)
+      val variantUtils = loadClass("ai.rapids.cudf.VariantUtils")
       variantUtils.getMethod("getVariantFieldValue", classOf[ColumnView], classOf[String])
       variantUtils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
       true
@@ -164,14 +194,10 @@ object GpuVariantGet {
       fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
     withResource(VariantUtils.getVariantFieldValue(cudfVariant, path)) { rawValue =>
       dt match {
-        case StringType =>
-          withResource(VariantUtils.castVariantValue(rawValue, DType.STRING)) { decoded =>
-            if (allRowsCovered(rawValue, Seq(decoded))) {
-              decoded.incRefCount()
-            } else {
-              evaluateOnCpu(input, fallbackBridge)
-            }
-          }
+        case BooleanType => decodeExactType(rawValue, DType.BOOL8, input, fallbackBridge)
+        case FloatType => decodeExactType(rawValue, DType.FLOAT32, input, fallbackBridge)
+        case DoubleType => decodeExactType(rawValue, DType.FLOAT64, input, fallbackBridge)
+        case StringType => decodeExactType(rawValue, DType.STRING, input, fallbackBridge)
         case ByteType | ShortType | IntegerType | LongType =>
           val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
             sourceType => VariantUtils.castVariantValue(rawValue, sourceType)
@@ -187,6 +213,20 @@ object GpuVariantGet {
           }
         case other =>
           throw new IllegalArgumentException(s"unsupported variant target type: $other")
+      }
+    }
+  }
+
+  private def decodeExactType(
+      rawValue: ColumnView,
+      targetType: DType,
+      input: GpuColumnVector,
+      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
+    withResource(VariantUtils.castVariantValue(rawValue, targetType)) { decoded =>
+      if (allRowsCovered(rawValue, Seq(decoded))) {
+        decoded.incRefCount()
+      } else {
+        evaluateOnCpu(input, fallbackBridge)
       }
     }
   }
@@ -232,21 +272,23 @@ object GpuVariantGet {
       minValue: Long,
       maxValue: Long,
       targetType: DType): ColumnVector = {
-    withResource(Scalar.fromLong(minValue)) { min =>
-      withResource(input.greaterOrEqualTo(min)) { aboveMin =>
-        withResource(Scalar.fromLong(maxValue)) { max =>
-          withResource(input.lessOrEqualTo(max)) { belowMax =>
-            withResource(aboveMin.and(belowMax)) { inRange =>
-              withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
-                withResource(inRange.ifElse(input, nullValue)) { masked =>
-                  masked.castTo(targetType)
-                }
-              }
-            }
-          }
-        }
+    val aboveMin = withResource(Scalar.fromLong(minValue)) { min =>
+      input.greaterOrEqualTo(min)
+    }
+    val belowMax = closeOnExcept(aboveMin) { _ =>
+      withResource(Scalar.fromLong(maxValue)) { max =>
+        input.lessOrEqualTo(max)
       }
     }
+    val inRange = withResource(Seq(aboveMin, belowMax)) { _ =>
+      aboveMin.and(belowMax)
+    }
+    val masked = withResource(inRange) { inRange =>
+      withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
+        inRange.ifElse(input, nullValue)
+      }
+    }
+    withResource(masked)(_.castTo(targetType))
   }
 
   private def evaluateOnCpu(
@@ -260,7 +302,7 @@ object GpuVariantGet {
     }
   }
 
-  private def withCudfVariantView[T](
+  private[rapids] def withCudfVariantView[T](
       variantStruct: ColumnView,
       metadata: ColumnView,
       value: ColumnView)(f: ColumnView => T): T = {
@@ -313,7 +355,9 @@ object GpuVariantGet {
   }
 
   def parseSupportedPath(path: String): Option[String] = {
-    if (ObjectFieldPath.pattern.matcher(path).matches) {
+    val validIndexes =
+      ArrayIndex.findAllMatchIn(path).forall(index => Try(index.group(1).toInt).isSuccess)
+    if (SupportedPath.pattern.matcher(path).matches && validIndexes) {
       Some(path)
     } else {
       None

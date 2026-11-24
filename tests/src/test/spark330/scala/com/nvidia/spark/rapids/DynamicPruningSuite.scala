@@ -15,26 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
+{"spark":["330","350"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
@@ -96,11 +77,11 @@ class DynamicPruningSuite
       case BroadcastQueryStageExec(id, plan, _canonicalized) =>
         val newPlan = replaceSubquery(plan)
         BroadcastQueryStageExec(id, newPlan, _canonicalized)
-      case g @ GpuFileSourceScanExec(r, o, rs, pf, obs, oncb, df, ti, dbs, quif, rps) =>
+      case g @ GpuFileSourceScanExec(r, o, rs, pf, obs, oncb, df, ti, dbs, quif, rps, qufn) =>
         val newPartitionFilters = updatePartitionFilters(pf)
         val rc = g.rapidsConf
         GpuFileSourceScanExec(r, o, rs, newPartitionFilters,
-          obs, oncb, df, ti, dbs, quif, rps)(rc)
+          obs, oncb, df, ti, dbs, quif, rps, qufn)(rc, g.partitionPlanningScan)
       case FileSourceScanExec(r, o, rs, pf, obs, oncb, df, ti, dbs) =>
         val newPartitionFilters = updatePartitionFilters(pf)
         FileSourceScanExec(r, o, rs, newPartitionFilters, obs, oncb, df, ti, dbs)
@@ -136,7 +117,6 @@ class DynamicPruningSuite
 
       val filter = spark.sql("select filter from dim").first()(0)
 
-      ExecutionPlanCaptureCallback.startCapture()
       val df = spark.sql(s"""
           SELECT fact.key, sum(fact.value)
           FROM fact
@@ -164,7 +144,6 @@ class DynamicPruningSuite
 
       val filter = spark.sql("select filter from dim").first()(0)
 
-      ExecutionPlanCaptureCallback.startCapture()
       val df = spark.sql(s"""
           SELECT fact.key, sum(fact.value)
           FROM fact

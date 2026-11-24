@@ -21,23 +21,6 @@ import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuBuildSide, GpuEx
 import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, FloatType, IntegerType,
   LongType, ShortType}
 
-sealed trait BuildStatus
-
-object BuildStatus {
-  case object Cold extends BuildStatus
-  case object Building extends BuildStatus
-  case object Ready extends BuildStatus
-  case object Evicted extends BuildStatus
-}
-
-private[execution] case class BuildDemand(probeCount: Long, probeRows: Long)
-
-private[execution] object BuildDemand {
-  val Empty: BuildDemand = BuildDemand(0L, 0L)
-}
-
-/** Identifies one executor-local run of a join to track build demands. */
-case class HashBuildDemandId(joinId: Int, stageId: Int, stageAttempt: Int)
 
 /**
  * Selects the physical build side for one probe. FIXED or SMALLEST selection modes retain their
@@ -61,11 +44,11 @@ case class HashBuildDemandId(joinId: Int, stageId: Int, stageAttempt: Int)
  * M and sum(S_i) via `probeCount` and `probeRows` respectively, and use a rent-or-buy
  * heuristic. For a single batch, we compute the additional cost of renting instead of
  * using an already-built broadcast table as:
- *
+ * {{{
  *   rent_i = onDemand_i - reuse_i
  *          = (S_i + q * B) - q * S_i
  *          = (1 - q) * S_i + q * B
- *
+ * }}}
  * When the rent exceeds the cost of buying, i.e. sum(rent_i) >= B, we will switch from
  * doing onDemand builds to building and caching the broadcast side.
  */

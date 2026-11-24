@@ -41,6 +41,8 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_RE
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
 import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
+import org.apache.spark.sql.rapids.execution.GpuDriverlessBroadcastHashJoinExec
+import org.apache.spark.sql.rapids.execution.PCBSNullSafeRowToColumnarExec
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -261,16 +263,19 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   }
 
   /**
-   * Fixes up instances of HostColumnarToGpu that are operating on nested types.
+   * Fixes up instances of HostColumnarToGpu that are operating on nested physical types.
    * There are no batch methods to access nested types in Spark's ColumnVector, and as such
    * HostColumnarToGpu does not support nested types due to the performance problem. If there's
    * nested types involved, use a CPU columnar to row transition followed by a GPU row to
    * columnar transition which is a more optimized code path for these types.
+   * Spark exposes VariantType as a logical atomic type, but its physical columnar representation
+   * is a struct containing value and metadata binary children, so it must take the same path.
    * This is done as a fixup pass since there are earlier transition optimizations that are
    * looking for HostColumnarToGpu when optimizing transitions.
    */
   def fixupHostColumnarTransitions(plan: SparkPlan): SparkPlan = plan match {
-    case HostColumnarToGpu(child, goal) if DataTypeUtils.hasNestedTypes(child.schema) =>
+    case HostColumnarToGpu(child, goal) if DataTypeUtils.hasNestedTypes(child.schema) ||
+        child.schema.fields.exists(field => GpuColumnVector.isVariantType(field.dataType)) =>
       GpuRowToColumnarExec(ColumnarToRowExec(fixupHostColumnarTransitions(child)), goal)
     case p => p.withNewChildren(p.children.map(fixupHostColumnarTransitions))
   }
@@ -412,7 +417,8 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   // InputFileBlockStart, or InputFileBlockLength when we use a Parquet read because
   // we can't support the coalesce file reader optimization when this is used.
   private def updateScansForInputAndOrder(plan: SparkPlan,
-      disableUntilInput: Boolean = false): SparkPlan = {
+      disableUntilInput: Boolean = false,
+      nameUntilInput: Boolean = false): SparkPlan = {
     plan match {
       case batchScan: GpuBatchScanExec =>
         if (disableUntilInput || disableScanUntilInput(batchScan)) {
@@ -427,14 +433,22 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         }
       case fileSourceScan: GpuFileSourceScanExec =>
         if ((disableUntilInput || disableScanUntilInput(fileSourceScan))) {
-          fileSourceScan.copy(queryUsesInputFile = true)(fileSourceScan.rapidsConf)
+          // Only input_file_name() builds a string column that can overflow, so only it
+          // needs the scan to slice big batches.
+          val usesName = nameUntilInput ||
+            InputFileBlockRule.hasInputFileNameExpression(fileSourceScan)
+          fileSourceScan.copy(queryUsesInputFile = true, queryUsesInputFileName = usesName)(
+            fileSourceScan.rapidsConf, fileSourceScan.partitionPlanningScan)
         } else {
           fileSourceScan
         }
       case p =>
-        val planDisableUntilInput = disableScanUntilInput(p) && hasDirectLineToInput(p)
+        val directLine = hasDirectLineToInput(p)
+        val planDisableUntilInput = disableScanUntilInput(p) && directLine
+        val planNameUntilInput = InputFileBlockRule.hasInputFileNameExpression(p) && directLine
         p.withNewChildren(p.children.map(c => {
-          updateScansForInputAndOrder(c, planDisableUntilInput || disableUntilInput)
+          updateScansForInputAndOrder(c, planDisableUntilInput || disableUntilInput,
+            planNameUntilInput || nameUntilInput)
         }))
     }
   }
@@ -465,7 +479,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
 
     val prunedPartSchema = Some(StructType(neededPartIndexes.map(fss.relation.partitionSchema)))
-    fss.copy(requiredPartitionSchema = prunedPartSchema)(fss.rapidsConf)
+    fss.copy(requiredPartitionSchema = prunedPartSchema)(fss.rapidsConf, fss.partitionPlanningScan)
   }
 
   // This tries to prune the partition schema for GpuFileSourceScanExec by leveraging
@@ -718,6 +732,12 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
     val isAdaptiveEnabled = plan.conf.adaptiveExecutionEnabled
     plan match {
+      case reused: ReusedExchangeExec if conf.isDriverlessBroadcastEnabled =>
+        // Reuse is a leaf wrapper; validate the actual exchange and its subtree.
+        assertIsOnTheGpu(reused.child, conf)
+      case _: WholeStageCodegenExec | _: InputAdapter if conf.isDriverlessBroadcastEnabled =>
+        // Materialized reused stages can wrap permitted CPU nodes in codegen containers.
+        // Their children still undergo the GPU and allowed-CPU checks below.
       case _: BroadcastExchangeLike if isAdaptiveEnabled =>
         // broadcasts are left on CPU for now when AQE is enabled
       case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec
@@ -974,6 +994,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         if (rapidsConf.shuffledHashJoinOptimizeShuffle || rapidsConf.useShuffledSymmetricHashJoin) {
           updatedPlan = shuffledHashJoinOptimizeShuffle(updatedPlan)
         }
+        updatedPlan = GpuDriverlessBroadcastHashJoinExec.rewrite(updatedPlan, rapidsConf)
         if (rapidsConf.exportColumnarRdd) {
           updatedPlan = detectAndTagFinalColumnarOutput(updatedPlan)
         }
@@ -1013,7 +1034,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         updatedPlan
       }
     } else {
-      plan
+      PCBSNullSafeRowToColumnarExec.replaceUnsupportedTransition(plan)
     }
     }(sparkPlan)
   }

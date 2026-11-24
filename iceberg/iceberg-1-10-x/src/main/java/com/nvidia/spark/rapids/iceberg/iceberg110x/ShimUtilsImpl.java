@@ -20,18 +20,22 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
-import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.iceberg.Iceberg19PlusShimUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.ColumnAction;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
+import org.apache.iceberg.schema.SchemaWithPartnerVisitor;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
@@ -42,7 +46,14 @@ import java.util.HashMap;
 import java.util.Map;
 
 /** Iceberg 1.10.x shim: uses {@code SparkUtil::internalToSpark} and a cache-aware footer path. */
-public class ShimUtilsImpl implements IcebergShimUtils {
+public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
+    private static final ParquetUnshader PARQUET_UNSHADER = new ParquetUnshaderImpl();
+
+    @Override
+    public ParquetUnshader getParquetUnshader() {
+        return PARQUET_UNSHADER;
+    }
+
     @Override
     public int formatVersion(Table table) {
         return TableUtil.formatVersion(table);
@@ -51,11 +62,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
-    }
-
-    @Override
-    public boolean isDeletionVector(DeleteFile deleteFile) {
-        return deleteFile.format() == FileFormat.PUFFIN;
     }
 
     @Override
@@ -106,5 +112,11 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             RapidsConf rapidsConf,
             boolean queryUsesInputFile) {
         return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
+    }
+
+    @Override
+    public SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
+            Map<Integer, ?> idToConstant) {
+        return new ActionBuildingVisitor(idToConstant);
     }
 }

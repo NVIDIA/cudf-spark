@@ -20,7 +20,7 @@ import java.io.{File, FileNotFoundException}
 
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.ql.exec.vector.StructColumnVector
-import org.apache.orc.{OrcFile, TypeDescription}
+import org.apache.orc.{CompressionKind, OrcFile, OrcProto, TypeDescription}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.execution.FileSourceScanExec
@@ -33,6 +33,29 @@ import org.apache.spark.sql.types.{DateType, IntegerType, LongType, StringType, 
 class OrcScanSuite extends SparkQueryCompareTestSuite {
 
   private val fileSplitsOrc = frameFromOrc("file-splits.orc")
+
+  test("ORC compression size for combining") {
+    assertResult(0)(
+      OrcCommonFunctions.compressionSizeForCombining(CompressionKind.NONE, 64 * 1024))
+    assertResult(0)(
+      OrcCommonFunctions.compressionSizeForCombining(CompressionKind.NONE, 256 * 1024))
+    assertResult(4096)(
+      OrcCommonFunctions.compressionSizeForCombining(CompressionKind.ZLIB, 4096))
+  }
+
+  test("ORC synthetic PostScript clears stripe statistics length") {
+    val sourcePostscript = OrcProto.PostScript.newBuilder()
+      .setFooterLength(1)
+      .setMetadataLength(2)
+      .setStripeStatisticsLength(3)
+      .build()
+
+    val postscript = OrcCommonFunctions.buildPostscript(sourcePostscript, 42)
+
+    assertResult(42)(postscript.getFooterLength)
+    assertResult(0)(postscript.getMetadataLength)
+    assert(!postscript.hasStripeStatisticsLength)
+  }
 
   testSparkResultsAreEqual("Test ORC chunks", fileSplitsOrc,
     new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key, "2048")) {
@@ -188,6 +211,42 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
 
     assertResult(Seq("0", "1"))(cpuResult)
     assertResult(cpuResult)(gpuResult)
+  }
+
+  test("ORC coalescing reader caps batches when no requested column is in the files") {
+    val schema = new StructType().add("b", LongType).add("c", LongType)
+    val conf = new SparkConf()
+      .set(SQLConf.USE_V1_SOURCE_LIST.key, "orc")
+      .set(RapidsConf.ORC_READER_TYPE.key, RapidsReaderType.COALESCING.toString)
+      .set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "2000")
+      .set("spark.sql.adaptive.enabled", "false")
+      .set("spark.sql.files.maxPartitionBytes", "1g")
+      .set("spark.sql.files.minPartitionNum", "1")
+    withTempPath { dir =>
+      val paths = (0 until 3).map(i => s"${dir.getCanonicalPath}/f$i")
+      withCpuSparkSession { spark =>
+        paths.foreach { p =>
+          spark.range(0, 3000, 1, 1).selectExpr("CAST(0 AS INT) AS a").write.orc(p)
+        }
+      }
+      val expected = withCpuSparkSession(
+        _.read.schema(schema).orc(paths: _*).collect().map(_.toString).toSeq, conf)
+      withGpuSparkSession({ spark =>
+        val df = spark.read.schema(schema).orc(paths: _*)
+        val scan = df.queryExecution.executedPlan.collect {
+          case scan: GpuFileSourceScanExec => scan
+        }.head
+        val batchRows = scan.executeColumnar().mapPartitions(
+          _.map { b => try b.numRows() finally b.close() }).collect()
+        val rapidsConf = new RapidsConf(spark.sessionState.conf)
+        val cap = GpuNullBatchIterator.maxRows(schema, rapidsConf.maxReadBatchSizeRows,
+          rapidsConf.gpuTargetBatchSizeBytes)
+        assert(cap < 3000, s"the test needs a cap below the file size, got $cap")
+        assert(batchRows.sum == 9000L)
+        assert(batchRows.forall(_ <= cap), s"batches over the cap of $cap: ${batchRows.toSeq}")
+        assert(df.collect().map(_.toString).toSeq == expected)
+      }, conf)
+    }
   }
 
   private def causedByFileNotFound(t: Throwable): Boolean =

@@ -35,6 +35,23 @@ private[rapids] trait RapidsConfResourceEntries {
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(0)
 
+  val PAGEABLE_POOL_SIZE = conf("spark.cudf.memory.pageablePool.size")
+    .doc("Size in bytes of a pre-touched pageable host memory pool used for non-pinned " +
+      "allocations and when the pinned pool is exhausted. Set to 0 to disable; allocations " +
+      "then use raw host memory.")
+    .startupOnly()
+    .internal()
+    .bytesConf(ByteUnit.BYTE)
+    .checkValue(_ >= 0, "Pageable pool size must be non-negative")
+    .createWithDefault(0)
+
+  val PAGEABLE_POOL_PRETOUCH_THREADS = conf("spark.cudf.memory.pageablePool.pretouchThreads")
+    .doc("Number of worker threads used to pre-touch the pageable pool at startup.")
+    .startupOnly()
+    .internal()
+    .integerConf
+    .createWithDefault(16)
+
   val PINNED_POOL_SET_CUIO_DEFAULT = conf("spark.cudf.memory.pinnedPool.setCuioDefault")
     .doc("If set to true, the pinned pool configured for the plugin will be shared with " +
       "cuIO for small pinned allocations.")
@@ -242,7 +259,8 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.cudf.gpu.coreDump.pipePattern")
     .doc("The fraction of total GPU memory that limits the maximum size of the RMM pool. " +
         s"The value must be greater than or equal to the setting for $RMM_ALLOC_FRACTION. " +
         "Note that this limit will be reduced by the reserve memory configured in " +
-        s"$RMM_ALLOC_RESERVE_KEY.")
+        s"$RMM_ALLOC_RESERVE_KEY, and by the UCX shuffle's GPU bounce buffers when the RMM " +
+        "pool is ASYNC.")
     .startupOnly()
     .commonlyUsed()
     .doubleConf
@@ -260,7 +278,9 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.cudf.gpu.coreDump.pipePattern")
 
   val RMM_ALLOC_RESERVE = conf(RMM_ALLOC_RESERVE_KEY)
       .doc("The amount of GPU memory that should remain unallocated by RMM and left for " +
-          "system use such as memory needed for kernels and kernel launches.")
+          "system use such as memory needed for kernels and kernel launches. When " +
+          "spark.cudf.shuffle.mode is UCX and spark.cudf.memory.gpu.pool is ASYNC, the UCX " +
+          "shuffle's GPU bounce buffers are reserved additionally.")
       .startupOnly()
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(ByteUnit.MiB.toBytes(640))
@@ -382,6 +402,71 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.cudf.gpu.coreDump.pipePattern")
     .bytesConf(ByteUnit.BYTE)
     .checkValue(v => v > 0, "Batch size must be positive")
     .createWithDefault(1 * 1024 * 1024 * 1024) // 1 GiB is the default
+
+  val HISTORY_METRICS_PROVIDER = conf("spark.cudf.sql.history.metrics.provider")
+    .doc("Selects the driver-side history metrics provider by name. The default 'none' uses " +
+      "the built-in no-op store. The local SQLite provider is bundled; other providers " +
+      "must be present on the driver classpath.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .startupOnly()
+    .stringConf
+    .checkValue(v => v.trim.nonEmpty, "History metrics provider name must not be empty")
+    .createWithDefault("none")
+
+  val HISTORY_PLANNING_TIMEOUT_MS = conf("spark.cudf.sql.history.planningTimeoutMillis")
+    .doc("Budget for one history lookup on the query planning path. A lookup that does not " +
+      "answer within it leaves the static planning decision in place.")
+    .internal()
+    .startupOnly()
+    .integerConf
+    .checkValue(v => v > 0, "History planning timeout must be positive")
+    .createWithDefault(100)
+
+  val HISTORY_DECLARE_TIMEOUT_MS = conf("spark.cudf.sql.history.declareTimeoutMillis")
+    .doc("Budget for declaring each history metric family to the store, once per store. A " +
+      "declaration that does not answer within it leaves the static planning decision in place.")
+    .internal()
+    .startupOnly()
+    .integerConf
+    .checkValue(v => v > 0, "History declare timeout must be positive")
+    .createWithDefault(5000)
+
+  val HISTORY_SCAN_SPLIT_ENABLED = conf("spark.cudf.sql.history.scanSplit.enabled")
+    .doc("When a history metrics provider is set and this is true, sizes scan splits from the " +
+      "decode-expansion ratio recorded by earlier runs. Off by default: the ratio is recorded " +
+      "per table, so it does not account for the columns a scan reads, the filters it pushes " +
+      "down or dynamic partition pruning. When false, scan splits keep their static size and " +
+      "no ratio is recorded.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
+
+  val HISTORY_SCAN_SPLIT_MAX_AGE_DAYS = conf("spark.cudf.sql.history.scanSplit.maxAgeDays")
+    .doc("How old, in days, the last recorded decode-expansion ratio of a table may be and " +
+      "still size its scan splits. An older ratio is ignored and the scan keeps its static " +
+      "split. Values above the history store's retention, 14 days, have the same effect as 14. " +
+      "This only changes the lookup; it does not change what is stored.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .integerConf
+    .checkValue(v => v > 0, "Scan split maximum age must be positive")
+    .createWithDefault(7)
+
+  val HISTORY_SCAN_SPLIT_MAX_BYTES = conf("spark.cudf.sql.history.scanSplit.maxBytes")
+    .doc("Upper bound of a scan split sized from history. The split is also kept at or below " +
+      "the listed bytes divided by the minimum partition count, to retain parallelism.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .bytesConf(ByteUnit.BYTE)
+    .checkValue(v => v > 0, "Scan split maximum must be positive")
+    .createWithDefault(4L * 1024 * 1024 * 1024)
+
+  val HISTORY_SCAN_SPLIT_MIN_BYTES = conf("spark.cudf.sql.history.scanSplit.minBytes")
+    .doc("Lower bound of a scan split sized from history. When the listed bytes divided by the " +
+      "minimum partition count is below it, the scan keeps its static split.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .bytesConf(ByteUnit.BYTE)
+    .checkValue(v => v > 0, "Scan split minimum must be positive")
+    .createWithDefault(64L * 1024 * 1024)
 
   val CHUNKED_READER = conf("spark.cudf.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +

@@ -15,8 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution.python.shims
 
@@ -34,7 +33,9 @@ object WritePythonUDFUtils {
       funcs: Seq[(ChainedPythonFunctions, Long)],
       argOffsets: Array[Array[Int]],
       argNames: Option[Array[Array[Option[String]]]] = None,
-      profiler: Option[String] = None): Unit = {
+      profiler: Option[String] = None,
+      udfLogMaxEntries: Int = 0,
+      udfLogLevel: String = "WARNING"): Unit = {
     if (argNames.isDefined) {
       val argMetas = argOffsets.zip(argNames.get).map { case (idxs, names) =>
         idxs.zip(names).map { case (idx, name) =>

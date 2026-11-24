@@ -18,7 +18,10 @@ import uuid
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from conftest import is_iceberg_rest_catalog
 from data_gen import *
-from iceberg import get_full_table_name, rapids_reader_types, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list, iceberg_unsupported_mark
+from iceberg import (
+    iceberg_format_versions, iceberg_read_enabled_conf, iceberg_read_format_versions,
+    iceberg_table_properties_sql, get_full_table_name, rapids_reader_types, create_iceberg_table,
+    iceberg_base_table_cols, iceberg_gens_list, iceberg_unsupported_mark)
 from marks import iceberg, ignore_order
 from spark_session import with_cpu_session
 
@@ -40,7 +43,8 @@ pytestmark = [
     pytest.param("SELECT _c0, _c2, _c6 FROM {table_name}", id="projection"),
     pytest.param("SELECT _c7, COUNT(*) as cnt, SUM(_c2) as sum_c2 FROM {table_name} GROUP BY _c7", id="aggregation"),
 ])
-def test_iceberg_view(spark_tmp_table_factory, reader_type, view_sql):
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_view(format_version, spark_tmp_table_factory, reader_type, view_sql):
     """Test reading from an Iceberg view."""
 
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -48,7 +52,7 @@ def test_iceberg_view(spark_tmp_table_factory, reader_type, view_sql):
     view_name = "iceberg_view_" + view_uuid
 
     # Create an Iceberg table, and insert data into it
-    create_iceberg_table(table_name)
+    create_iceberg_table(table_name, format_version=format_version)
     def insert_data(spark):
         df = gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
         df.writeTo(table_name).append()
@@ -61,4 +65,4 @@ def test_iceberg_view(spark_tmp_table_factory, reader_type, view_sql):
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT * FROM {view_name}"),
-        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})

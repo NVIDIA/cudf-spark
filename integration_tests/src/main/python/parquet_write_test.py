@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from data_gen import *
 from enum import Enum
 from marks import *
+from parquet_test_utils import assert_parquet_files_use_codec
 from pyspark.sql.types import *
 from spark_session import *
 
@@ -92,6 +93,36 @@ parquet_map_gens = parquet_map_gens_sample + [
     MapGen(StructGen([['child0', StringGen(nullable=True)]], nullable=False), StringGen())]
 parquet_write_gens_list = [[binary_gen], parquet_basic_gen, decimal_gens] +  [ [single_gen] for single_gen in parquet_struct_gen + parquet_array_gen + parquet_map_gens]
 parquet_ts_write_options = ['INT96', 'TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']
+
+def _spark_has_save_as_table_overwrite_fix():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or version >= (4, 2, 1))
+
+
+@pytest.mark.skipif(not _spark_has_save_as_table_overwrite_fix(),
+                    reason="Tests saveAsTable overwrite in Spark maintenance releases")
+def test_save_as_table_overwrite(spark_tmp_table_factory):
+    table_name = spark_tmp_table_factory.get()
+    with_cpu_session(
+        lambda spark: spark.range(3).write.format("parquet").saveAsTable(table_name))
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCaptureWithWritePlans()
+    try:
+        with_gpu_session(
+            lambda spark: spark.range(3, 5).write.mode("overwrite")
+                .format("parquet").saveAsTable(table_name))
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuDataWritingCommandExec") for plan in plans)
+    finally:
+        callback.endCapture()
+
+    with_cpu_session(
+        lambda spark: assert_equal(
+            [row.id for row in spark.table(table_name).orderBy("id").collect()],
+            [3, 4]))
 
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
 @pytest.mark.parametrize('parquet_gens', parquet_write_gens_list, ids=idfn)
@@ -260,7 +291,7 @@ def test_all_null_int96(spark_tmp_path):
         data_path,
         conf=confs)
 
-parquet_write_compress_options = ['none', 'uncompressed', 'snappy']
+parquet_write_compress_options = ['none', 'uncompressed', 'snappy', 'gzip']
 # zstd is available in spark 3.2.0 and later.
 if not is_before_spark_320():
     parquet_write_compress_options.append('zstd')
@@ -269,11 +300,20 @@ if not is_before_spark_320():
 def test_compress_write_round_trip(spark_tmp_path, compress):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     all_confs = {'spark.sql.parquet.compression.codec': compress}
+    def write_data(spark, path):
+        # The usual small input may leave GZIP chunks uncompressed in the footer.
+        data = spark.range(20000).selectExpr("id % 100 AS a", "id % 10 AS b") \
+            if compress == 'gzip' else binary_op_df(spark, long_gen)
+        data.coalesce(1).write.parquet(path)
+
     assert_gpu_and_cpu_writes_are_equal_collect(
-            lambda spark, path : binary_op_df(spark, long_gen).coalesce(1).write.parquet(path),
+            write_data,
             lambda spark, path : spark.read.parquet(path),
             data_path,
             conf=all_confs)
+    if compress == 'gzip':
+        with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+            spark, spark.read.parquet(data_path + '/GPU'), 'GZIP'), conf=all_confs)
 
 @pytest.mark.order(2)
 @pytest.mark.parametrize('parquet_gens', parquet_write_gens_list, ids=idfn)
@@ -351,6 +391,38 @@ def test_ts_write_twice_fails_exception(spark_tmp_path, spark_tmp_table_factory)
     with_gpu_session(
             lambda spark : writeParquetNoOverwriteCatchException(spark, unary_op_df(spark, gen), data_path, table_name))
 
+# Spark 4.2.1 (SPARK-51830) keeps a non-numeric value of a numeric partition column when
+# partition column validation is disabled, instead of failing the insert.
+@pytest.mark.skipif(not is_spark_421_or_later(), reason='SPARK-51830 is in Spark 4.2.1+')
+@pytest.mark.parametrize('insert', ['dynamic', 'static'])
+def test_insert_with_non_numeric_partition_value(spark_tmp_path, spark_tmp_table_factory, insert):
+    table_name = spark_tmp_table_factory.get()
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    conf = {'spark.sql.legacy.skipTypeValidationOnAlterPartition': 'true',
+            'spark.sql.sources.validatePartitionColumns': 'false',
+            # Keeps the non-numeric static partition value out of an ANSI cast
+            'spark.sql.storeAssignmentPolicy': 'LEGACY'}
+    def create(spark):
+        spark.sql(f'CREATE TABLE {table_name} (c1 INT, p1 INT) USING parquet '
+                  f"PARTITIONED BY (p1) LOCATION '{data_path}'")
+        spark.sql(f"ALTER TABLE {table_name} ADD PARTITION (p1 = 'legacy_value')")
+    with_cpu_session(create, conf=conf)
+    if insert == 'dynamic':
+        # Collecting the custom partition locations computes the path of every existing partition
+        sql = f'INSERT INTO {table_name} SELECT id, id FROM range(1, 2)'
+        expected_partitions = ['p1=1', 'p1=legacy_value']
+    else:
+        # An empty insert into a static partition registers it from its path fragment
+        sql = f"INSERT INTO {table_name} PARTITION (p1 = 'legacy_value') SELECT id FROM range(0)"
+        expected_partitions = ['p1=legacy_value']
+    with_gpu_session(lambda spark: spark.sql(sql).collect(), conf=conf)
+    partitions = with_cpu_session(
+        lambda spark: spark.sql(f'SHOW PARTITIONS {table_name}').collect(), conf=conf)
+    assert sorted(r[0] for r in partitions) == expected_partitions
+    if insert == 'dynamic':
+        rows = with_cpu_session(lambda spark: spark.read.parquet(data_path + '/p1=1').collect())
+        assert [r['c1'] for r in rows] == [1]
+
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 @pytest.mark.parametrize('write_options', [{"parquet.encryption.footer.key": "k1"},
                                            {"parquet.encryption.column.keys": "k2:a"},
@@ -406,20 +478,14 @@ def test_parquet_write_encryption_hadoopconfig_fallback(spark_tmp_path, write_op
     finally:
         with_cpu_session(reset_hadoop_confs)
 
-@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
-# note that others should fail as well but requires you to load the libraries for them
-# 'lzo', 'brotli', 'lz4', 'zstd' should all fallback
-@pytest.mark.parametrize('codec', ['gzip'])
-def test_parquet_write_compression_fallback(spark_tmp_path, codec, spark_tmp_table_factory):
-    gen = IntegerGen()
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    all_confs={'spark.sql.parquet.compression.codec': codec}
-    assert_gpu_fallback_write(
-            lambda spark, path: unary_op_df(spark, gen).coalesce(1).write.format("parquet").mode('overwrite').option("path", path).saveAsTable(spark_tmp_table_factory.get()),
-            lambda spark, path: spark.read.parquet(path),
-            data_path,
-            'DataWritingCommandExec',
-            conf=all_confs)
+def test_parquet_write_gzip_save_as_table(spark_tmp_table_factory):
+    _, gpu_table = assert_gpu_and_cpu_save_as_table_are_equal_collect(
+        spark_tmp_table_factory,
+        lambda spark, table: spark.range(20000).selectExpr("id % 100 AS value").coalesce(1).write
+            .format("parquet").saveAsTable(table),
+        conf={'spark.sql.parquet.compression.codec': 'gzip'})
+    with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+        spark, spark.table(gpu_table), 'GZIP'))
 
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 def test_parquet_writeLegacyFormat_fallback(spark_tmp_path, spark_tmp_table_factory):

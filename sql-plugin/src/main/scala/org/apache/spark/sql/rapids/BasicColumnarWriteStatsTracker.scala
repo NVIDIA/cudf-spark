@@ -192,7 +192,7 @@ class BasicColumnarWriteTaskStatsTracker(
 
 
 /**
- * Simple [[ColumnarWriteJobStatsTracker]] implementation that's serializable,
+ * Simple `ColumnarWriteJobStatsTracker` implementation that's serializable,
  * capable of instantiating [[BasicColumnarWriteTaskStatsTracker]] on executors and processing the
  * `BasicColumnarWriteTaskStats` they produce by aggregating the metrics and posting them
  * as DriverMetricUpdates.

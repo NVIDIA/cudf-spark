@@ -482,6 +482,13 @@ class SpillableHostBuffer(handle: SpillableHostBufferHandle,
   }
 
   /**
+   * Copy this buffer's bytes into `dst` at `dstOffset` without allocating.
+   */
+  def materializeInto(dst: HostMemoryBuffer, dstOffset: Long): Unit = {
+    handle.materializeInto(dst, dstOffset)
+  }
+
+  /**
    * Get the host buffer for data part only, which is sliced to the range of [0, length).
    * Since a spillable buffer may have larger space than the actual data size.
    */

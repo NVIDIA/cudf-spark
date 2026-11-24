@@ -29,7 +29,7 @@ import java.util.Objects;
 import java.util.OptionalLong;
 
 /**
- * Implementation of {@link RapidsInputFile} using the Hadoop file system.
+ * Implementation of {@code RapidsInputFile} using the Hadoop file system.
  * <br/>
  * This class provides methods to get the length of the file and to open a seekable input stream
  * for reading the file.

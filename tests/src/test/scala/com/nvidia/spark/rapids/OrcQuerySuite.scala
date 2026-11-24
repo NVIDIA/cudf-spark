@@ -216,6 +216,51 @@ class OrcQuerySuite extends SparkQueryCompareTestSuite {
   }
 
   Seq("orc", "").foreach { v1List =>
+    Seq(false, true).foreach { prolepticGregorian =>
+      test(s"ORC date write opt-in uses GPU for modern top-level and nested dates, " +
+          s"source list is ($v1List), proleptic=$prolepticGregorian") {
+        val sparkConf = new SparkConf()
+          .set("spark.sql.sources.useV1SourceList", v1List)
+          .set(RapidsConf.ENABLE_ORC_DATE_WRITE.key, "true")
+        val dateColumns = Seq(
+          "CASE WHEN id = 0 THEN CAST('1582-10-15' AS DATE) " +
+            "WHEN id = 1 THEN CAST('2024-05-06' AS DATE) " +
+            "ELSE CAST(NULL AS DATE) END AS top_date",
+          "named_struct('date', CAST('2024-05-06' AS DATE)) AS struct_date",
+          "array(CAST('1582-10-15' AS DATE), CAST(NULL AS DATE)) AS array_date")
+
+        withTempPath { cpuPath =>
+          withTempPath { gpuPath =>
+            withCpuSparkSession({ spark =>
+              spark.range(3).selectExpr(dateColumns: _*).coalesce(1).write.mode("overwrite")
+                .option(OrcConf.PROLEPTIC_GREGORIAN.getAttribute,
+                  prolepticGregorian.toString)
+                .orc(cpuPath.getCanonicalPath)
+            }, sparkConf)
+
+            withGpuSparkSession({ spark =>
+              ExecutionPlanCaptureCallback.startCapture()
+              spark.range(3).selectExpr(dateColumns: _*).coalesce(1).write.mode("overwrite")
+                .option(OrcConf.PROLEPTIC_GREGORIAN.getAttribute,
+                  prolepticGregorian.toString)
+                .orc(gpuPath.getCanonicalPath)
+              val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+              assert(plans.nonEmpty, "Did not capture GPU write plan")
+              ExecutionPlanCaptureCallback.assertContains(plans(0), "GpuDataWritingCommandExec")
+            }, sparkConf)
+
+            val cpuRows = withCpuSparkSession(
+              spark => spark.read.orc(cpuPath.getCanonicalPath).collect().toSeq, sparkConf)
+            val gpuRows = withCpuSparkSession(
+              spark => spark.read.orc(gpuPath.getCanonicalPath).collect().toSeq, sparkConf)
+            assertResult(cpuRows)(gpuRows)
+          }
+        }
+      }
+    }
+  }
+
+  Seq("orc", "").foreach { v1List =>
     val sparkConf = new SparkConf().set("spark.sql.sources.useV1SourceList", v1List)
     test(s"Write Spark version into ORC file metadata, source list is ($v1List)") {
       withGpuSparkSession({ spark =>

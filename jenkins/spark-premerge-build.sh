@@ -106,13 +106,13 @@ mvn_verify() {
     # build base shim version for following test step with PREMERGE_PROFILES
     $MVN_INSTALL_CMD -DskipTests -Dbuildver=$SPARK_BASE_SHIM_VERSION
 
-    # enable UTF-8 for regular expression tests
+    # enable UTF-8 for regular expression tests and for tests that use multi-byte file names
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_UTF8[@]}"
     do
         echo "Spark version (regex): $version"
         env -u SPARK_HOME LC_ALL="en_US.UTF-8" $MVN $MVN_URM_MIRROR -Dbuildver=$version package $MVN_BUILD_ARGS \
           -Dpytest.TEST_TAGS='' \
-          -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite
+          -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite,com.nvidia.spark.rapids.InputFileNameLongPathSuite
     done
 
     # Here run Python integration tests tagged with 'premerge_ci_1' only, that would help balance test duration and memory
@@ -126,8 +126,8 @@ mvn_verify() {
     # things we care about
     SPK_VER=${JACOCO_SPARK_VER:-"330"}
     mkdir -p target/jacoco_classes/
-    FILE=$(ls dist/target/rapids-4-spark_2.12-*.jar | grep -v test | xargs readlink -f)
-    UDF_JAR=$(ls ./udf-compiler/target/spark${SPK_VER}/rapids-4-spark-udf_2.12-*-spark${SPK_VER}.jar | grep -v test | xargs readlink -f)
+    FILE=$(ls dist/target/cudf-spark_2.12-*.jar | grep -v test | xargs readlink -f)
+    UDF_JAR=$(ls ./udf-compiler/target/spark${SPK_VER}/cudf-spark-udf_2.12-*-spark${SPK_VER}.jar | grep -v test | xargs readlink -f)
     pushd target/jacoco_classes/
     jar xf $FILE com org rapids spark-shared "spark${JACOCO_SPARK_VER:-330}/"
     # extract the .class files in udf jar and replace the existing ones in spark3xx-ommon and spark$SPK_VER
@@ -181,36 +181,17 @@ run_iceberg_version_detect_tests() {
     local scala_ver=${2:?'scala_ver is required'}
     echo "Running Iceberg version detection tests for Spark $spark_ver (Scala $scala_ver)..."
 
-    local iceberg_spark_ver
-    iceberg_spark_ver=$(echo "$spark_ver" | cut -d. -f1,2)
-    local spark_patch_ver
-    spark_patch_ver=$(echo "$spark_ver" | cut -d. -f3)
-
-    if [[ "$iceberg_spark_ver" != "3.5" && "$iceberg_spark_ver" != "4.0" \
-          && "$iceberg_spark_ver" != "4.1" ]]; then
-        echo "!!!! Skipping Iceberg version detection. Not supported on Spark $iceberg_spark_ver"
+    local iceberg_versions
+    iceberg_versions=$(python scripts/get_iceberg_versions.py list \
+        --spark-version "$spark_ver") || return 1
+    if [[ -z "$iceberg_versions" ]]; then
+        # Profiles without a packaged Iceberg runtime have an empty selection.
+        echo "!!!! Skipping Iceberg version detection. No matrix-selected version for Spark $spark_ver"
         return 0
     fi
 
-    # Supported Iceberg versions per Spark version. The 3.5.x / 4.0.x rows mirror
-    # run_iceberg_tests() in spark-tests.sh. The Spark 4.1 -> 1.11.0 row is kept here
-    # for callers that explicitly test Spark 4.1, while the regular pre-merge job
-    # below runs on Spark 4.0.1. Spark 4.1 is covered by nightly run_iceberg_tests().
-    local iceberg_versions
-    if [[ "$iceberg_spark_ver" == "4.1" ]]; then
-        iceberg_versions="1.11.0"
-    elif [[ "$iceberg_spark_ver" == "4.0" ]]; then
-        if [[ "$spark_patch_ver" -ge 2 ]]; then
-            iceberg_versions="1.10.1 1.11.0"
-        else
-            iceberg_versions="1.10.1"
-        fi
-    elif [[ "$spark_patch_ver" -le 3 ]]; then
-        iceberg_versions="1.6.1"
-    else
-        iceberg_versions="1.9.2 1.10.1"
-    fi
-
+    local iceberg_spark_ver
+    iceberg_spark_ver=$(echo "$spark_ver" | cut -d. -f1,2)
     for ICEBERG_VERSION in $iceberg_versions; do
         echo "!!! Running iceberg version detection test for Iceberg $ICEBERG_VERSION"
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
@@ -219,7 +200,7 @@ run_iceberg_version_detect_tests() {
             PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-            ./integration_tests/run_pyspark_from_build.sh -m iceberg --iceberg -k test_iceberg_version_detection
+            TEST_TAGS=iceberg ./integration_tests/run_pyspark_from_build.sh --iceberg -k test_iceberg_version_detection
     done
 }
 
@@ -319,6 +300,30 @@ ci_scala213() {
     # export 'LC_ALL' to set locale with UTF-8 so regular expressions are enabled
     SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
         LC_ALL="en_US.UTF-8" TEST="regexp_test.py" ./integration_tests/run_pyspark_from_build.sh
+
+    # Exercise one catalog-managed Delta 4.2 operation in the actual Blossom premerge entrypoint.
+    # TEST_MODE=DELTA_LAKE_UC_ONLY exposes the full operation/failure matrix for external jobs
+    # that must be scheduled separately for Spark 4.0.1, 4.0.5, 4.1.1, and 4.1.4.
+    MVN="$MVN" SPARK_VER="$SPARK_VER" SCALA_BINARY_VER=2.13 \
+        SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
+        TESTS=delta_lake_catalog_managed_test.py \
+        TEST=catalog_managed_ctas_insert_and_deletion_vector_scan \
+        ./integration_tests/run_unity_catalog_server.sh \
+          --run-dir "${WORKSPACE:-${TMPDIR:-/tmp}}" -- \
+          ./integration_tests/run_pyspark_from_build.sh \
+            -m unity_catalog --delta_lake --unity_catalog
+
+    # Delta 4.3 defaults the Unity Catalog Delta REST API on. Exercise the complete routing,
+    # metadata-intent, validation, and abort-safety matrix.
+    MVN="$MVN" SPARK_VER="$SPARK_VER" SCALA_BINARY_VER=2.13 \
+        SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
+        TEST_PARALLEL=1 \
+        TESTS=delta_lake_catalog_rest_test.py \
+        TEST='' \
+        ./integration_tests/run_unity_catalog_server.sh \
+          --delta-version 4.3.0 --run-dir "${WORKSPACE:-${TMPDIR:-/tmp}}" -- \
+          ./integration_tests/run_pyspark_from_build.sh \
+            -m unity_catalog --delta_lake --unity_catalog
 
     # Trigger the RapidsShuffleManager tests for scala 2.13
     rapids_shuffle_smoke_test $SPARK_VER

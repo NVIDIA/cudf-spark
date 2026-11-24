@@ -15,16 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["400","420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -64,13 +55,15 @@ trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
       GpuOverrides.expr[VariantGet](
         "Extracts a field from a Variant value by path",
         ExprChecks.binaryProject(
-          TypeSig.integral + TypeSig.STRING,
-          TypeSig.integral + TypeSig.STRING,
+          (TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128)
+            .withPsNote(TypeEnum.DECIMAL, "Only nonnegative scales are supported"),
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128,
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
-        (expr, conf, p, r) => new GpuVariantGetMeta(expr, conf, p, r))
-        .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
-          "Spark try_variant_get cast semantics can return different values")
+        GpuVariantGetMeta)
+        .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
+          "types and may differ from Spark casts. Malformed or noncanonical Variant encodings " +
+          "may differ from Spark")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }

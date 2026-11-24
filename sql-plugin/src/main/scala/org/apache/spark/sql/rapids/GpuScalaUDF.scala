@@ -613,7 +613,7 @@ case class GpuRowBasedScalaUDF(
 
 object GpuScalaUDF {
   /**
-   * Determine if the UDF function implements the [[com.nvidia.spark.RapidsUDF]] interface,
+   * Determine if the UDF function implements the `com.nvidia.spark.RapidsUDF` interface,
    * returning the instance if it does. The lambda wrapper that Spark applies to Java UDFs will be
    * inspected if necessary to locate the user's UDF instance.
    */

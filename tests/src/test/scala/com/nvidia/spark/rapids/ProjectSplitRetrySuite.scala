@@ -307,7 +307,7 @@ class ProjectSplitRetrySuite extends RmmSparkRetrySuiteBase {
         val project = GpuProjectExec(
           addOneExprs().map(_.asInstanceOf[NamedExpression]).toList,
           TestColumnarLeafExec(batchAttrs, inputRdd),
-          enablePreSplit = enablePreSplit)
+          enablePreSplit = enablePreSplit)()
         val outputRdd = project.doExecuteColumnar()
         val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
         TrampolineUtil.setTaskContext(context)

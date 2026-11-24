@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, MergeIntoCommand}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 
@@ -43,16 +44,13 @@ abstract class MergeIntoCommandMetaBase(
       willNotWorkOnGpu("notMatchedBySourceClauses not supported on GPU")
     }
     val deltaLog = mergeCmd.targetFileIndex.deltaLog
-    val dvFeatureEnabled =
-      DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot)
-
-    if (dvFeatureEnabled && mergeCmd.conf.getConf(
-      DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS)) {
-      // https://github.com/NVIDIA/spark-rapids/issues/8654
-      willNotWorkOnGpu("Deletion vectors are not supported on GPU")
-    }
-
     val targetSchema = mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema)
+    if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+        mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS) &&
+        targetSchema.fieldNames.exists(
+          SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
+      willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
+    }
     RapidsDeltaUtils.tagForDeltaWrite(this, targetSchema, Some(deltaLog), Map.empty,
       SparkSession.active)
   }

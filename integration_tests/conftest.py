@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2023, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ def pytest_addoption(parser):
         "--tmp_path", action="store", default=None, help="path to store tmp files"
     )
     parser.addoption(
+        "--path_backend", choices=['auto', 'hadoop', 's3-netty', 's3-crt', 'gcs-http'],
+        default='auto', help="required read backend for deterministic path-character tests"
+    )
+    parser.addoption(
         "--debug_tmp_path", action='store_true', default=False, help="if true don't delete tmp_path contents for debugging"
     )
     parser.addoption(
@@ -47,6 +51,10 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         "--delta_lake", action="store_true", default=False, help="if true enable Delta Lake tests"
+    )
+    parser.addoption(
+        "--unity_catalog", action="store_true", default=False,
+        help="if true enable OSS Unity Catalog tests, which need a Unity Catalog server"
     )
     parser.addoption(
         "--test_oom_injection_mode", action='store', default="random",

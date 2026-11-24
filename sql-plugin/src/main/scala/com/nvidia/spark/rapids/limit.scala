@@ -236,19 +236,24 @@ object GpuTopN {
       b: ColumnarBatch,
       concatTime: GpuMetric): ColumnarBatch = {
     NvtxIdWithMetrics(NvtxRegistry.READ_N_CONCAT, concatTime) {
-      val dataTypes = GpuColumnVector.extractTypes(b)
-      val aTable = withResource(a) { a =>
-        GpuColumnVector.from(a)
-      }
-      val ret = withResource(aTable) { aTable =>
-        withResource(b) { b =>
-          withResource(GpuColumnVector.from(b)) { bTable =>
-            Table.concatenate(aTable, bTable)
+      if (a.numCols() == 0) {
+        // Rows-only batches concatenate by row count.
+        ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(Array(a, b), Array.empty)
+      } else {
+        val dataTypes = GpuColumnVector.extractTypes(b)
+        val aTable = withResource(a) { a =>
+          GpuColumnVector.from(a)
+        }
+        val ret = withResource(aTable) { aTable =>
+          withResource(b) { b =>
+            withResource(GpuColumnVector.from(b)) { bTable =>
+              Table.concatenate(aTable, bTable)
+            }
           }
         }
-      }
-      withResource(ret) { ret =>
-        GpuColumnVector.from(ret, dataTypes)
+        withResource(ret) { ret =>
+          GpuColumnVector.from(ret, dataTypes)
+        }
       }
     }
   }
@@ -327,7 +332,10 @@ object GpuTopN {
                 sortAndTakeNClose(limit, sorter, inputCb, sortTime)
               } else { // pending is not empty
                 val totalSize = attempt.sizeInBytes + pending.get.sizeInBytes
-                val tmpCb = if (totalSize > Int.MaxValue) {
+                val tmpCb = if (inputCb.numCols() == 0) {
+                  // A rows-only batch has no size to check, so take only the rows still needed.
+                  sortAndTakeNClose(limit - pending.get.numRows(), sorter, inputCb, sortTime)
+                } else if (totalSize > Int.MaxValue) {
                   // The intermediate size is likely big enough we don't want to risk an overflow,
                   // so sort/slice before we concat and sort/slice again.
                   sortAndTakeNClose(limit, sorter, inputCb, sortTime)

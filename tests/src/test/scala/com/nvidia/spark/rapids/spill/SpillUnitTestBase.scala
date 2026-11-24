@@ -22,16 +22,14 @@ import java.math.RoundingMode
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.CodecType
-import org.mockito.Mockito.when
-import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.rapids.RapidsDiskBlockManager
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-trait SpillUnitTestBase extends FunSuiteWithTempDir with MockitoSugar {
+trait SpillUnitTestBase extends FunSuiteWithTempDir {
 
   override def beforeEach(): Unit = {
     super.beforeEach()
@@ -112,7 +110,7 @@ trait SpillUnitTestBase extends FunSuiteWithTempDir with MockitoSugar {
     (emptyTbl, types)
   }
 
-  protected final def testBufferFileDeletion(canShareDiskPaths: Boolean): Unit = {
+  protected final def testBufferFileDeletion(): Unit = {
     val (_, handle, _) = addContiguousTableToFramework()
     var path: File = null
     withResource(handle) { _ =>
@@ -225,36 +223,46 @@ trait SpillUnitTestBase extends FunSuiteWithTempDir with MockitoSugar {
     }
   }
 
-  protected final def readWriteTestWithBatches(conf: SparkConf,
-      shareDiskPaths: Boolean*): Unit = {
-    assert(shareDiskPaths.nonEmpty)
-    val mockDiskBlockManager = mock[RapidsDiskBlockManager]
-    when(mockDiskBlockManager.getSerializerManager())
-      .thenReturn(new RapidsSerializerManager(conf))
-
-    shareDiskPaths.foreach { _ =>
-      val (_, handle, dataTypes) = addContiguousTableToFramework()
-      withResource(handle) { _ =>
-        val expectedCt = withResource(handle.materialize(dataTypes)) { devbatch =>
-          withResource(GpuColumnVector.from(devbatch)) { tmpTbl =>
-            tmpTbl.contiguousSplit()(0)
-          }
-        }
-        withResource(expectedCt) { _ =>
-          val expectedBatch = withResource(expectedCt.getTable) { expectedTbl =>
-            GpuColumnVector.from(expectedTbl, dataTypes)
-          }
-          withResource(expectedBatch) { _ =>
-            assertResult(true)(
-              SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes) > 0)
-            assertResult(true)(
-              SpillFramework.stores.hostStore.spill(handle.approxSizeInBytes) > 0)
-            withResource(handle.materialize(dataTypes)) { actualBatch =>
-              TestUtils.compareBatches(expectedBatch, actualBatch)
+  protected final def readWriteTestWithBatches(conf: SparkConf, numBatches: Int): Unit = {
+    val originalDiskStore = SpillFramework.stores.diskStore
+    val diskConf = conf.clone().set("spark.local.dir", TEST_FILES_ROOT.getAbsolutePath)
+    val dataTypes = Array[DataType](LongType, DecimalType(DType.DECIMAL64_MAX_PRECISION, 3))
+    var paths = Seq.empty[File]
+    try {
+      withResource(new DiskHandleStore(diskConf)) { diskStore =>
+        SpillFramework.stores.diskStore = diskStore
+        withResource((0 until numBatches).safeMap { i =>
+          SpillableColumnarBatchFromBufferHandle(buildContiguousTable(i * 100, 8), dataTypes)
+        }) { handles =>
+          assert(SpillFramework.stores.deviceStore.numHandles == numBatches)
+          assert(SpillFramework.stores.deviceStore.spill(Long.MaxValue) > 0)
+          assert(SpillFramework.stores.hostStore.spill(Long.MaxValue) > 0)
+          assert(SpillFramework.stores.deviceStore.numHandles == 0)
+          assert(SpillFramework.stores.hostStore.numHandles == 0)
+          assert(diskStore.numHandles == numBatches)
+          val diskHandles = handles.map(_.host.flatMap(_.disk).get)
+          assert(diskHandles.forall(_.blockId.name.startsWith("temp_local_")))
+          assert(diskHandles.forall(_.offset == 0))
+          paths = diskHandles.map(h => diskStore.getFile(h.blockId))
+          assert(paths.distinct.size == numBatches)
+          assert(paths.forall(_.exists()))
+          handles.zipWithIndex.foreach { case (handle, i) =>
+            withResource(buildContiguousTable(i * 100, 8)) { expected =>
+              withResource(expected.getTable) { table =>
+                withResource(GpuColumnVector.from(table, dataTypes)) { expectedBatch =>
+                  withResource(handle.materialize(dataTypes)) { actualBatch =>
+                    TestUtils.compareBatches(expectedBatch, actualBatch)
+                  }
+                }
+              }
             }
           }
         }
+        assert(diskStore.numHandles == 0)
+        assert(paths.forall(!_.exists()))
       }
+    } finally {
+      SpillFramework.stores.diskStore = originalDiskStore
     }
   }
 

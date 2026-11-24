@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
+{"spark":["330"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
@@ -27,6 +27,7 @@ import org.apache.spark.sql.rapids.suites._
 
 class RapidsTestSettings extends BackendTestSettings {
 
+  enableSuite[RapidsXPathFunctionsSuite]
   enableSuite[RapidsApproximatePercentileQuerySuite]
     .exclude("percentile_approx(col, ...), input rows contains null, with group by", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14634"))
     .exclude("SPARK-32908: maximum target error in percentile_approx", KNOWN_ISSUE("https://github.com/NVIDIA/spark-rapids/issues/14635"))
@@ -197,6 +198,11 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("File source v2: support partition pruning", ADJUST_UT("Replaced by testRapids version that checks GpuBatchScanExec file filters and selected partitions."))
     .exclude("File source v2: support passing data filters to FileScan without partitionFilters", ADJUST_UT("Replaced by testRapids version that checks GpuBatchScanExec file filters and selected partitions."))
   enableSuite[RapidsCachedTableSuite]
+    .exclude("Ensure accumulators to be cleared after GC when uncacheTable",
+      ADJUST_UT("Replaced by testRapids version that checks both tables and retries GC after " +
+        "draining query listeners. https://github.com/NVIDIA/cudf-spark/issues/15928. " +
+        "The Spark 3.3.0 source test is pinned. Recovery trigger: adopt a corrected source " +
+        "test in a future Spark baseline; P2."))
     .exclude("InMemoryRelation statistics", ADJUST_UT("Replaced by testRapids version that checks cache statistics with RAPIDS cache serializer and GpuInMemoryTableScanExec."))
     .exclude("SPARK-19993 subquery with cached underlying relation", ADJUST_UT("Replaced by testRapids version that checks cached subquery reuse with recursive GpuInMemoryTableScanExec nodes."))
     .exclude("SPARK-36120: Support cache/uncache table with TimestampNTZ type", ADJUST_UT("Replaced by testRapids version that checks TimestampNTZ cache correctness with RAPIDS cache stats."))
@@ -469,7 +475,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-36594: ORC vectorized reader should properly check maximal number of fields", WONT_FIX_ISSUE("CPU ORC vectorized-reader limit assertion; GPU does not expose Spark CPU ORC vectorized-reader flag."))
   enableSuite[RapidsOrcV1AggregatePushDownSuite]
   enableSuite[RapidsOrcV2AggregatePushDownSuite]
-    .exclude("nested column: Count(top level column) push down", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15186"))
 
   enableSuite[RapidsOrcV1SchemaPruningSuite]
   enableSuite[RapidsOrcV2SchemaPruningSuite]
@@ -552,5 +557,39 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsPersistedViewTestSuite]
   enableSuite[RapidsRowDataSourceStrategySuite]
   enableSuite[RapidsConfigBehaviorSuite]
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsHigherOrderFunctionsSuite]
+    .exclude("MapZipWith", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16858"))
+  enableSuite[RapidsLiteralExpressionSuite]
+  enableSuite[RapidsNondeterministicSuite]
+  // The timestamp tests use the SPARK-40851 zone list in the shared RAPIDS replacements.
+  enableSuite[RapidsTryCastSuite]
+    .exclude("SPARK-35711: cast timestamp without time zone to timestamp with local time zone", ADJUST_UT("Replaced by testRapids coverage with the SPARK-40851 zone list. See https://github.com/NVIDIA/cudf-spark/issues/16971."))
+    .exclude("SPARK-35719: cast timestamp with local time zone to timestamp without timezone", ADJUST_UT("Replaced by testRapids coverage with the SPARK-40851 zone list. See https://github.com/NVIDIA/cudf-spark/issues/16971."))
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsAnsiCastSuiteWithAnsiModeOn]
+    .exclude("ANSI mode: Throw exception on casting out-of-range value to int type", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16856"))
+    .exclude("cast from array III", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16857"))
+    .exclude("cast from map III", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16857"))
+    .exclude("cast from struct III", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16857"))
+    .exclude("SPARK-35711: cast timestamp without time zone to timestamp with local time zone", ADJUST_UT("Replaced by testRapids coverage with the SPARK-40851 zone list. See https://github.com/NVIDIA/cudf-spark/issues/16971."))
+    .exclude("SPARK-35719: cast timestamp with local time zone to timestamp without timezone", ADJUST_UT("Replaced by testRapids coverage with the SPARK-40851 zone list. See https://github.com/NVIDIA/cudf-spark/issues/16971."))
+  // The replacements check both CPU and GPU shuffle readers.
+  enableSuite[RapidsCoalesceShufflePartitionsSuite]
+    .exclude("determining the number of reducers: aggregate operator", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("determining the number of reducers: join operator", ADJUST_UT("Replaced by testRapids coverage of CPU and GPU shuffle readers. See https://github.com/NVIDIA/cudf-spark/issues/16970."))
+    .exclude("determining the number of reducers: complex query 1", ADJUST_UT("Replaced by testRapids coverage of CPU and GPU shuffle readers. See https://github.com/NVIDIA/cudf-spark/issues/16970."))
+    .exclude("determining the number of reducers: complex query 2", ADJUST_UT("Replaced by testRapids coverage of CPU and GPU shuffle readers. See https://github.com/NVIDIA/cudf-spark/issues/16970."))
+    .exclude("SPARK-24705 adaptive query execution works correctly when exchange reuse enabled", ADJUST_UT("Replaced by testRapids coverage of CPU and GPU shuffle readers and exchange reuse. See https://github.com/NVIDIA/cudf-spark/issues/16970."))
+    .exclude("Union two datasets with different pre-shuffle partition number", ADJUST_UT("Replaced by testRapids coverage of CPU and GPU shuffle readers. See https://github.com/NVIDIA/cudf-spark/issues/16970."))
+    .exclude("SPARK-34790: enable IO encryption in AQE partition coalescing", ADJUST_UT("Replaced by testRapids coverage of CPU and GPU shuffle readers with both IO encryption settings. See https://github.com/NVIDIA/cudf-spark/issues/16970."))
+  enableSuite[RapidsReuseExchangeAndSubquerySuite]
+  // Select RapidsHiveAggregationSuite with -DwildcardSuites to run the Hive suites.
+  enableSuite[RapidsHashAggregationQuerySuite]
+  enableSuite[RapidsApproxCountDistinctForIntervalsQuerySuite]
+    .exclude("SPARK-37138: Support Ansi Interval type in ApproxCountDistinctForIntervals",
+      ADJUST_UT("Replaced by testRapids coverage of both interval types, nonempty buckets, and GPU-to-CPU aggregate fallback. See https://github.com/NVIDIA/cudf-spark/pull/16972#discussion_r4626137888."))
+  enableSuite[RapidsHashUDAQuerySuite]
+
 }
 // scalastyle:on line.size.limit

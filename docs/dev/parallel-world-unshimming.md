@@ -20,9 +20,9 @@ to find migration batches that can be moved together.
 See also:
 
 * [Shim Development](shims.md), for shim design patterns and validation commands.
-* [Distribution Packaging](../../dist/README.md), for the files that control explicit
-  packaging exceptions.
-* [`analyze-parallel-world-deps.py`](../../dist/scripts/analyze-parallel-world-deps.py),
+* [Distribution Packaging](https://github.com/NVIDIA/cudf-spark/blob/release/26.10/dist/README.md),
+  for the files that control explicit packaging exceptions.
+* [`analyze-parallel-world-deps.py`](https://github.com/NVIDIA/cudf-spark/blob/release/26.10/dist/scripts/analyze-parallel-world-deps.py),
   for the implementation.
 
 ## Class Layout Model

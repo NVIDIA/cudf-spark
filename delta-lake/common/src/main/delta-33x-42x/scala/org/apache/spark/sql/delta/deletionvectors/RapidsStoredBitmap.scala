@@ -25,7 +25,7 @@ import org.apache.spark.sql.delta.actions.DeletionVectorDescriptor
 
 // scalastyle:off line.size.limit
 /**
- * RAPIDS version of [[DeletionVectorStoredBitmap]]. It is simplified and modified to only include
+ * RAPIDS version of `DeletionVectorStoredBitmap`. It is simplified and modified to only include
  * the APIs needed to load serialized deletion vectors into host memory.
  */
 // scalastyle:on line.size.limit

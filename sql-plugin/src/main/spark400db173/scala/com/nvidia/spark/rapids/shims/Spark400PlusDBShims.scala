@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "400db173"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -27,6 +27,7 @@ import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTablePartitio
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Expression, KnownNotContainsNull}
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
+import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
@@ -50,7 +51,19 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
           "replaced by Invoke(Literal(StructsToJsonEvaluator), evaluate, string_type, arguments)",
         InvokeCheck,
         InvokeExprMeta)
-        .note("The supported types are not deterministic since it's a dynamic expression")
+        .note("The supported types are not deterministic since it's a dynamic expression"),
+      GpuOverrides.expr[VariantGet](
+        "Extracts a field from a Variant value by path",
+        ExprChecks.binaryProject(
+          (TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128)
+            .withPsNote(TypeEnum.DECIMAL, "Only nonnegative scales are supported"),
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128,
+          ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
+          ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
+        GpuVariantGetMeta)
+        .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
+          "types and may differ from Spark casts. Malformed or noncanonical Variant encodings " +
+          "may differ from Spark")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }

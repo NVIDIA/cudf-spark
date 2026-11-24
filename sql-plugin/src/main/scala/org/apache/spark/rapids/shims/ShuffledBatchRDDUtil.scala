@@ -48,11 +48,11 @@ object ShuffledBatchRDDUtil {
       case PartialReducerPartitionSpec(_, startMapIndex, endMapIndex, _) =>
         tracker.getMapLocation(dependency, startMapIndex, endMapIndex)
 
-      case PartialMapperPartitionSpec(mapIndex, _, _) =>
-        tracker.getMapLocation(dependency, mapIndex, mapIndex + 1)
+      case spec: PartialMapperPartitionSpec =>
+        tracker.getMapLocation(dependency, spec.mapIndex, spec.mapIndex + 1)
 
-      case CoalescedMapperPartitionSpec(startMapIndex, endMapIndex, _) =>
-        tracker.getMapLocation(dependency, startMapIndex, endMapIndex)
+      case spec: CoalescedMapperPartitionSpec =>
+        tracker.getMapLocation(dependency, spec.startMapIndex, spec.endMapIndex)
     }
   }
 
@@ -102,7 +102,10 @@ object ShuffledBatchRDDUtil {
           reducerIndex,
           reducerIndex + 1)
         (reader, getPartitionSize(blocksByAddress))
-      case PartialMapperPartitionSpec(mapIndex, startReducerIndex, endReducerIndex) =>
+      case spec: PartialMapperPartitionSpec =>
+        val mapIndex = spec.mapIndex
+        val startReducerIndex = spec.startReducerIndex
+        val endReducerIndex = spec.endReducerIndex
         val reader = ShuffleManagerShims.getReader(
           SparkEnv.get.shuffleManager,
           dependency.shuffleHandle,
@@ -119,7 +122,10 @@ object ShuffledBatchRDDUtil {
           startReducerIndex,
           endReducerIndex)
         (reader, getPartitionSize(blocksByAddress))
-      case CoalescedMapperPartitionSpec(startMapIndex, endMapIndex, numReducers) =>
+      case spec: CoalescedMapperPartitionSpec =>
+        val startMapIndex = spec.startMapIndex
+        val endMapIndex = spec.endMapIndex
+        val numReducers = spec.numReducers
         val reader = ShuffleManagerShims.getReader(
           SparkEnv.get.shuffleManager,
           dependency.shuffleHandle,

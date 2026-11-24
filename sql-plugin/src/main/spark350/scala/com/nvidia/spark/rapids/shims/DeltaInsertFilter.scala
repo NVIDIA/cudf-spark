@@ -14,16 +14,7 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
+{"spark":["350"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -35,6 +26,8 @@ import org.apache.spark.sql.catalyst.util.RowDeltaUtils.INSERT_OPERATION
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DeltaInsertFilter {
+  val reinsertOperation: Option[Int] = None
+
   def filterInsertRows(batch: ColumnarBatch): CudfColumnVector = {
     withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
       batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)

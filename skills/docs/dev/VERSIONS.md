@@ -1,6 +1,6 @@
 # Version Update Guide
 
-Before updating, verify that the exact `rapids-4-spark_<scala>` POM and the JAR for the selected CUDA classifier are published in Maven Central.
+For published releases, verify that the configured artifact ID and version publish a POM, an unclassified JAR, and a JAR for the selected CUDA classifier in Maven Central. For locally built snapshots, install the artifacts in the local Maven repository before testing.
 
 ## Files To Update
 
@@ -13,10 +13,23 @@ Update these properties together:
 - `<scala.binary.version>`
 - `<scala.version>`
 - `<spark.version>`
+- `<rapids4spark.artifactId>`
 - `<rapids4spark.version>`
 - `<cuda.version>` if the RAPIDS artifact classifier changes
 - `<cudf.git.branch>`
 - `<rapids.cmake.branch>`
+
+The template defaults to `26.06.0` with `rapids-4-spark_${scala.binary.version}`. When selecting `26.12.0-SNAPSHOT` built from the renamed sources, also set `rapids4spark.artifactId` to `cudf-spark_${scala.binary.version}` in the generated POM. Changing only `rapids4spark.version` does not change the Maven artifact ID.
+
+For example, to test a locally installed Scala 2.12 snapshot:
+
+```bash
+mvn test -Dsuites=com.udf.UnitTest \
+  -Drapids4spark.version=26.12.0-SNAPSHOT \
+  -Drapids4spark.artifactId=cudf-spark_2.12
+```
+
+For Scala 2.13, set the matching Scala binary/full versions and use `cudf-spark_2.13`. Native CUDA builds require the same artifact-ID override with `-Pcuda-native-udf` and matching CUDA, cuDF, and rapids-cmake versions. Keep the legacy artifact ID for older releases.
 
 ### Native CUDA build image
 
@@ -40,6 +53,7 @@ File: `skills/udf-convert-to-cuda/templates/cuda/native/scripts/extract-cudf-lib
 Update these default values:
 
 - `SCALA_VERSION`
+- `RAPIDS4SPARK_ARTIFACT_ID`
 - `RAPIDS4SPARK_VERSION`
 - `CUDA_VERSION` if the RAPIDS artifact classifier changes
 - `CUDF_BRANCH`

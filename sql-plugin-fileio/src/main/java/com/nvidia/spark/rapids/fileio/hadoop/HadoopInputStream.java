@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import java.io.IOException;
 import static java.util.Objects.requireNonNull;
 
 /**
- * A {@link SeekableInputStream} implementation that wraps a Hadoop {@link FSDataInputStream}.
+ * A {@code SeekableInputStream} implementation that wraps a Hadoop {@code FSDataInputStream}.
  * <br/>
  * This class provides methods to read from the input stream and to seek to a specific position.
  */

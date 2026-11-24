@@ -54,7 +54,7 @@ class GpuOptimizeExecutor(
                         prevCommitActions: Seq[Action])
   extends DeltaCommand with SQLMetricsReporting with Serializable {
 
-  /** Timestamp to use in [[FileAction]] */
+  /** Timestamp to use in `FileAction` */
   private val operationTimestamp = System.currentTimeMillis
 
   private val isMultiDimClustering = zOrderByColumns.nonEmpty
@@ -198,8 +198,8 @@ class GpuOptimizeExecutor(
   /**
    * Utility method to run a Spark job to compact the files in given bin
    *
-   * @param txn [[OptimisticTransaction]] instance in use to commit the changes to DeltaLog.
-   * @param partition Partition values of the partition that files in [[bin]] belongs to.
+   * @param txn `OptimisticTransaction` instance in use to commit the changes to DeltaLog.
+   * @param partition Partition values of the partition that files in `bin` belongs to.
    * @param bin List of files to compact into one large file.
    * @param maxFileSize Targeted output file size in bytes
    */
@@ -353,7 +353,7 @@ class GpuOptimizeExecutor(
    * detection logic to indicate it is safe to try again, by returning `true`.
    *
    * This function will continue to try to commit to the log as long as `f` returns `true`,
-   * otherwise throws a subclass of [[ConcurrentModificationException]].
+   * otherwise throws a subclass of `ConcurrentModificationException`.
    */
   @tailrec
   private def commitAndRetry(

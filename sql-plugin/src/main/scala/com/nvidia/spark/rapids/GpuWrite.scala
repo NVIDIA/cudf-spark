@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,19 @@
 
 package com.nvidia.spark.rapids
 
-import org.apache.spark.sql.connector.write.Write
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.write.{DataWriter, DataWriterFactory, Write}
+import org.apache.spark.sql.types.StructType
 
 trait GpuWrite extends Write {
   var metrics: Map[String, GpuMetric] = Map.empty
+}
+
+trait GpuDataWriterFactory extends DataWriterFactory {
+  def createWriter(
+      partitionId: Int,
+      taskId: Long,
+      metadataSchema: StructType): DataWriter[InternalRow]
 }
 
 // Allows use of GpuWrite from Java code

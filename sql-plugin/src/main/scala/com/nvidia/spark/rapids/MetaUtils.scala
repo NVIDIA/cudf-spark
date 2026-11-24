@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -326,8 +326,23 @@ object ShuffleMetadata extends Logging{
     val fbb = new FlatBufferBuilder(1024, bbFactory)
     val tableOffsets = copyTables(fbb, tables)
     val tableMetasOffset = MetadataResponse.createTableMetasVector(fbb, tableOffsets)
-    val finIndex = MetadataResponse.createMetadataResponse(fbb, tableMetasOffset)
+    // 0 and -1, the defaults, leave the error and the failed block out, which adds no bytes
+    val finIndex = MetadataResponse.createMetadataResponse(fbb, tableMetasOffset, 0, -1)
     fbb.finish(finIndex)
+    fbb.dataBuffer()
+  }
+
+  /**
+   * Builds the reply to a metadata request that the server failed. It carries no tables.
+   * @param reason why the request failed, for the requester's error message
+   * @param failedBlock the index, in the request, of the block whose lookup failed, or -1 when
+   *                    no single block failed
+   */
+  def buildMetaErrorResponse(reason: String, failedBlock: Int): ByteBuffer = {
+    val fbb = new FlatBufferBuilder(1024, bbFactory)
+    val error = ResponseError.createResponseError(fbb, fbb.createString(reason))
+    val root = MetadataResponse.createMetadataResponse(fbb, 0, error, failedBlock)
+    fbb.finish(root)
     fbb.dataBuffer()
   }
 
@@ -379,7 +394,25 @@ object ShuffleMetadata extends Logging{
           buffMetaOffset)
     }.toArray
     val responsesVector = TransferResponse.createResponsesVector(fbb, responses)
-    val root = TransferResponse.createTransferResponse(fbb, responsesVector)
+    // 0 leaves the error out, which adds no bytes to the response
+    val root = TransferResponse.createTransferResponse(fbb, responsesVector, 0)
+    fbb.finish(root)
+    fbb.dataBuffer()
+  }
+
+  /**
+   * Builds the reply to a transfer request that the server failed.
+   * @param failedBufferIds the requested buffers the server will not send
+   * @param reason why the request failed, for the requester's error message
+   */
+  def buildTransferErrorResponse(failedBufferIds: Seq[Int], reason: String): ByteBuffer = {
+    val fbb = new FlatBufferBuilder(1024, bbFactory)
+    val responses = failedBufferIds.map { id =>
+      BufferTransferResponse.createBufferTransferResponse(fbb, id, TransferState.FAILED, 0)
+    }.toArray
+    val responsesVector = TransferResponse.createResponsesVector(fbb, responses)
+    val error = ResponseError.createResponseError(fbb, fbb.createString(reason))
+    val root = TransferResponse.createTransferResponse(fbb, responsesVector, error)
     fbb.finish(root)
     fbb.dataBuffer()
   }
@@ -403,6 +436,10 @@ object ShuffleMetadata extends Logging{
     val out = new StringBuilder
     out.append(s"----------------------- METADATA RESPONSE $state --------------------------\n")
     out.append(s"${res.tableMetasLength()} tables\n")
+    if (res.error() != null) {
+      out.append(s"error: ${res.error().reason()}\n")
+      out.append(s"failed block: ${res.failedBlock()}\n")
+    }
     out.append("------------------------------------------------------------------------------\n")
     for (tableIndex <- 0 until res.tableMetasLength()) {
       val tableMeta = res.tableMetas(tableIndex)

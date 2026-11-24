@@ -29,14 +29,14 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
-import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
+import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.delta._
 import org.apache.spark.sql.delta.DeltaColumnMapping.{dropColumnMappingMetadata, filterColumnMappingProperties}
 import org.apache.spark.sql.delta.actions.{Action, DomainMetadata, Metadata, Protocol}
-import org.apache.spark.sql.delta.commands.{CloneTableCommand, TableCreationModes, WriteIntoDelta, WriteIntoDeltaLike}
+import org.apache.spark.sql.delta.commands.{CloneTableCommand, TableCreationModes, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.commands.DMLUtils.TaggedCommitData
 import org.apache.spark.sql.delta.coordinatedcommits.CoordinatedCommitsUtils
 import org.apache.spark.sql.delta.hooks.{HudiConverterHook, IcebergConverterHook, UpdateCatalog, UpdateCatalogFactory}
@@ -127,7 +127,9 @@ abstract class GpuCreateDeltaTableCommandBase(
    *
    * @param sparkSession the session used to read the default catalog-managed-table setting
    */
-  protected def validateCatalogManagedTable(sparkSession: SparkSession): Unit = {}
+  protected def validateCatalogManagedTable(sparkSession: SparkSession): Unit = {
+    // Default no-op for Delta versions without catalog-managed tables.
+  }
 
   /**
    * Validates catalog-managed table properties supplied by a create or replace operation against
@@ -146,7 +148,9 @@ abstract class GpuCreateDeltaTableCommandBase(
   protected def validateCatalogManagedTableProperties(
       sparkSession: SparkSession,
       gpuDeltaLog: GpuDeltaLog,
-      tableWithLocation: CatalogTable): Unit = {}
+      tableWithLocation: CatalogTable): Unit = {
+    // Default no-op for Delta versions without catalog-managed tables.
+  }
 
   /**
    * Adjusts the metadata that will replace an existing table's metadata.
@@ -172,6 +176,20 @@ abstract class GpuCreateDeltaTableCommandBase(
    */
   protected def catalogTableForTransaction: Option[CatalogTable] = None
 
+  /**
+   * Constructs the Delta log used by CREATE and REPLACE operations.
+   *
+   * Version-specific implementations can retain catalog metadata when it contains credentials or
+   * commit-coordinator state. The default preserves the historical path-based behavior.
+   */
+  protected def getGpuDeltaLogForTable(
+      sparkSession: SparkSession,
+      existingTableOpt: Option[CatalogTable],
+      tableLocation: Path,
+      fileSystemOptions: Map[String, String]): GpuDeltaLog = {
+    GpuDeltaLog.forTable(sparkSession, tableLocation, fileSystemOptions, rapidsConf)
+  }
+
   protected def createCatalogTableForCreateOrReplace(
       spark: SparkSession,
       table: CatalogTable,
@@ -180,6 +198,30 @@ abstract class GpuCreateDeltaTableCommandBase(
       table,
       ignoreIfExists = false,
       validateLocation = false)
+  }
+
+  /** Updates an existing catalog entry after a successful Delta commit. */
+  protected def updateExistingCatalogTable(
+      spark: SparkSession,
+      table: CatalogTable,
+      snapshot: Snapshot): Unit = {
+    UpdateCatalogFactory.getUpdateCatalogHook(table, spark).updateSchema(spark, snapshot)
+  }
+
+  /**
+   * Builds the catalog definition used when the standard Delta catalog-update setting is off.
+   * Version-specific catalogs can retain metadata required by their create-table contract.
+   */
+  protected def cleanupTableDefinitionWhenCatalogUpdateDisabled(
+      table: CatalogTable,
+      snapshot: Snapshot,
+      storage: CatalogStorageFormat): CatalogTable = {
+    table.copy(
+      schema = new StructType(),
+      properties = Map.empty,
+      partitionColumnNames = Nil,
+      storage = storage,
+      tracksPartitionsInCatalog = true)
   }
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
@@ -226,13 +268,13 @@ abstract class GpuCreateDeltaTableCommandBase(
       DeltaTableUtils.validDeltaTableHadoopPrefixes.exists(k.startsWith)
     }
 
-    val gpuDeltaLog =
-      GpuDeltaLog.forTable(sparkSession, tableLocation, fileSystemOptions, rapidsConf)
+    val gpuDeltaLog = getGpuDeltaLogForTable(
+      sparkSession, existingTableOpt, tableLocation, fileSystemOptions)
     CoordinatedCommitsUtils.validateConfigurationsForCreateDeltaTableCommand(
       sparkSession, gpuDeltaLog.deltaLog.tableExists, query, tableWithLocation.properties)
     validateCatalogManagedTableProperties(sparkSession, gpuDeltaLog, tableWithLocation)
 
-    recordDeltaOperation(gpuDeltaLog.deltaLog, "delta.ddl.createTable") {
+    DeltaRuntimeShim33x.runDeltaOperation(gpuDeltaLog.deltaLog, "delta.ddl.createTable") {
       val result = handleCommit(sparkSession, gpuDeltaLog, tableWithLocation)
       sendDriverMetrics(sparkSession, metrics)
       result
@@ -291,14 +333,15 @@ abstract class GpuCreateDeltaTableCommandBase(
           val data = createDataFrameFromQuery(sparkSession, query)
           val options = new DeltaOptions(table.storage.properties, sparkSession.sessionState.conf)
           val deltaWriter = {
-            val cpuWriter = WriteIntoDelta(
+            val cpuWriter = DeltaRuntimeShim33x.createCpuWrite(
               deltaLog = gpuDeltaLog.deltaLog,
               mode = mode,
               options,
               partitionColumns = table.partitionColumnNames,
               configuration = tableWithLocation.properties + ("comment" -> table.comment.orNull),
               data = data,
-              Some(tableWithLocation))
+              catalogTableOpt = Some(tableWithLocation),
+              schemaInCatalog = None)
             DeltaRuntimeShim.createGpuWrite(gpuDeltaLog, cpuWriter)
           }
           handleCreateTableAsSelect(sparkSession, txn, gpuDeltaLog,
@@ -713,6 +756,9 @@ abstract class GpuCreateDeltaTableCommandBase(
     }
   }
 
+  protected def isInsertAtomicReplaceOp(options: DeltaOptions): Boolean =
+    options.replaceWhere.isDefined
+
   /**
    * Based on the table creation operation, and parameters, we can resolve to different operations.
    * A lot of this is needed for legacy reasons in Databricks Runtime.
@@ -746,7 +792,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         isV1SaveAsTableOverwrite)
 
     // Legacy saveAsTable with Overwrite mode
-    case TableCreationModes.CreateOrReplace if options.exists(_.replaceWhere.isDefined) =>
+    case TableCreationModes.CreateOrReplace if options.exists(isInsertAtomicReplaceOp) =>
       DeltaRuntimeShim.buildWriteOperation(mode, table.partitionColumnNames, options.get)
 
     // New DataSourceV2 saveAsTable with overwrite mode behavior
@@ -785,7 +831,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         }
       case TableCreationModes.Replace | TableCreationModes.CreateOrReplace
         if existingTableOpt.isDefined =>
-        UpdateCatalogFactory.getUpdateCatalogHook(table, spark).updateSchema(spark, snapshot)
+        updateExistingCatalogTable(spark, table, snapshot)
       case TableCreationModes.Replace =>
         val ident = Identifier.of(table.identifier.database.toArray, table.identifier.table)
         throw DeltaErrors.cannotReplaceMissingTableException(ident)
@@ -828,13 +874,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         storage = storageProps,
         tracksPartitionsInCatalog = true)
     } else {
-      table.copy(
-        schema = new StructType(),
-        properties = Map.empty,
-        partitionColumnNames = Nil,
-        // Remove write specific options when updating the catalog
-        storage = storageProps,
-        tracksPartitionsInCatalog = true)
+      cleanupTableDefinitionWhenCatalogUpdateDisabled(table, snapshot, storageProps)
     }
   }
 
@@ -843,6 +883,10 @@ abstract class GpuCreateDeltaTableCommandBase(
    * metadata of the table should be replaced. If overwriteSchema=false is provided with these
    * methods, then we will verify that the metadata match exactly.
    */
+  protected def validateOptionsForMetadataReplacement(options: DeltaOptions): Unit = {
+    // Default no-op; overridden in versions with extra replacement checks.
+  }
+
   private def replaceMetadataIfNecessary(
      txn: GpuOptimisticTransactionBase,
      tableDesc: CatalogTable,
@@ -855,6 +899,7 @@ abstract class GpuCreateDeltaTableCommandBase(
     if (isReplace && dontOverwriteSchema) {
       throw DeltaErrors.illegalUsageException(DeltaOptions.OVERWRITE_SCHEMA_OPTION, "replacing")
     }
+    validateOptionsForMetadataReplacement(options)
     if (txn.readVersion > -1L && isReplace && !dontOverwriteSchema) {
       // When a table already exists, and we're using the DataFrameWriterV2 API to replace
       // or createOrReplace a table, we blindly overwrite the metadata.

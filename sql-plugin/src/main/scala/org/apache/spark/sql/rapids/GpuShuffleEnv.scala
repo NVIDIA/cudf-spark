@@ -18,15 +18,89 @@ package org.apache.spark.sql.rapids
 
 import java.util.Locale
 
+import scala.util.control.NonFatal
+
+import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 
 import org.apache.spark.{SparkConf, SparkEnv}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
+import org.apache.spark.util.Utils
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
+  private var initializedBroadcastCache:
+      Option[ExecutorBroadcastCache[SpillableColumnarBatch]] = None
+  private var broadcastCacheClosed = false
+
+  protected def createBroadcastCache(): ExecutorBroadcastCache[SpillableColumnarBatch] =
+    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
+      // Unregister can run on an RPC thread that has not selected this executor's device.
+      GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
+      Arm.withResource(owned)(_ => ())
+    })
+
+  private[rapids] def broadcastCache:
+      ExecutorBroadcastCache[SpillableColumnarBatch] = synchronized {
+    require(!broadcastCacheClosed, "Executor broadcast cache is closed")
+    initializedBroadcastCache.getOrElse {
+      val cache = createBroadcastCache()
+      initializedBroadcastCache = Some(cache)
+      cache
+    }
+  }
+
+  private[rapids] def isBroadcastCacheInitialized: Boolean = synchronized {
+    initializedBroadcastCache.nonEmpty
+  }
+
+  private[rapids] def invalidateBroadcastAndThen(id: Int)(cleanup: => Unit): Unit = {
+    // Cleanup must not initialize an unused feature, or consult task-local SQL configuration.
+    val cache = synchronized { initializedBroadcastCache }
+    Utils.tryWithSafeFinally {
+      cache.foreach(_.invalidate(id))
+    } {
+      cleanup
+    }
+  }
+
+  private[rapids] def reclaimBroadcastAndThen(id: Int, isStopped: () => Boolean)(
+      catalogReclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
+    val cache = synchronized { initializedBroadcastCache }
+    var detached = (0, 0L)
+    var result: ShuffleReclaimResult = null
+    Utils.tryWithSafeFinally {
+      try {
+        cache.foreach { c => detached = c.reclaim(id, isStopped, _.sizeInBytes) }
+      } catch {
+        // Thrown on, it would report the reclaim FAILED for a catalog that freed its buffers.
+        case NonFatal(e) =>
+          logWarning(s"Failed to dispose a cached broadcast build of shuffle $id while " +
+            "reclaiming it", e)
+      }
+    } {
+      result = catalogReclaim
+    }
+    (result, detached._1, detached._2)
+  }
+
+  private[rapids] def closeBroadcastCacheAndThen(cleanup: => Unit): Unit = {
+    val cache = synchronized {
+      broadcastCacheClosed = true
+      val initialized = initializedBroadcastCache
+      initializedBroadcastCache = None
+      initialized
+    }
+    Utils.tryWithSafeFinally {
+      cache.foreach(_.close())
+    } {
+      cleanup
+    }
+  }
+
   private var shuffleCatalog: ShuffleBufferCatalog = _
   private var shuffleReceivedBufferCatalog: ShuffleReceivedBufferCatalog = _
   private var multithreadedCatalog: MultithreadedShuffleBufferCatalog = _
@@ -49,8 +123,8 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
 
   def init(): Unit = {
     if (isRapidsShuffleConfigured) {
-      shuffleCatalog =
-          new ShuffleBufferCatalog()
+      shuffleCatalog = new ShuffleBufferCatalog(
+        mapIdsCanRepeat = SparkEnv.get.conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL))
       shuffleReceivedBufferCatalog =
           new ShuffleReceivedBufferCatalog()
       // Initialize MultithreadedShuffleBufferCatalog for MULTITHREADED mode when:
@@ -216,6 +290,40 @@ object GpuShuffleEnv extends Logging {
     null
   } else {
     env.getCatalog
+  }
+
+  private[rapids] def getBroadcastCache: ExecutorBroadcastCache[SpillableColumnarBatch] = {
+    require(env != null, "GPU shuffle environment has not been initialized")
+    env.broadcastCache
+  }
+
+  def invalidateBroadcastAndThen(shuffleId: Int)(cleanup: => Unit): Unit = {
+    Option(env) match {
+      case Some(current) => current.invalidateBroadcastAndThen(shuffleId)(cleanup)
+      case None => cleanup
+    }
+  }
+
+  /**
+   * Detaches the cached builds of `shuffleId`, then runs `catalogReclaim`, whatever the detach
+   * did. A disposal failure is logged, and a fatal one is thrown once `catalogReclaim` has run.
+   *
+   * @return what `catalogReclaim` returned, how many builds were detached, and their bytes
+   */
+  def reclaimBroadcastAndThen(shuffleId: Int, isStopped: () => Boolean)(
+      catalogReclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
+    Option(env) match {
+      case Some(current) => current.reclaimBroadcastAndThen(shuffleId, isStopped)(catalogReclaim)
+      case None => (catalogReclaim, 0, 0L)
+    }
+  }
+
+  /** Retire cached builds before teardown, preserving errors while still running cleanup. */
+  def closeBroadcastCacheAndThen(cleanup: => Unit): Unit = {
+    Option(env) match {
+      case Some(current) => current.closeBroadcastCacheAndThen(cleanup)
+      case None => cleanup
+    }
   }
 
   def getMultithreadedCatalog: Option[MultithreadedShuffleBufferCatalog] = {

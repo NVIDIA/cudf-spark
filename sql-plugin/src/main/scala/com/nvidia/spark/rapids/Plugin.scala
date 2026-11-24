@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import java.lang.reflect.InvocationTargetException
 import java.net.URL
 import java.time.ZoneId
-import java.util.Properties
+import java.util.{HashMap, Map => JavaMap, Properties}
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
@@ -35,6 +35,8 @@ import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
+import com.nvidia.spark.rapids.parquet.HybridScanPipeline
+import com.nvidia.spark.rapids.perf.HistoryHeuristics
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
@@ -47,7 +49,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
-import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleCleanupListener, XxHash64Utils}
+import org.apache.spark.sql.rapids.{GpuShuffleEnv, GpuShuffleRegistry, ShuffleCleanupListener,
+  UcxSqlEndListener, XxHash64Utils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 class PluginException(msg: String) extends RuntimeException(msg)
@@ -150,19 +153,16 @@ object RapidsPluginUtils extends Logging {
     }
   }
 
+  private[rapids] def isMainJarResource(url: URL, propName: String): Boolean = {
+    val path = url.toString
+    val submoduleJar = """.*(cudf-spark|rapids-4-spark)-[^/!]*_2\.(12|13)-[^/!]*\.jar!/.*"""
+    path.endsWith(s"!/$propName") && !path.matches(submoduleJar)
+  }
+
   private def detectMultipleJar(propName: String, jarName: String, conf: RapidsConf): Unit = {
     val classloader = ShimLoader.getShimClassLoader()
-    val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
-      url => {
-        val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar,
-        // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
-        // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
-        !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
-      }
-    }
+    val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq
+      .filter(isMainJarResource(_, propName))
     val revisionRegex = "revision=(.*)".r
     val revisionMap: Map[String, Seq[URL]] = possibleRapidsJarURLs.map { url =>
       val versionInfo = scala.io.Source.fromURL(url).getLines().toSeq
@@ -209,7 +209,7 @@ object RapidsPluginUtils extends Logging {
   }
 
   def detectMultipleJars(conf: RapidsConf): Unit = {
-    detectMultipleJar(PLUGIN_PROPS_FILENAME, "rapids-4-spark", conf)
+    detectMultipleJar(PLUGIN_PROPS_FILENAME, "cudf-spark", conf)
     detectMultipleJar(JNI_PROPS_FILENAME, "cudf-spark-jni", conf)
     detectMultipleJar(CUDF_PROPS_FILENAME, "cudf", conf)
   }
@@ -482,6 +482,11 @@ object RapidsPluginUtils extends Logging {
 class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   var shuffleCleanupListener: ShuffleCleanupListener = null
+  var ucxReclaimListener: UcxSqlEndListener = null
+  private val historyMetricsManager = new HistoryMetricsManager
+  private var historyMetricsSparkContext: SparkContext = _
+  private var historyMetricsConfiguration: JavaMap[String, String] = _
+  private var historyMetricsProviderName: String = _
   private lazy val extraDriverPlugins =
     RapidsPluginUtils.extraPlugins.map(_.driverPlugin()).filterNot(_ == null)
 
@@ -518,6 +523,10 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
           manager.handleStats(executorId, stats)
         }
         null // No response needed for stats report
+      case m: RapidsShuffleReclaimPollMsg => UcxShuffleReclaimDriver.handlePoll(m)
+      case m: RapidsShuffleReclaimResultMsg =>
+        UcxShuffleReclaimDriver.handleResult(m)
+        null // No response needed for reclaim results
       case m => throw new IllegalStateException(s"Unknown message $m")
     }
   }
@@ -559,6 +568,8 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
         "Set spark.cudf.memory.host.offHeapLimit.enabled=true to use skipMerge feature.")
     }
 
+    ucxReclaimListener = UcxShuffleReclaimDriver.start(sc, conf, sparkConf).orNull
+
     if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
       GpuShuffleEnv.initShuffleManager()
     }
@@ -575,6 +586,13 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     }
 
     FileCacheLocalityManager.init(sc)
+    historyMetricsSparkContext = sc
+    historyMetricsConfiguration =
+      new HashMap[String, String](sparkConf.getAll.toMap.asJava)
+    historyMetricsProviderName = conf.historyMetricsProvider
+    logInfo(s"History metrics: requested=$historyMetricsProviderName, " +
+      "activation deferred until Spark assigns the application ID")
+    HistoryHeuristics.start(sc, conf)
 
     logDebug("Loading extra driver plugins: " +
       s"${extraDriverPlugins.map(_.getClass.getName).mkString(",")}")
@@ -584,17 +602,53 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   override def registerMetrics(appId: String, pluginContext: PluginContext): Unit = {
+    val sc = historyMetricsSparkContext
+    if (sc != null) {
+      try {
+        val producerVersion =
+          buildInfoEvent.sparkRapidsBuildInfo.getOrElse("version", "UNKNOWN")
+        historyMetricsManager.initialize(
+          historyMetricsConfiguration,
+          appId,
+          sc.applicationAttemptId.orNull,
+          producerVersion,
+          historyMetricsProviderName,
+          HistoryHeuristics.catalog)
+      } catch {
+        case failure if HistoryMetricsManager.isContained(failure) =>
+          logError("History metrics activation failed; history-backed heuristics remain disabled",
+            failure)
+      } finally {
+        HistoryHeuristics.activate()
+        historyMetricsConfiguration = null
+        historyMetricsProviderName = null
+      }
+    }
     extraDriverPlugins.foreach(_.registerMetrics(appId, pluginContext))
   }
 
   override def shutdown(): Unit = {
+    val sc = historyMetricsSparkContext
+    historyMetricsSparkContext = null
+    historyMetricsConfiguration = null
+    historyMetricsProviderName = null
     RapidsPluginUtils.safeShutdown(
       extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
         Seq(
+          () => historyMetricsManager.shutdown(() => {
+            // Spark 4 shuts plugins down before draining the listener bus. Allow pending
+            // callbacks to record observations before removing and closing the history store.
+            Option(sc).foreach(TrampolineUtil.waitForListenerEvents(_,
+              HistoryMetricsManager.LISTENER_SHUTDOWN_TIMEOUT.toMillis))
+          }),
+          // After the drain above, so pending executions still record.
+          () => HistoryHeuristics.stop(),
           () => FileCacheLocalityManager.shutdown(),
           // Shutdown listener first to trigger cleanup for any remaining jobs
           () => Option(shuffleCleanupListener).foreach(_.shutdown()),
-          () => ShuffleCleanupManager.shutdown()))
+          () => Option(ucxReclaimListener).foreach(_.shutdown()),
+          () => ShuffleCleanupManager.shutdown(),
+          () => GpuShuffleRegistry.shutdown()))
   }
 }
 
@@ -630,6 +684,7 @@ case class ActiveTaskMetrics(
 class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   var rapidsShuffleHeartbeatEndpoint: RapidsShuffleHeartbeatEndpoint = null
   var shuffleCleanupEndpoint: ShuffleCleanupEndpoint = null
+  var ucxReclaimEndpoint: ShuffleCleanupEndpoint = null
   private lazy val extraExecutorPlugins =
     RapidsPluginUtils.extraPlugins.map(_.executorPlugin()).filterNot(_ == null)
 
@@ -705,6 +760,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           rapidsShuffleHeartbeatEndpoint = new RapidsShuffleHeartbeatEndpoint(pluginContext, conf)
           rapidsShuffleHeartbeatEndpoint.registerShuffleHeartbeat()
         }
+        ucxReclaimEndpoint = UcxShuffleReclaimExecutor.start(pluginContext, conf, sparkConf).orNull
         if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
           // Initialize ShuffleCleanupEndpoint for MULTITHREADED mode when
           // MultithreadedShuffleBufferCatalog is enabled (skipMerge=true, ESS disabled,
@@ -744,7 +800,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       // and exit immediately.
       case e: CudaException =>
         logError("Exception in the executor plugin, shutting down!", e)
-        logGpuDebugInfoAndExit(systemExitCode = 1)
+        RapidsExecutorPlugin.logGpuDebugInfoAndExit(systemExitCode = 1)
       case e: Throwable =>
         logError("Exception in the executor plugin, shutting down!", e)
         RapidsExecutorPlugin.exitWithHaltOnTimeout(1)
@@ -802,49 +858,16 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         s"JSONUtils.MAX_PATH_DEPTH (${JSONUtils.MAX_PATH_DEPTH})")
   }
 
-  // Wait for command spawned via Process
-  private def waitForProcess(cmd: Process, durationMs: Long): Option[Int] = {
-    val endTime = System.currentTimeMillis() + durationMs
-    do {
-      Thread.sleep(10)
-      if (!cmd.isAlive()) {
-        return Some(cmd.exitValue())
-      }
-    } while (System.currentTimeMillis() < endTime)
-    // Timed out
-    cmd.destroy()
-    None
-  }
-
-  // Try to run nvidia-smi when task fails due to a cuda exception.
-  private def logGpuDebugInfoAndExit(systemExitCode: Int) = synchronized {
-    try {
-      val nvidiaSmiStdout = new StringBuilder
-      val nvidiaSmiStderr = new StringBuilder
-      val cmd = "nvidia-smi -q".run(
-        ProcessLogger(s => nvidiaSmiStdout.append(s + "\n"), s => nvidiaSmiStderr.append(s + "\n")))
-      waitForProcess(cmd, 10000) match {
-        case Some(exitStatus) =>
-          if (exitStatus == 0) {
-            logWarning("nvidia-smi:\n" + nvidiaSmiStdout)
-          } else {
-            logWarning("nvidia-smi failed with: " + nvidiaSmiStdout + nvidiaSmiStderr)
-          }
-        case None => logWarning("nvidia-smi command timed out")
-      }
-    } catch {
-      case e: Throwable =>
-        logWarning("nvidia-smi process failed", e)
-    }
-    RapidsExecutorPlugin.exitWithHaltOnTimeout(systemExitCode)
-  }
-
   override def shutdown(): Unit = {
     RapidsPluginUtils.safeShutdown(
       Seq(
         () => GpuTimeZoneDB.shutdown(),
         () => GpuSemaphore.shutdown(),
         () => PythonWorkerSemaphore.shutdown(),
+        () => HybridScanPipeline.shutdown(),
+        // Closed before the device teardown, so no reclaim starts during it, and the one in
+        // flight stops at its next free, which close() waits for.
+        () => Option(ucxReclaimEndpoint).foreach(_.close()),
         () => GpuDeviceManager.shutdown(),
         () => ProfilerOnExecutor.shutdown(),
         () => if (isAsyncProfilerEnabled) {
@@ -869,8 +892,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           case Some(e) if containsCudaFatalException(e) =>
             logError("Stopping the Executor based on exception being a fatal CUDA error: " +
               s"${ef.toErrorString}")
-            GpuCoreDumpHandler.waitForDump(timeoutSecs = 60)
-            logGpuDebugInfoAndExit(systemExitCode = 20)
+            RapidsExecutorPlugin.exitOnCudaFatalError(20)
           case Some(_: CudaException) =>
             logDebug(s"Executor onTaskFailed because of a non-fatal CUDA error: " +
               s"${ef.toErrorString}")
@@ -928,6 +950,62 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
 }
 
 object RapidsExecutorPlugin extends Logging {
+  private def waitForProcess(cmd: Process, durationMs: Long): Option[Int] = {
+    val endTime = System.currentTimeMillis() + durationMs
+    do {
+      Thread.sleep(10)
+      if (!cmd.isAlive()) {
+        return Some(cmd.exitValue())
+      }
+    } while (System.currentTimeMillis() < endTime)
+    cmd.destroy()
+    None
+  }
+
+  private[rapids] def exitOnCudaFatalError(exitCode: Int): Unit = {
+    waitForGpuCoreDumpThenExit(
+      GpuCoreDumpHandler.waitForDump(timeoutSecs = 60),
+      logGpuDebugInfoAndExit(exitCode))
+  }
+
+  private[rapids] def waitForGpuCoreDumpThenExit(waitForDump: => Unit, exit: => Unit): Unit = {
+    // Clear an interrupt pending on entry so it cannot skip the dump wait or diagnostics.
+    var interrupted = Thread.interrupted()
+    try {
+      waitForDump
+    } catch {
+      case error: InterruptedException =>
+        interrupted = true
+        logWarning("Interrupted while waiting for GPU core dump", error)
+      case error: Throwable =>
+        logWarning("Error while waiting for GPU core dump", error)
+    } finally {
+      try exit finally if (interrupted) Thread.currentThread().interrupt()
+    }
+  }
+
+  private[rapids] def logGpuDebugInfoAndExit(systemExitCode: Int): Unit = synchronized {
+    try {
+      val nvidiaSmiStdout = new StringBuilder
+      val nvidiaSmiStderr = new StringBuilder
+      val cmd = "nvidia-smi -q".run(
+        ProcessLogger(s => nvidiaSmiStdout.append(s + "\n"), s => nvidiaSmiStderr.append(s + "\n")))
+      waitForProcess(cmd, 10000) match {
+        case Some(exitStatus) =>
+          if (exitStatus == 0) {
+            logWarning("nvidia-smi:\n" + nvidiaSmiStdout)
+          } else {
+            logWarning("nvidia-smi failed with: " + nvidiaSmiStdout + nvidiaSmiStderr)
+          }
+        case None => logWarning("nvidia-smi command timed out")
+      }
+    } catch {
+      case e: Throwable =>
+        logWarning("nvidia-smi process failed", e)
+    }
+    exitWithHaltOnTimeout(systemExitCode)
+  }
+
   /**
    * Calling System.exit will trigger shutdown hooks to run.
    * This code is intended to let them run, but then force

@@ -7,6 +7,119 @@ verify that the plugin is doing the right thing in as many cases as possible.
 There are two sets of tests. The PySpark tests are described on this page. The scala tests are
 described [here](../tests/README.md).
 
+## Deterministic path-character coverage
+
+`path_character_test.py` writes five distinct payloads at literal paths containing `a b`,
+`a+b`, `a%20b`, `a%2Fb`, and `路径`. It checks each spelling in base directories and
+filenames, then in Spark-escaped partition directories and filenames. A fixed row oracle
+checks that the values remain distinct, in addition to CPU/GPU comparison and an executed
+GPU scan assertion. Static source labels and partition columns keep each requested path
+associated with its payload, so swapping two object reads cannot pass by preserving the
+overall row set. Fixtures use Hadoop APIs rather than driver-local filesystem APIs,
+so the same tests work with the backend jobs' writable `--tmp_path`.
+With the file cache disabled, immutable file fixtures are shared across reader parameters
+within a module, limiting the full file matrix to ten small datasets. When the startup
+file cache is enabled, each Parquet and ORC case gets fresh files so transport checks still
+require backend I/O; the full file matrix then writes thirty small datasets. The backend runner
+disables caching at startup to keep fixture creation small.
+
+| Reader | Hadoop FileSystem (local/HDFS/S3A/GCS connector) | PerfIO S3 Netty / CRT | PerfIO GCS HTTP |
+| --- | --- | --- | --- |
+| Parquet | Base, partition, filename | Base, partition, filename | Base, partition, filename |
+| ORC | Base, partition, filename | Base, partition, filename | Base, partition, filename |
+| CSV / JSON | Base, partition, filename | N/A: reader uses Hadoop line streams | N/A: reader uses Hadoop line streams |
+| Avro | Base, partition, filename | N/A: reader uses Hadoop streams | N/A: reader uses Hadoop streams |
+| Delta Parquet | Table root and partitions through Delta's file index | Table root and partitions | Table root and partitions |
+| Iceberg Parquet | Encoded partitions through catalog FileIO | Encoded partitions through S3FileIO | N/A: Iceberg FileIO has no PerfIO GCS adapter; catalog streams are tested |
+| Hive delimited text | Remaining #16340 coverage; GPU reader exists | Not covered here | Not covered here |
+| Text / binaryFile / other CPU-only sources | N/A: no GPU file reader | N/A | N/A |
+| Iceberg ORC / Avro | N/A: no GPU table reader | N/A | N/A |
+
+`iceberg/iceberg_path_test.py` uses the five strings as partition values. Iceberg
+encodes them in data file paths: `a b` becomes `a+b`, `a+b` becomes `a%2Bb`,
+`a%20b` becomes `a%2520b`, `a%2Fb` becomes `a%252Fb`, and `路径` becomes
+`%E8%B7%AF%E5%BE%84`. The test prints the actual paths from the table's `files`
+metadata and asserts these encoded partition directories. This covers literal `+`
+and `%` in Iceberg paths; it does not construct raw spaces or Unicode in those
+directories. Raw special characters in Iceberg table roots require a separately
+configured warehouse location.
+
+All five ordinary file formats cover V1 and V2 scans. Parquet, ORC, and Avro cover
+PERFILE, COALESCING, and MULTITHREADED readers without crossing unrelated reader options.
+CPU writes create the fixtures even when GPU writes are unavailable. Non-empty payload
+columns require data reads; Parquet/ORC additionally require their footer/tail reads.
+Delta and Iceberg own data filenames and transaction/manifest references, so arbitrary
+filename renames are N/A for those table scans. Hadoop and remote managed Iceberg catalogs
+also own table roots; arbitrary per-table locations are N/A. Configure a warehouse with
+unusual base-path characters to exercise the catalog's root policy. Iceberg tests cover
+supported format versions via the existing runtime/version gates. Avro requires the
+existing `INCLUDE_SPARK_AVRO_JAR=true` setup; the backend runner enables it for
+the ordinary-file matrix so missing Avro support cannot silently skip those cases.
+
+The shared assertion reads task accumulators from stages completed by the GPU query,
+after the CPU query. It requires the selected PerfIO transport's counter to increase and
+rejects alternative transports, S3A fallback, and Iceberg S3 fallback. Iceberg S3 PerfIO
+runs also check that every actual data InputFile inherits Iceberg's `BaseS3File`,
+which the S3 adapter accepts. This includes direct `S3FileIO` and `ResolvingFileIO`
+delegation. A catalog returning Hadoop InputFiles is not evidence of the Iceberg S3 adapter.
+Auto mode uses a Hadoop expectation for those catalogs and retains zero-PerfIO assertions. The incorrect metric
+attribution tracked in #16846 may cause those assertions to fail; this test does not
+relax them. CSV/JSON/Avro and
+Iceberg GCS require all PerfIO transport counters to stay zero, as documented above.
+GCS gRPC is N/A for the current PerfIO default client: it constructs HTTP
+`StorageOptions`; a gRPC counter is still checked to detect unexpected transport changes.
+
+Test discovery does not establish cloud execution. The S3/GCS backend matrix is run
+manually for now; wiring these invocations into backend-specific jobs remains #16340
+work. Default local/DBFS temporary paths exercise Hadoop, not S3/GCS PerfIO. Premerge's
+separate Avro invocation selects `avro_test.py`, so it does not add the twelve Avro
+path-character cases; nightly jobs with Avro enabled can discover them.
+
+For ordinary remote reads, auto mode requires an explicit startup
+`spark.rapids.perfio.s3.enabled=true/false` or
+`spark.rapids.perfio.gcs.enabled=true/false`, or an explicit `--path_backend`.
+It does not predict an executor's opportunistic defaults from driver classes or runtime
+labels. Expected backends remain independent of the observed task counters.
+Use the existing connector/SDK classpath and credentials for each manual invocation:
+
+```bash
+# Each invocation starts a separate Spark application with file cache disabled.
+bash integration_tests/run_path_character_tests.sh hadoop <writable-local-or-cloud-path>
+bash integration_tests/run_path_character_tests.sh s3-netty s3a://<bucket>/<test-prefix>
+bash integration_tests/run_path_character_tests.sh s3-crt s3a://<bucket>/<test-prefix>
+bash integration_tests/run_path_character_tests.sh gcs-http gs://<bucket>/<test-prefix>
+
+# Select table cases explicitly; the runner adds the corresponding enable flag.
+TESTS=path_character_test.py::test_delta_path_characters bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> -m delta_lake
+TESTS=iceberg/iceberg_path_test.py bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> -m iceberg
+```
+
+The wrapper sets startup-only PerfIO flags before Spark starts; `--path_backend` declares
+the required backend independently. The default selection is the 44 ordinary-file cases.
+Selecting the whole `path_character_test.py` file also enables its 15 Delta cases; selecting
+the Delta test alone avoids repeating the ordinary-file matrix. Selecting the Iceberg file
+requires `EXPECTED_ICEBERG_VERSION` and automatically enables Iceberg. These enable flags
+do not install JARs, configure catalogs, or override supported runtime/version gates.
+
+Iceberg ignores `--tmp_path` for table data. Configure a catalog warehouse on the selected
+storage (for example `s3a://<bucket>/<warehouse-prefix>` for S3), along with the existing
+Spark Iceberg extensions, catalog class/type, and credentials. S3 PerfIO additionally requires
+S3-backed InputFiles from the actual table FileIO, such as direct
+`org.apache.iceberg.aws.s3.S3FileIO` or S3 delegation through
+`org.apache.iceberg.io.ResolvingFileIO`. Configure the catalog with
+`spark.sql.catalog.<catalog>.io-impl` and the matching Iceberg AWS bundle and SDK classes.
+Set `EXPECTED_ICEBERG_VERSION` to the runtime JAR version (for example `1.10.1`); the existing
+version gates then select supported format versions. A local warehouse with an explicit
+S3 backend fails instead of testing a different storage backend.
+
+Missing dependencies or a wrong backend must be corrected before claiming that matrix row
+passed. Review the passed/skipped counts: unsupported runtime/version combinations can
+still skip through the shared test gates. Normal temporary-path and table fixtures clean up
+the small datasets. Cloud credentials and connector/catalog dependencies remain prerequisites
+of the selected runtime.
+
 ## Setting Up the Environment
 
 The tests are based off of `pyspark` and `pytest` running on Python 3. There really are
@@ -246,7 +359,7 @@ For example, `spark.sql.catalog.spark_catalog` is represented by the environment
 
 We also have a large number of integration tests that currently run as a part of the unit tests
 using scala test. Those are in the `src/test/scala` sub-directory and depend on the testing
-framework from the `rapids-4-spark-tests_2.x` test jar.
+framework from the `cudf-spark-tests_2.x` test jar.
 
 You can run these tests against a cluster similar to how you can run `pytests` against an
 existing cluster. To do this you need to launch a cluster with the plugin jars on the
@@ -265,7 +378,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.10.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars cudf-spark-tests_2.12-26.12.0-SNAPSHOT-tests.jar,cudf-spark-integration-tests_2.12-26.12.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -284,11 +397,11 @@ durations.run(new com.nvidia.spark.rapids.JoinsSuite)
 
 Most clusters probably will not have the RAPIDS plugin installed in the cluster yet.
 If you just want to verify the SQL replacement is working you will need to add the
-`rapids-4-spark` jar to your `spark-submit` command. Note the following example
+`cudf-spark` jar to your `spark-submit` command. Note the following example
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -479,7 +592,7 @@ SPARK_HISTORY_OPTS="-Dspark.history.fs.logDirectory=integration_tests/target/run
   ${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.history.HistoryServer
 ```
 
-By default, integration tests write event logs using [Zstandard](https://facebook.github.io/zstd/)
+By default, integration tests write event logs using [Zstandard](https://meta.github.io/zstd/)
 (`zstd`) compression codec. It can be changed by setting the environment variable `PYSP_TEST_spark_eventLog_compression_codec` to one of
 the SHS supported values for the config key
 [`spark.eventLog.compression.codec`](https://spark.apache.org/docs/latest/configuration.html#spark-ui)
@@ -521,7 +634,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.10.0-SNAPSHOT.jar" --conf spark.cudf.memory.gpu.allocFraction=0.3 --conf spark.cudf.python.memory.gpu.allocFraction=0.3 --conf spark.cudf.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar,cudf-spark-tests_2.12-26.12.0-SNAPSHOT.jar" --conf spark.cudf.memory.gpu.allocFraction=0.3 --conf spark.cudf.python.memory.gpu.allocFraction=0.3 --conf spark.cudf.python.concurrentPythonWorkers=2 --py-files "cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests
@@ -541,6 +654,46 @@ If Spark has been configured to support Iceberg then these tests can be enabled 
 `--iceberg` option to the command.
 Set `EXPECTED_ICEBERG_VERSION` to the exact Iceberg runtime version whenever `--iceberg` is used;
 pytest reports a configuration error when it is missing.
+
+Select the fast matrix suite with `-m 'iceberg and iceberg_fast_test' --iceberg`.
+Only tests explicitly decorated with `@iceberg_fast_test` from `marks` are included.
+Add `@iceberg_fast_test` only when selecting representative coverage for the fast suite.
+New unmarked tests remain in the full suite unless explicitly selected.
+For example, with Iceberg configured:
+
+```shell
+EXPECTED_ICEBERG_VERSION=1.10.1 \
+  ./integration_tests/run_pyspark_from_build.sh -m 'iceberg and iceberg_fast_test' --iceberg
+```
+
+Nightly pipelines using `jenkins/spark-tests.sh` control version and suite selection through
+`ICEBERG_VERSIONS` and `ICEBERG_FAST_TEST`. Set `ICEBERG_FAST_TEST=1` to append the
+`iceberg_fast_test` marker for local, REST, or S3 Tables tests. It defaults to `0`, which leaves
+the full Iceberg suite selected. For example, `ICEBERG_VERSIONS=1.10.1 ICEBERG_FAST_TEST=1` runs
+only that runtime with the fast suite; use `ICEBERG_FAST_TEST=0` or omit it for the full suite.
+Only `0`, `1`, or an unset variable is accepted; empty strings and other values fail before tests
+start. The job logs the selected suite and the combined marker expression.
+Multiple requested versions run in the supplied order. Without `ICEBERG_VERSIONS`, the job runs
+every JSON-selected version. The caller does not schedule full versus fast runs automatically.
+`TEST_TAGS` optionally adds a marker expression, combined with the Iceberg and fast-suite selectors
+using `and`; for example, `ICEBERG_FAST_TEST=1 TEST_TAGS='not slow'` further filters the fast suite.
+Direct invocations of `run_pyspark_from_build.sh` select the fast suite with `-m` as shown above.
+Catalog and version restrictions still apply. A marker filter matching no tests retains pytest's
+failure status; it is distinct from a successful skip for an empty version selection.
+
+Runtime version queries accept exact `major.minor.patch` releases and read only
+`scripts/iceberg-versions.json`; snapshot selection is not implemented. The dedicated premerge validation
+job checks the complete matrix against Maven using the canonical Scala 2.13 POM, which includes the
+Spark 4 profiles absent from the Scala 2.12 reactor.
+
+Validation requires the enabled JSON combinations to match Maven packaging exactly.
+Spark 3.5.0 with Iceberg 1.6.1, Spark 3.5.4 with Iceberg 1.9.2, and Spark 3.5.4/3.5.5 with
+Iceberg 1.10.1 remain enabled for compatibility with the existing implementation. Each has a
+`comment` in the JSON explaining its exception to the minimum test baselines in
+[issue #15875](https://github.com/NVIDIA/cudf-spark/issues/15875). New Iceberg versions must satisfy
+those baselines and cannot inherit these exceptions. Explicit `ICEBERG_VERSIONS` requests must
+have enabled matrix entries. Profiles with no packaged runtime, such as the Spark 4.2.0 stub,
+select no versions and log a successful skip.
 
 When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
 `ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
@@ -581,10 +734,9 @@ partition type to keep memory usage manageable.
 #### Iceberg REST catalog write compression
 
 Older Iceberg REST clients, including 1.6.x, do not apply client-side
-`spark.sql.catalog.*.table-default.*` settings when creating REST tables. The resulting tables
-can use a default Parquet compression codec that is not supported by the RAPIDS GPU writer.
-REST catalog tests therefore add explicit table properties for data and delete files to use
-`zstd`, which is supported by the GPU writer:
+`spark.sql.catalog.*.table-default.*` settings when creating REST tables. REST catalog tests
+therefore set explicit table properties for data and delete files to preserve `zstd` as the test
+codec:
 
 ```sql
 TBLPROPERTIES (
@@ -610,6 +762,69 @@ Some tests require that Delta Lake has been configured in the Spark environment 
 properly without it. These tests assume Delta Lake is not configured and are disabled by default.
 If Spark has been configured to support Delta Lake then these tests can be enabled by adding the
 `--delta_lake` option to the command.
+
+### Enabling Unity Catalog catalog-managed table tests
+
+`delta_lake_catalog_managed_test.py` covers Delta Lake 4.2 catalog-managed (catalog-owned) tables
+through an OSS Unity Catalog server. `delta_lake_catalog_rest_test.py` covers the Delta 4.3 REST
+API safety boundary. They need a running catalog server, so they are disabled by default and are
+skipped unless both `--delta_lake` and `--unity_catalog` are passed and `DELTA_UC_URI` names a
+reachable server.
+
+The suites only apply to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0 or 4.3.0,
+Unity Catalog 0.6.0, and Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4. The 4.2 implementation validates
+the expected 0.6.0 `UCSingleCatalog` staging shape and falls back if that shape is not recognized.
+The 4.3 suite verifies that the CPU Delta catalog retains REST staging and commit control,
+including catalog identity, managed location, credentials, and metadata-changing operations.
+Failed staged writes are checked for partial table or Delta commit publication. Catalog
+staging-record cleanup is out of scope: Delta 4.3.0's staged-table abort does not remove those
+records, and Unity Catalog 0.6.0 provides no staging-delete REST operation.
+Reads and classic path tables can still use the GPU.
+
+In Delta 4.3.0, dynamic partition overwrite, UPDATE, and MERGE write generated row-tracking
+domain metadata into the staged commit referenced by the REST `add-commit` update; these
+operations do not send a separate `set-domain-metadata` update. The REST suite verifies the
+referenced staged action for each DML operation and separately verifies a direct
+`set-domain-metadata` intent on clustered RTAS. It does not claim direct REST domain-intent
+coverage for DML that Delta 4.3.0 does not emit.
+
+`run_unity_catalog_server.sh` resolves the Unity Catalog jars, starts a server backed by a fake S3
+bucket on local disk, and exports everything the tests need. To run the whole suite in one shot:
+
+```shell
+./integration_tests/run_unity_catalog_server.sh -- \
+  ./integration_tests/run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
+```
+
+The default is Delta 4.2.0. Pass `--delta-version 4.3.0` and select
+`delta_lake_catalog_rest_test.py` to run the REST safety suite.
+
+To keep one server alive across repeated test runs, start it without a command. It stays in the
+foreground and prints an env file to source from a second terminal:
+
+```shell
+./integration_tests/run_unity_catalog_server.sh
+```
+
+`--port`, `--uc-version`, `--delta-version`, and `--refresh` are available; see `--help`. Spark and
+Scala versions are taken from `SPARK_VER`/`SCALA_BINARY_VER` when set and otherwise derived from
+`$SPARK_HOME`, and the resolved classpaths are cached under
+`integration_tests/target/unity-catalog/`.
+
+No real object store is involved. `CredentialTestFileSystem` maps the fake `s3://test-bucket0`
+bucket onto local disk and asserts that the credentials vended by the catalog reached the
+filesystem, so a path-only Delta log cannot pass, and the RAPIDS S3 reader is disabled because
+that bucket is not a real S3 endpoint. The tests create their own catalog and schema on the server
+and generate all of their own data, so it starts empty and is discarded afterwards.
+
+`jenkins/spark-tests.sh` runs an end-to-end Delta 4.2 managed-table smoke case and the complete
+Delta 4.3 REST safety suite in `TEST_MODE=DEFAULT` for the supported Spark/Scala matrix.
+`TEST_MODE=DELTA_LAKE_UC_ONLY` runs both complete suites with its own copy of the server launch.
+
+This base catalog-managed-table integration accelerates DELETE, UPDATE, MERGE, and dynamic
+partition overwrite when those operations rewrite data files. If an operation is configured to
+persist deletion vectors, it deliberately falls back to the CPU until the separate persistent-DV
+DML work is integrated and exercised against catalog-managed tables.
 
 ### Enabling large data tests
 Some tests are testing large data which will take a long time. By default, these tests are disabled.

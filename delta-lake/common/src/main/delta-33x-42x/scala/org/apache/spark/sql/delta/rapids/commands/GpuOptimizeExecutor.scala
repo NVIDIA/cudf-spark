@@ -40,7 +40,7 @@ import org.apache.spark.sql.delta.commands.{Batch, Bin, ClusteringStrategy, Dele
 import org.apache.spark.sql.delta.commands.optimize._
 import org.apache.spark.sql.delta.files.SQLMetricsReporting
 import org.apache.spark.sql.delta.logging.DeltaLogKeys
-import org.apache.spark.sql.delta.rapids.{GpuDeltaCommandLike, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim33x, GpuDeltaCommandLike, GpuDeltaLog,
   GpuOptimisticTransactionBase, GpuOptimizeTableCommand}
 import org.apache.spark.sql.delta.rapids.DeltaMdcShims.mdc
 import org.apache.spark.sql.delta.skipping.MultiDimClustering
@@ -71,9 +71,11 @@ class GpuOptimizeExecutor(
   private def ensureDeletionVectorDisabled(): Unit = {
     val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(snapshot)
 
-    // Ordinary OPTIMIZE must fall back when deletion vectors are enabled. REORG PURGE is
-    // different: it reads existing deletion vectors and writes replacement files without them.
-    if (dvFeatureEnabled && optimizeContext.reorg.isEmpty) {
+    // Compaction must fall back when deletion vectors are enabled. REORG PURGE and Z-ORDER
+    // are different: they read existing deletion vectors and rewrite the live rows into
+    // replacement files without them.
+    val rewritesLiveRows = optimizeContext.reorg.nonEmpty || zOrderByColumns.nonEmpty
+    if (dvFeatureEnabled && !rewritesLiveRows) {
       throw new IllegalStateException("Deletion vector not supported in gpu, we should have " +
         "fallback to cpu in GpuOptimizeExecutor")
     }
@@ -92,7 +94,7 @@ class GpuOptimizeExecutor(
   private val optimizeStrategy =
     OptimizeTableStrategy(sparkSession, snapshot, optimizeContext, zOrderByColumns)
 
-  /** Timestamp to use in [[FileAction]] */
+  /** Timestamp to use in `FileAction` */
   private val operationTimestamp = new SystemClock().getTimeMillis()
 
   private val isClusteredTable = ClusteredTableUtils.isSupported(snapshot.protocol)
@@ -114,7 +116,7 @@ class GpuOptimizeExecutor(
   private val partitionSchema = snapshot.metadata.partitionSchema
 
   def optimize(): Seq[Row] = {
-    recordDeltaOperation(snapshot.deltaLog, "delta.optimize") {
+    DeltaRuntimeShim33x.runDeltaOperation(snapshot.deltaLog, "delta.optimize") {
       val minFileSize = optimizeContext.minFileSize.getOrElse(
         sparkSession.sessionState.conf.getConf(DeltaSQLConf.DELTA_OPTIMIZE_MIN_FILE_SIZE))
       val maxFileSize = optimizeContext.maxFileSize.getOrElse(
@@ -129,11 +131,13 @@ class GpuOptimizeExecutor(
 
       val filesToProcess = optimizeContext.reorg match {
         case Some(reorgOperation) =>
-          reorgOperation.filterFilesToReorg(sparkSession, snapshot, candidateFiles)
+          DeltaRuntimeShim33x.filterFilesToReorg(
+            reorgOperation, sparkSession, snapshot, candidateFiles)
         case None =>
           filterCandidateFileList(minFileSize, maxDeletedRowsRatio, candidateFiles)
       }
-      val partitionsToCompact = filesToProcess.groupBy(_.partitionValues).toSeq
+      val partitionsToCompact = DeltaRuntimeShim33x.groupOptimizeFilesByPartition(
+        sparkSession, snapshot, filesToProcess)
 
       val jobs = groupFilesIntoBins(partitionsToCompact)
 
@@ -181,7 +185,7 @@ class GpuOptimizeExecutor(
 
   /**
    * Helper method to prune the list of selected files based on fileSize and ratio of
-   * deleted rows according to the deletion vector in [[AddFile]].
+   * deleted rows according to the deletion vector in `AddFile`.
    */
   private def filterCandidateFileList(
       minFileSize: Long, maxDeletedRowsRatio: Double, files: Seq[AddFile]): Seq[AddFile] = {
@@ -319,8 +323,8 @@ class GpuOptimizeExecutor(
   /**
    * Utility method to run a Spark job to compact the files in given bin
    *
-   * @param txn [[OptimisticTransaction]] instance in use to commit the changes to DeltaLog.
-   * @param partition Partition values of the partition that files in [[bin]] belongs to.
+   * @param txn `OptimisticTransaction` instance in use to commit the changes to DeltaLog.
+   * @param partition Partition values of the partition that files in `bin` belongs to.
    * @param bin List of files to compact into one large file.
    * @param maxFileSize Targeted output file size in bytes
    */
@@ -378,7 +382,7 @@ class GpuOptimizeExecutor(
    * detection logic to indicate it is safe to try again, by returning `true`.
    *
    * This function will continue to try to commit to the log as long as `f` returns `true`,
-   * otherwise throws a subclass of [[ConcurrentModificationException]].
+   * otherwise throws a subclass of `ConcurrentModificationException`.
    */
   private def commitAndRetry(
       txn: GpuOptimisticTransactionBase,
@@ -404,7 +408,7 @@ class GpuOptimizeExecutor(
     }
   }
 
-  /** Create the appropriate [[Operation]] object for txn commit history */
+  /** Create the appropriate `Operation` object for txn commit history */
   private def getOperation(): Operation = {
     if (optimizeContext.reorg.nonEmpty) {
       DeltaOperations.Reorg(partitionPredicate)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from DataSkippingStatsTracker.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -35,7 +35,7 @@ import org.apache.spark.sql.rapids.{ColumnarWriteJobStatsTracker, ColumnarWriteT
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * A [[WriteTaskStats]] that contains a map from file name to the json representation
+ * A `WriteTaskStats` that contains a map from file name to the json representation
  * of the collected statistics.
  */
 case class GpuDeltaFileStatistics(stats: Map[String, String]) extends WriteTaskStats
@@ -139,9 +139,13 @@ class GpuDeltaTaskStatisticsTracker(
     submittedFiles.remove(filePath)
   }
 
-  override def newPartition(partitionValues: InternalRow): Unit = { }
+  override def newPartition(partitionValues: InternalRow): Unit = {
+    // Statistics are tracked per file rather than per partition.
+  }
 
-  override def writersNumber(numWriters: Int): Unit = { }
+  override def writersNumber(numWriters: Int): Unit = {
+    // Writer count is not needed for per-file statistics.
+  }
 
   protected def initializeAggBuf(buffer: SpecificInternalRow): InternalRow =
     initializeStats.target(buffer).apply(EmptyRow)

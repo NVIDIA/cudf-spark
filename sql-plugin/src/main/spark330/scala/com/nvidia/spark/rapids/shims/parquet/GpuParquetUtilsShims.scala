@@ -15,13 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "332db"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims.parquet
 
@@ -32,7 +26,9 @@ object GpuParquetUtilsShims {
   /**
    * Sets the given row index offset on the BlockMetaData. No-op for Spark 3.3.x.
    */
-  def setRowIndexOffset(block: BlockMetaData, offset: Long): Unit = {}
+  def setRowIndexOffset(block: BlockMetaData, offset: Long): Unit = {
+    // Row index offsets are not available in Spark 3.3.x.
+  }
 
   /**
    * Gets the row index offset from the BlockMetaData. Not available in Spark 3.3.x.

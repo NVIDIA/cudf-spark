@@ -75,5 +75,5 @@ object PythonConfEntries {
 
   // An empty function called by RapidsConf to initialize the config definitions above for
   // doc generation
-  def init(): Unit = {}
+  def init(): Unit = { /* Triggers object initialization */ }
 }

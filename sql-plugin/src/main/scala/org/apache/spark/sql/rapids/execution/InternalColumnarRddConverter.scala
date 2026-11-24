@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -626,7 +626,7 @@ private class ExternalRowToColumnarIterator(
 }
 
 /**
- * Please don't use this class directly use [[com.nvidia.spark.rapids.ColumnarRdd]] instead. We had
+ * Please don't use this class directly use `com.nvidia.spark.rapids.ColumnarRdd` instead. We had
  * to place the implementation in a spark specific package to poke at the internals of spark more
  * than anyone should know about.
  *

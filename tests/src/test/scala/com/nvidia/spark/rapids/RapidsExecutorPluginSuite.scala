@@ -19,6 +19,43 @@ package com.nvidia.spark.rapids
 import org.scalatest.funsuite.AnyFunSuite
 
 class RapidsExecutorPluginSuite extends AnyFunSuite {
+  test("fatal CUDA exit runs after an interrupted GPU core dump wait") {
+    var exited = false
+    try {
+      RapidsExecutorPlugin.waitForGpuCoreDumpThenExit(
+        throw new InterruptedException("injected wait interruption"),
+        { exited = true })
+      assert(exited)
+      assert(Thread.currentThread().isInterrupted)
+    } finally {
+      Thread.interrupted()
+    }
+  }
+
+  test("fatal CUDA exit waits for GPU core dump despite a pending interrupt") {
+    var waitInterrupted = true
+    var exitInterrupted = true
+    try {
+      Thread.currentThread().interrupt()
+      RapidsExecutorPlugin.waitForGpuCoreDumpThenExit(
+        { waitInterrupted = Thread.currentThread().isInterrupted },
+        { exitInterrupted = Thread.currentThread().isInterrupted })
+      assert(!waitInterrupted)
+      assert(!exitInterrupted)
+      assert(Thread.currentThread().isInterrupted)
+    } finally {
+      Thread.interrupted()
+    }
+  }
+
+  test("fatal CUDA exit runs after a failed GPU core dump wait") {
+    var exited = false
+    RapidsExecutorPlugin.waitForGpuCoreDumpThenExit(
+      throw new IllegalStateException("injected wait failure"),
+      { exited = true })
+    assert(exited)
+  }
+
   test("cudf version check") {
     assert(RapidsExecutorPlugin.cudfVersionSatisfied("7", "7"))
     assert(!RapidsExecutorPlugin.cudfVersionSatisfied("7", "8"))

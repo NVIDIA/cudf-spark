@@ -18,7 +18,7 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gp
 from spark_session import is_before_spark_320, with_cpu_session
 from conftest import is_not_utc
 from data_gen import *
-from marks import ignore_order, allow_non_gpu
+from marks import ignore_order, allow_non_gpu, shuffle_test
 import pyspark.sql.functions as f
 
 # 4 level nested struct
@@ -308,6 +308,30 @@ def test_hash_repartition_exact(gen, num_parts):
         conf = {'spark.sql.adaptive.enabled': 'false'})
 
 
+@ignore_order(local=True)
+@pytest.mark.parametrize('num_parts', [100, 200], ids=idfn)
+@pytest.mark.parametrize('empty', [False, True], ids=idfn)
+def test_hash_repartition_fused_partition_ids(num_parts, empty):
+    # Verify actual shuffle destinations as well as row contents. Computed and nested keys
+    # exercise projection, normalization of signed zero/NaN, and Spark's null hashing rules.
+    rows = [(0, 0.0, '', []),
+            (1, -0.0, 'a\x00b', [1, None]),
+            (-1, float('nan'), '中🌍', None),
+            (None, None, None, [None]),
+            (-(1 << 31), float('-inf'), 'negative', [-1, 0]),
+            ((1 << 31) - 1, float('inf'), 'positive', [1, 2])]
+
+    def repartition(spark):
+        df = spark.createDataFrame([] if empty else rows * 1024,
+                                   'a int, b double, c string, d array<int>')
+        keys = [f.col('a').cast('long') + 3, f.col('b'), f.col('c'), f.col('d')]
+        return df.repartition(num_parts, *keys).withColumn('partition_id', f.spark_partition_id())
+
+    assert_gpu_and_cpu_are_equal_collect(repartition,
+        conf={'spark.sql.adaptive.enabled': 'false',
+              'spark.rapids.sql.partitioning.hashFunction.enabled': 'false'})
+
+
 @ignore_order(local=True)  # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @pytest.mark.parametrize('num_parts', [1, 2, 10, 17, 19, 32], ids=idfn)
 @pytest.mark.parametrize('is_ansi_mode', [False, True], ids=idfn)
@@ -361,31 +385,34 @@ def test_union_with_filter():
 
 
 # AQE off: collect_plan_nodes does not descend into AdaptiveSparkPlanExec.
-_zero_column_range_conf = {'spark.sql.adaptive.enabled': False,
-                           'spark.rapids.sql.metrics.level': 'DEBUG'}
+_zero_column_exchange_conf = {'spark.sql.adaptive.enabled': False,
+                              'spark.rapids.sql.metrics.level': 'DEBUG'}
 
-def _zero_column_range_exchanges(plan):
-    """gpuOutputPartitioning, not outputPartitioning: the latter is the CPU RangePartitioning."""
+def _zero_column_exchanges(plan, partitioning):
+    """GPU shuffle exchanges with a zero-column child and the given GPU partitioning."""
     return [node for node in collect_plan_nodes(plan)
             if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
-            and node.gpuOutputPartitioning().getClass().getSimpleName() == "GpuRangePartitioning"
+            and node.gpuOutputPartitioning().getClass().getSimpleName() == partitioning
             and node.children().apply(0).output().isEmpty()]
 
-def _assert_zero_column_range_exchange(cpu_plan, plan):
-    """The rows > 0 check matters: a plan that produces no rows never reaches the sampler."""
-    exchanges = _zero_column_range_exchanges(plan)
-    assert exchanges, \
-        "Expected a GPU range-partitioning exchange over a zero-column child in:\n{}".format(plan)
-    for exchange in exchanges:
-        child = exchange.children().apply(0)
-        rows = plan_metric(child, "numOutputRows")
-        assert rows is not None, \
-            "Expected a numOutputRows metric on {}; is the metrics level high enough?:\n{}".format(
-                child.getClass().getSimpleName(), plan)
-        assert rows > 0, \
-            "Expected the zero-column child of the range exchange to produce rows, got {} in:\n{}".format(
-                rows, plan)
+def _assert_zero_column_exchange(partitioning):
+    """Asserts a GPU exchange with the given partitioning over a zero-column child with rows."""
+    def assert_plan(cpu_plan, plan):
+        exchanges = _zero_column_exchanges(plan, partitioning)
+        assert exchanges, \
+            "Expected a GPU {} exchange over a zero-column child in:\n{}".format(partitioning, plan)
+        for exchange in exchanges:
+            child = exchange.children().apply(0)
+            rows = plan_metric(child, "numOutputRows")
+            assert rows is not None, \
+                "Expected a numOutputRows metric on {}; is the metrics level high enough?:\n{}".format(
+                    child.getClass().getSimpleName(), plan)
+            assert rows > 0, \
+                "Expected the zero-column child of the exchange to produce rows, got {} in:\n{}".format(
+                    rows, plan)
+    return assert_plan
 
+@shuffle_test
 def test_range_partition_zero_column_scan(spark_tmp_path):
     # payload exists only so the scan has a column for pruning to drop.
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -403,9 +430,10 @@ def test_range_partition_zero_column_scan(spark_tmp_path):
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
-        conf = _zero_column_range_conf,
-        gpu_plan_assertion = _assert_zero_column_range_exchange)
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuRangePartitioning'))
 
+@shuffle_test
 def test_range_partition_zero_column_skewed_resample():
     # Hits randomResample, not reservoirSampleAndCount: createRangeBounds only re-samples a
     # partition holding more than three quarters of the rows, hence the skewed filter.
@@ -417,5 +445,23 @@ def test_range_partition_zero_column_skewed_resample():
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
-        conf = _zero_column_range_conf,
-        gpu_plan_assertion = _assert_zero_column_range_exchange)
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuRangePartitioning'))
+
+@shuffle_test
+@pytest.mark.parametrize('num_parts', [4, 200])
+@pytest.mark.parametrize('by_partition', [False, True], ids=['count', 'by_partition'])
+def test_hash_partition_zero_column_literal_key(num_parts, by_partition):
+    # by_partition also checks which partition the rows land in, not just how many arrive.
+    def do_it(spark):
+        df = (spark.range(0, 4000, 1, 4).select(f.col('id').alias('payload'))
+              .select(f.lit(1).cast('long').alias('k'), f.col('payload'))
+              .repartition(num_parts, f.col('k')))
+        if by_partition:
+            df = df.groupBy(f.spark_partition_id().alias('part'))
+        return df.agg(f.count(f.lit(1)))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuHashPartitioning'))

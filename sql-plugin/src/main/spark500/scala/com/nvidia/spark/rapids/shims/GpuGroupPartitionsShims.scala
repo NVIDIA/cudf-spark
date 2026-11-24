@@ -15,16 +15,34 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "500"}
+{"spark":["500"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import org.apache.spark.sql.catalyst.expressions.SortOrder
+import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GpuGroupPartitionsShims {
+  // SPARK-59289 binds the planned grouping to the child's partitioning.
+  def plannedChildPartitioning(
+      groupPartitions: GroupPartitionsExec): Option[Partitioning] = {
+    Some(groupPartitions.childPartitioning)
+  }
+
+  // SPARK-59289 keeps only the expected key count after planning the grouping.
+  def expectedPartitionKeyCount(groupPartitions: GroupPartitionsExec): Option[Int] = {
+    groupPartitions.expectedKeyCount
+  }
+
   // SPARK-59045 wraps each Reducer in KeyReducer. displayName stays on the inner Reducer.
   def reducerNames(groupPartitions: GroupPartitionsExec): Option[Seq[String]] = {
     groupPartitions.reducers.map(
       _.map(_.map(_.reducer.displayName()).getOrElse("identity")))
+  }
+
+  // SPARK-60044 freezes the merge ordering when the merge is planned.
+  def plannedMergeOrdering(groupPartitions: GroupPartitionsExec): Option[Seq[SortOrder]] = {
+    groupPartitions.sortedMergeOrdering
   }
 }

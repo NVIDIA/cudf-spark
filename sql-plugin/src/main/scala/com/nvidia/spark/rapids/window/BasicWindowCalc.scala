@@ -22,7 +22,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{AggregationOverWindow, DType, GroupByOptions, GroupByScanAggregation, NullPolicy, ReplacePolicy, ReplacePolicyWithColumn, Scalar, ScanAggregation, ScanType, Table, WindowOptions}
+import ai.rapids.cudf.{AggregationOverWindow, DType, GroupByOptions, GroupByScanAggregation, NullPolicy, ReplacePolicyWithColumn, Scalar, ScanAggregation, ScanType, Table, WindowOptions}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.GpuWindowUtil
@@ -33,14 +33,6 @@ import org.apache.spark.sql.types.{ByteType, CalendarIntervalType, DataType, Dec
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.unsafe.types.CalendarInterval
 
-
-/**
- * For Scan and GroupBy Scan aggregations nulls are not always treated the same way as they are
- * in window operations. Often we have to run a post processing step and replace them. This
- * groups those two together so we can have a complete picture of how to perform these types of
- * aggregations.
- */
-case class AggAndReplace[T](agg: T, nullReplacePolicy: Option[ReplacePolicy])
 
 /**
  * The class represents a window function and the locations of its deduped inputs after an initial
@@ -101,48 +93,6 @@ case class BoundGpuWindowFunction(
 
   val dataType: DataType = windowFunc.dataType
 }
-
-/**
- * Abstraction for possible range-boundary specifications.
- *
- * This provides type disjunction for Long, BigInt and Double,
- * the three types that might represent a range boundary.
- */
-abstract class RangeBoundaryValue {
-  def long: Long = RangeBoundaryValue.long(this)
-  def bigInt: BigInt = RangeBoundaryValue.bigInt(this)
-  def double: Double = RangeBoundaryValue.double(this)
-}
-
-case class LongRangeBoundaryValue(value: Long) extends RangeBoundaryValue
-case class BigIntRangeBoundaryValue(value: BigInt) extends RangeBoundaryValue
-case class DoubleRangeBoundaryValue(value: Double) extends RangeBoundaryValue
-
-object RangeBoundaryValue {
-
-  def long(boundary: RangeBoundaryValue): Long = boundary match {
-    case LongRangeBoundaryValue(l) => l
-    case other => throw new NoSuchElementException(s"Cannot get `long` from $other")
-  }
-
-  def bigInt(boundary: RangeBoundaryValue): BigInt = boundary match {
-    case BigIntRangeBoundaryValue(b) => b
-    case other => throw new NoSuchElementException(s"Cannot get `bigInt` from $other")
-  }
-
-  def double(boundary: RangeBoundaryValue): Double = boundary match {
-    case DoubleRangeBoundaryValue(d) => d
-    case other => throw new NoSuchElementException(s"Cannot get `double` from $other")
-  }
-
-  def long(value: Long): LongRangeBoundaryValue = LongRangeBoundaryValue(value)
-
-  def bigInt(value: BigInt): BigIntRangeBoundaryValue = BigIntRangeBoundaryValue(value)
-
-  def double(value: Double): DoubleRangeBoundaryValue = DoubleRangeBoundaryValue(value)
-}
-
-case class ParsedBoundary(isUnbounded: Boolean, value: RangeBoundaryValue)
 
 object GroupedAggregations {
   /**

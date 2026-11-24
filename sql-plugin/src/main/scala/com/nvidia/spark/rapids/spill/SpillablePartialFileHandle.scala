@@ -30,13 +30,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
-/**
- * Storage mode for SpillablePartialFileHandle.
- */
-object PartialFileStorageMode extends Enumeration {
-  val FILE_ONLY, MEMORY_WITH_SPILL = Value
-}
-
 /** Marks only the expected acquire-after-close race; other lease failures must stay visible. */
 private[rapids] final class ClosedPartialFileHandleException
     extends IllegalStateException("Cannot acquire a read lease on a closed partial file handle")
@@ -69,8 +62,8 @@ private[rapids] final class ClosedPartialFileHandleException
  * @param capacityHintProvider Optional function that provides capacity hints based on
  *                             current bytes written and required capacity. When provided,
  *                             buffer expansion will use this hint instead of simple doubling.
- *                             The function signature is: (currentBytesWritten, requiredCapacity)
- *                             => suggestedCapacity
+ *                             The function signature is:
+ *                             `(currentBytesWritten, requiredCapacity) => suggestedCapacity`
  */
 class SpillablePartialFileHandle private (
     storageMode: PartialFileStorageMode.Value,

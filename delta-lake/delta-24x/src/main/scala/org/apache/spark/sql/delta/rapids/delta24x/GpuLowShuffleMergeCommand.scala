@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * This file was derived from MergeIntoCommand.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -71,7 +71,7 @@ import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructFiel
  *
  * Phase 1: Find the input files in target that are touched by the rows that satisfy
  * the condition and verify that no two source rows match with the same target row.
- * This is implemented as an inner-join using the given condition. See [[findTouchedFiles]]
+ * This is implemented as an inner-join using the given condition. See `findTouchedFiles`
  * for more details.
  *
  * Phase 2: Read the touched files again and write new files with updated and/or inserted rows
@@ -522,6 +522,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     .makeMetricUpdateUDF("numTargetRowsNotMatchedBySourceUpdated")
   private val incrInsertedCountExpr: Expression = context.cmd
     .makeMetricUpdateUDF("numTargetRowsInserted")
+  private val incrCopiedCountExpr: Expression = context.cmd
+    .makeMetricUpdateUDF("numTargetRowsCopied")
   private val incrDeletedCountExpr: Expression = context.cmd
     .makeMetricUpdateUDF("numTargetRowsDeleted")
   private val incrDeletedMatchedCountExpr: Expression = context.cmd
@@ -580,8 +582,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    *
    * 1. Low shuffle merge algorithm requires generating metadata columns such as
    * [[METADATA_ROW_IDX_COL]], [[METADATA_ROW_DEL_COL]], which only implemented on
-   * [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]]. That means we need to fallback to
-   * this normal executor when [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]] is disabled
+   * `org.apache.spark.sql.rapids.GpuFileSourceScanExec`. That means we need to fallback to
+   * this normal executor when `org.apache.spark.sql.rapids.GpuFileSourceScanExec` is disabled
    * for some reason.
    * 2. Low shuffle merge algorithm currently needs to broadcast deletion vector, which may
    * introduce extra overhead. It maybe better to fallback to this algorithm when the changeset
@@ -909,7 +911,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * 4. Target rows which are deleted
    */
   private def getModifiedDF(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)]): DataFrame = {
-    val sourceDF = this.sourceDF
+    // The write pass updates numSourceRowsInSecondScan, not the discovery counter.
+    val sourceDF = Dataset.ofRows(context.spark, context.cmd.source)
       .withColumn(SOURCE_ROW_PRESENT_COL, new Column(incrSourceRowCountExpr))
 
     val targetDF = getTouchedTargetDF(touchedFiles)
@@ -981,7 +984,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
           Literal.FalseLiteral :+
           Literal.TrueLiteral :+
           Literal(null) :+
-          Literal.TrueLiteral
+          incrCopiedCountExpr
       }
       if (context.cmd.matchedClauses.isEmpty) {
         // If there is not matched clause, this is insert only, we should delete this row.
@@ -1024,6 +1027,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private def getUnmodifiedDF(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)]): DataFrame = {
     getTouchedTargetDF(touchedFiles)
       .filter(!col(METADATA_ROW_DEL_COL))
+      .filter(Column(incrCopiedCountExpr))
       .drop(TARGET_ROW_PRESENT_COL, METADATA_ROW_DEL_COL)
   }
 }

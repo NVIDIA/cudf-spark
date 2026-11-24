@@ -607,7 +607,7 @@ case class PercentileRuleMeta(
         s"Invalid aggregation context: ${exprMeta.context}")
     }
     GpuPercentile(childExprs.head, childExprs(1).asInstanceOf[GpuLiteral], childExprs(2),
-      isReduction)
+      isReduction, c.reverse)
   }
   // Declare the data type of the internal buffer so it can be serialized and
   // deserialized correctly during shuffling.

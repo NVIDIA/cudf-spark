@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -108,16 +108,19 @@ class LazyCompiledCondition(
    * - Right column ordinal j (numLeftColumns <= j < total) becomes j - numLeftColumns
    */
   private def transformForBuildLeft(expr: GpuExpression): GpuExpression = {
-    expr.mapChildren {
+    expr match {
       case br: GpuBoundReference =>
         val newOrdinal = (br.ordinal + numRightColumns) % totalColumns
         GpuBoundReference(newOrdinal, br.dataType, br.nullable)(br.exprId, br.name)
-      case other: GpuExpression =>
-        transformForBuildLeft(other)
       case other =>
-        // Non-GpuExpression children (shouldn't happen for bound conditions)
-        other
-    }.asInstanceOf[GpuExpression]
+        other.mapChildren {
+          case child: GpuExpression =>
+            transformForBuildLeft(child)
+          case child =>
+            // Non-GpuExpression children (shouldn't happen for bound conditions)
+            child
+        }.asInstanceOf[GpuExpression]
+    }
   }
 
   /**
