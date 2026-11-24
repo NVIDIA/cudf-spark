@@ -13,7 +13,9 @@ The examples and template cache their final image layers for use within the same
 ## Published toolchains
 
 The **Docker image CI** workflow publishes to `ghcr.io/nvidia/cudf-spark/`
-on main and release branch pushes and refreshes main on a schedule.
+on relevant main and release branch pushes. Scheduled builds refresh main at
+02:27 UTC on Tuesday, Thursday, and Saturday. Manual runs on either branch
+can publish all toolchains (the default) or one image family and all its variants.
 See the `ci-toolchains` entries in [suites.json](suites.json) for image names,
 platforms, and build arguments. Each image is smoke-tested before its tag moves.
 
@@ -66,4 +68,5 @@ New GHCR packages may need public read access enabled for anonymous verification
 To retry multi-platform publication, dispatch a fresh **Docker image CI** run
 on the target branch. The [cleanup workflow](../ci-image-cleanup.yml) defines
 retention and deletion limits and preserves published tags and their platform
-manifests. Manual cleanup defaults to a dry run.
+manifests. Cleanup runs at 04:57 and 16:57 UTC daily; manual cleanup defaults
+to a dry run.

@@ -6,7 +6,7 @@ name: CI image cleanup
 
 on:
   schedule:
-    - cron: '57 4 * * *'
+    - cron: '57 4,16 * * *'
   workflow_dispatch:
     inputs:
       dry-run:
