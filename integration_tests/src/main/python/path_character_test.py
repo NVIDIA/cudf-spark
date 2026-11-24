@@ -16,6 +16,7 @@ import os
 
 import pytest
 
+from conftest import is_nightly_run
 from delta_lake_utils import delta_meta_allow, setup_delta_dest_table
 from marks import allow_non_gpu, delta_lake, ignore_order
 from path_test_utils import (BACKEND_METRICS, PATH_ROWS, PATH_SCHEMA, PATH_VALUES,
@@ -30,6 +31,7 @@ _readers = [(fmt, reader) for fmt in ('parquet', 'orc', 'avro')
 _readers += [('csv', 'PERFILE'), ('json', 'PERFILE')]
 
 
+@pytest.mark.skipif(is_nightly_run(), reason='https://github.com/NVIDIA/cudf-spark/issues/17063')
 @ignore_order(local=True)
 @pytest.mark.parametrize('file_format,reader', [
     pytest.param(fmt, reader, id=fmt + '-' + reader, marks=(
@@ -56,6 +58,7 @@ def test_path_characters(path_character_data, file_format, reader, v1, layout, r
 
 
 @delta_lake
+@pytest.mark.skipif(is_nightly_run(), reason='https://github.com/NVIDIA/cudf-spark/issues/17063')
 @allow_non_gpu(*delta_meta_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('base', PATH_VALUES)
