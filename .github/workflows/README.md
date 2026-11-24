@@ -25,11 +25,13 @@ track the published classifier versions; fixed versions use their coordinates.
 PRs can reuse their target branch's cache. A copied-branch workflow can pass
 `base-branch` to compute the same key, but GitHub's cache visibility still applies:
 a push on a sibling branch cannot read a release-only cache by naming it.
-Workers dispatched on a trusted branch to test PR code should use restore-only,
-as the Verify matrix does; do not save PR-produced data into a branch cache.
+GPU workers testing a PR should restore the exact Maven key as the Verify matrix does,
+and build normally on a miss. `premerge: true` is for the branch warmer: an exact hit
+checks that the cache exists without downloading it. Do not save PR-built artifacts to a branch cache.
 
 The same warmer seeds the standalone [Apache Spark distributions](../actions/spark-archive-cache/releases.json).
 Future GHA premerge workers can use the [archive action](../actions/spark-archive-cache/action.yml)
-to restore a checksum-verified tarball by Scala version. It is independent of Maven
-pins. When a standalone lane changes Spark version, update its archive version and
-checksum together. The warmer does not cache locally built plugin JARs, test outputs or native objects.
+to restore a checksum-verified tarball by Scala version. Extract its `path` output
+instead of downloading Spark again. When a standalone lane changes Spark version,
+update its archive version and checksum together. The warmer does not cache locally
+built plugin JARs, test outputs or native objects.

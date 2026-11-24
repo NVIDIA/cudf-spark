@@ -35,15 +35,13 @@ runs:
                         '.github/workflows/mvn-verify-check.yml', '.github/actions/maven-cache/settings.xml') }}
         PREMERGE_HASH: ${{ hashFiles('integration_tests/run_unity_catalog_server.sh') }}
       run: |
-        snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER")
+        model=$(mktemp "$RUNNER_TEMP/maven-effective.XXXXXXXX")
+        snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER" --keep-model "$model")
         java_major=$(java -XshowSettings:properties -version 2>&1 | awk '$1 == "java.specification.version" {print $3}')
         [[ -n "$java_major" ]] || { echo "Cannot determine Java version for Maven cache" >&2; exit 1; }
-        prefix="spark-maven-${RUNNER_OS}-${RUNNER_ARCH}-jdk${java_major}-${SCALA_VER}-${BRANCH}-"
-        stem="${prefix}${INPUT_HASH}-${snapshot_hash}"
-        spark=$(jq -er --arg scala "$SCALA_VER" '.[$scala].version' .github/actions/spark-archive-cache/releases.json)
-        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-        echo "stem=$stem" >> "$GITHUB_OUTPUT"
-        echo "full=$stem-premerge-$spark-$PREMERGE_HASH" >> "$GITHUB_OUTPUT"
+        echo "snapshot-hash=$snapshot_hash" >> "$GITHUB_OUTPUT"
+        echo "model=$model" >> "$GITHUB_OUTPUT"
+        bash "$GITHUB_ACTION_PATH/cache-keys.sh" "$java_major" "$snapshot_hash" >> "$GITHUB_OUTPUT"
 
     - name: Check for an existing premerge seed
       if: inputs.premerge == 'true'
@@ -66,6 +64,7 @@ runs:
         restore-keys: |
           ${{ steps.key.outputs.stem }}-premerge-
           ${{ steps.key.outputs.stem }}-verify
+          ${{ steps.key.outputs.snapshot-prefix }}
           ${{ steps.key.outputs.prefix }}
 
     - name: Ignore incomplete Maven restore
@@ -83,6 +82,16 @@ runs:
         PREMERGE: ${{ inputs.premerge }}
       run: bash "$GITHUB_ACTION_PATH/cache-target.sh" >> "$GITHUB_OUTPUT"
 
+    - name: Discard SNAPSHOTs from an older Maven cache
+      if: >-
+        steps.restore.outputs.cache-matched-key &&
+        !startsWith(steps.restore.outputs.cache-matched-key, steps.key.outputs.snapshot-prefix)
+      shell: bash
+      env:
+        MODEL: ${{ steps.key.outputs.model }}
+      # Maven -U can silently use an older local artifact when metadata is unavailable.
+      run: python3 "$GITHUB_ACTION_PATH/dependency-key.py" --discard-restored "$MODEL"
+
     - name: Warm missing dependencies
       id: warm
       if: steps.target.outputs.ready != 'true' && (inputs.premerge == 'true' || steps.restore.outcome != 'failure')
@@ -93,9 +102,18 @@ runs:
         WARM_TIMEOUT: ${{ inputs.premerge == 'true' && '55m' || '30m' }}
       run: timeout "$WARM_TIMEOUT" "$GITHUB_ACTION_PATH/populate-cache.sh"
 
+    - name: Confirm upstream SNAPSHOTs did not change during warm-up
+      id: confirm
+      if: steps.warm.outcome == 'success'
+      shell: bash
+      env:
+        MODEL: ${{ steps.key.outputs.model }}
+        EXPECTED: ${{ steps.key.outputs.snapshot-hash }}
+      run: timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" --confirm-snapshots "$MODEL" "$EXPECTED"
+
     - name: Save Maven dependencies
       id: save
-      if: success() && steps.warm.outcome == 'success'
+      if: success() && steps.confirm.outcome == 'success'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.m2/repository

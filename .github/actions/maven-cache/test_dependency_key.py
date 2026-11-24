@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import runpy
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from xml.etree import ElementTree as ET
@@ -23,7 +24,78 @@ def model(jni="26.12.0-SNAPSHOT", private="26.10.0", scala="2.13"):
         <url>https://example.org/snapshots</url></repository></repositories></project>""")
 
 
+def metadata(entries):
+    versions = "".join(f"<snapshotVersion><classifier>{classifier}</classifier>"
+                       f"<extension>jar</extension><value>{value}</value></snapshotVersion>"
+                       for classifier, value in entries)
+    return (f"<metadata><groupId>com.nvidia</groupId><artifactId>jni</artifactId>"
+            f"<version>26.12.0-SNAPSHOT</version><versioning><snapshotVersions>{versions}"
+            "</snapshotVersions></versioning></metadata>").encode()
+
+
 class DependencyKeyTest(unittest.TestCase):
+    def test_release_branch_cache_keys(self):
+        script = Path(__file__).with_name("cache-keys.sh")
+        for branch, scope in (("main", "main"), ("release/26.12", "26.12"),
+                              ("release/26.12-rc", "release/26.12-rc")):
+            with self.subTest(branch=branch):
+                env = dict(os.environ, BRANCH=branch, RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                           SCALA_VER="2.12", INPUT_HASH="inputs", PREMERGE_HASH="fixture")
+                output = subprocess.check_output(["bash", str(script), "17", "upstream"],
+                                                 cwd=script.parents[3], env=env, text=True)
+                keys = dict(row.split("=", 1) for row in output.splitlines())
+                self.assertEqual(keys["prefix"], f"spark-maven-Linux-X64-jdk17-2.12-{scope}-")
+                self.assertEqual(keys["snapshot-prefix"], keys["prefix"] + "upstream-")
+                self.assertEqual(keys["stem"], keys["snapshot-prefix"] + "inputs")
+                self.assertTrue(keys["full"].startswith(keys["stem"] + "-premerge-"))
+
+    def test_cleanup_from_fingerprinted_model_only_removes_tracked_snapshots(self):
+        pom = model(private="26.10.0")
+        ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "1-SNAPSHOT"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            group = home / ".m2/repository/com/nvidia"
+            stale = ["jni/26.12.0-SNAPSHOT", "cudf-spark-history-metrics-local/1-SNAPSHOT"]
+            keep = ["jni/26.10.0-SNAPSHOT", "private_2.13/26.10.0", "unrelated/1-SNAPSHOT"]
+            for item in stale + keep:
+                directory = group / item
+                directory.mkdir(parents=True)
+                (directory / "artifact.jar").touch()
+            effective = home / "effective.xml"
+            ET.ElementTree(pom).write(effective)
+            script = Path(__file__).with_name("dependency-key.py")
+            command = ["python3", "-B", script, "--discard-restored", effective]
+            refused = subprocess.run(command, env=dict(os.environ, HOME=tmp, RUNNER_ENVIRONMENT="self-hosted"),
+                                     text=True, capture_output=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("non-disposable", refused.stderr)
+            self.assertTrue(all((group / item / "artifact.jar").is_file() for item in stale))
+            subprocess.run(command, env=dict(os.environ, HOME=tmp, RUNNER_ENVIRONMENT="github-hosted"), check=True)
+            self.assertFalse(any((group / item).exists() for item in stale))
+            self.assertTrue(all((group / item / "artifact.jar").is_file() for item in keep))
+
+    def test_cleanup_refuses_path_components_and_symlinked_cache_paths(self):
+        cleanup = helper["discard_restored_snapshots"]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for name, value in (("cudf-spark-jni.artifactId", "../outside"),
+                                ("cudf-spark-jni.version", "/outside/1-SNAPSHOT")):
+                pom = model()
+                pom.find(f"{{*}}properties/{{*}}{name}").text = value
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Invalid upstream"):
+                    cleanup(pom, home)
+            outside = home / "outside"
+            version = outside / "jni/26.12.0-SNAPSHOT"
+            version.mkdir(parents=True)
+            marker = version / "do-not-delete"
+            marker.touch()
+            group = home / ".m2/repository/com/nvidia"
+            group.parent.mkdir(parents=True)
+            group.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlinked Maven path"):
+                cleanup(model(), home)
+            self.assertTrue(marker.exists())
+
     def test_restore_target_and_completeness(self):
         script = Path(__file__).with_name("cache-target.sh")
         for full in (False, True):
@@ -69,14 +141,6 @@ class DependencyKeyTest(unittest.TestCase):
                                     "26.12.0-SNAPSHOT")
 
     def test_classifier_publication_not_xml_order_changes_the_key(self):
-        def metadata(entries):
-            versions = "".join(f"<snapshotVersion><classifier>{classifier}</classifier>"
-                               f"<extension>jar</extension><value>{value}</value></snapshotVersion>"
-                               for classifier, value in entries)
-            return (f"<metadata><groupId>com.nvidia</groupId><artifactId>jni</artifactId>"
-                    f"<version>26.12.0-SNAPSHOT</version><versioning><snapshotVersions>{versions}"
-                    "</snapshotVersions></versioning></metadata>").encode()
-
         entries = [("cuda12", "build-1"), ("cuda13", "build-1")]
         with patch("subprocess.check_output") as fetch:
             fetch.return_value = metadata(entries)
@@ -88,3 +152,24 @@ class DependencyKeyTest(unittest.TestCase):
             fetch.return_value = metadata([])
             with self.assertRaisesRegex(ValueError, "No usable snapshot JAR"):
                 helper["dependency_key"](model())
+
+    def test_confirm_before_save_rechecks_live_classifier_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            pom = model()
+            pom.find(".//{*}repository/{*}url").text = repo.as_uri()
+            effective = repo / "effective.xml"
+            ET.ElementTree(pom).write(effective)
+            published = repo / "com/nvidia/jni/26.12.0-SNAPSHOT/maven-metadata.xml"
+            published.parent.mkdir(parents=True)
+            published.write_bytes(metadata([("cuda12", "build-1"), ("cuda13", "build-1")]))
+            original = helper["dependency_key"](pom)
+            cmd = ["python3", "-B", Path(__file__).with_name("dependency-key.py"),
+                   "--confirm-snapshots", effective, original]
+            subprocess.run(cmd, check=True)
+            published.write_bytes(metadata([("cuda12", "build-1"), ("cuda13", "build-2")]))
+            changed = subprocess.run(cmd, text=True, capture_output=True)
+            self.assertNotEqual(changed.returncode, 0)
+            self.assertIn("changed during warm-up", changed.stderr)
+            published.unlink()
+            self.assertNotEqual(subprocess.run(cmd, capture_output=True).returncode, 0)

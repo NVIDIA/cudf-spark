@@ -71,8 +71,6 @@ for arg do
     fi
     if [ "$arg" = "$FAIL_ARG" ]; then exit 29; fi
     case "$arg" in
-        -PpremergeUT1|-PpremergeScala213) printf '%s,\\n    %s\\n' "$FIRST_SELECTED" "$LAST_SELECTED" ;;
-        -PpremergeUT2|-PpremergeUTF8) printf '%s\\n' "$LAST_SELECTED" ;;
         -Dexpression=delta42x.version) echo 4.2.0 ;;
         -Dexpression=delta43x.version) echo 4.3.0 ;;
         -Dmdep.outputFile=*) echo fixture.jar > "${arg#*=}" ;;
@@ -92,12 +90,11 @@ done
             ["python3", "build/get_buildvers.py", "no_snapshots", pom], cwd=ROOT, text=True)
         return output.strip().split(", ")
 
-    def warm(self, scala, versions, fail_arg="", premerge=True):
+    def warm(self, scala, fail_arg="", premerge=True):
         self.log.write_text("")
         env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                    MAVEN_LOG=str(self.log), SCALA_VER=scala, FAIL_ARG=fail_arg,
-                   TMPDIR=str(self.scratch),
-                   FIRST_SELECTED=versions[1], LAST_SELECTED=versions[-1])
+                   TMPDIR=str(self.scratch))
         if premerge:
             env["WARM_PREMERGE"] = "true"
         else:
@@ -106,46 +103,35 @@ done
         return result, [line.split() for line in self.log.read_text().splitlines()]
 
     def test_warms_each_scala_pom_and_its_compiler_bridge(self):
-        for scala, pom, profiles in [
-            ("2.12", "pom.xml", ["premergeUT1", "premergeUT2", "premergeUTF8"]),
-            ("2.13", "scala2.13/pom.xml", ["premergeScala213"]),
-        ]:
-            with self.subTest(scala=scala):
-                versions = self.build_versions(pom)
-                result, calls = self.warm(scala, versions)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                reactor = [args for args in calls if "--file" in args]
-                self.assertTrue(all(args[args.index("--file") + 1] == pom for args in reactor))
-                lookups = [args for args in calls if "-Dexpression=included_buildvers" in args]
-                self.assertEqual(len(lookups), len(profiles))
-                for args, profile in zip(lookups, profiles):
-                    self.assertIn("-P" + profile, args)
-                    self.assertIn("-Dexpression=included_buildvers", args)
-                resolver = "de.qaware.maven:go-offline-maven-plugin:resolve-dependencies"
-                resolves = [args for args in calls if resolver in args]
-                copies = [args for args in calls if "dependency:copy@copy" in args]
-                self.assertEqual(len(resolves), len(versions))
-                for version, args in zip(versions, resolves):
-                    self.assertIn("-Dbuildver=" + version, args)
-                self.assertEqual(len(copies), 3)
-                for version, args in zip([versions[0], versions[1], versions[-1]], copies):
-                    self.assertIn("-Dbuildver=" + version, args)
-                    self.assertEqual(args[args.index("-pl") + 1], "integration_tests")
-                    self.assertIn("dependency:copy@copy-spark-avro", args)
-                    self.assertIn("dependency:copy@copy-spark-protobuf", args)
-                self.assertIn("process-test-resources", calls[-1])
-                classpaths = [args for args in calls if "dependency:build-classpath" in args]
-                # The two Delta variants share the same Unity Catalog server dependency graph.
-                self.assertEqual(len(classpaths), 3 if scala == "2.13" else 0)
-                self.assertEqual(list(self.scratch.iterdir()), [])
-                self.assertFalse((self.bin / "calls.java").exists())
-
-    def test_verify_and_premerge_prime_their_cli_plugins(self):
         for scala, pom in [("2.12", "pom.xml"), ("2.13", "scala2.13/pom.xml")]:
             versions = self.build_versions(pom)
             for premerge in [False, True]:
                 with self.subTest(scala=scala, premerge=premerge):
-                    result, calls = self.warm(scala, versions, premerge=premerge)
+                    result, calls = self.warm(scala, premerge=premerge)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    reactor = [args for args in calls if "--file" in args]
+                    self.assertTrue(all(args[args.index("--file") + 1] == pom for args in reactor))
+                    resolver = "de.qaware.maven:go-offline-maven-plugin:resolve-dependencies"
+                    for goal in [resolver, "dependency:copy@copy", "dependency:copy@copy-spark-avro",
+                                 "dependency:copy@copy-spark-protobuf"]:
+                        matches = [args for args in calls if goal in args]
+                        self.assertEqual(len(matches), len(versions), goal)
+                        for version, args in zip(versions, matches):
+                            self.assertIn("-Dbuildver=" + version, args)
+                            if goal != resolver:
+                                self.assertEqual(args[args.index("-pl") + 1], "integration_tests")
+                    self.assertIn("process-test-resources", calls[-1])
+                    classpaths = [args for args in calls if "dependency:build-classpath" in args]
+                    # The two Delta variants share the same Unity Catalog server dependency graph.
+                    self.assertEqual(len(classpaths), 3 if premerge and scala == "2.13" else 0)
+                    self.assertEqual(list(self.scratch.iterdir()), [])
+                    self.assertFalse((self.bin / "calls.java").exists())
+
+    def test_verify_and_premerge_prime_their_cli_plugins(self):
+        for scala in ["2.12", "2.13"]:
+            for premerge in [False, True]:
+                with self.subTest(scala=scala, premerge=premerge):
+                    result, calls = self.warm(scala, premerge=premerge)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     plugins = calls[0]
                     self.assertIn("-N", plugins)
@@ -161,11 +147,6 @@ done
                         generated_in = Path(self.log.with_suffix(".wrapper").read_text().splitlines()[-1])
                         self.assertEqual(generated_in.parent.resolve(), self.scratch.resolve())
                         self.assertFalse(generated_in.exists())
-                    if not premerge:
-                        self.assertEqual(len(calls), len(versions) + 2)
-                        self.assertTrue(all("de.qaware.maven:go-offline-maven-plugin:resolve-dependencies" in args
-                                            for args in calls[1:-1]))
-                        self.assertIn("process-test-resources", calls[-1])
 
     def assert_pinned_plugin(self, goals, artifact, consumer, consumer_goal):
         prefix = f"org.apache.maven.plugins:{artifact}:"
@@ -174,20 +155,18 @@ done
         coordinate = matches[0].rsplit(":", 1)[0]
         self.assertIn(f"{coordinate}:{consumer_goal}", (ROOT / consumer).read_text())
 
-    def test_failed_lookup_resolve_or_copy_does_not_report_a_complete_cache(self):
+    def test_failed_resolve_or_copy_does_not_report_a_complete_cache(self):
         versions = self.build_versions("pom.xml")
-        for fail_arg in ["wrapper:wrapper", "-PpremergeUT1", "-Dbuildver=" + versions[0],
-                         "dependency:copy@copy"]:
+        for fail_arg in ["wrapper:wrapper", "-Dbuildver=" + versions[0], "dependency:copy@copy-spark-protobuf"]:
             with self.subTest(fail_arg=fail_arg):
-                result, calls = self.warm("2.12", versions, fail_arg)
+                result, calls = self.warm("2.12", fail_arg, premerge=False)
                 self.assertEqual(result.returncode, 29)
                 self.assertEqual(sum(fail_arg in args for args in calls), 4)
                 self.assertFalse(any("process-test-resources" in args for args in calls))
                 self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_failed_unity_catalog_resolution_does_not_complete_the_warmup(self):
-        versions = self.build_versions("scala2.13/pom.xml")
-        result, calls = self.warm("2.13", versions, "dependency:build-classpath")
+        result, calls = self.warm("2.13", "dependency:build-classpath")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(sum("dependency:build-classpath" in args for args in calls), 4)
         self.assertFalse(any("process-test-resources" in args for args in calls))

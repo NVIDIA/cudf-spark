@@ -6,7 +6,10 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,19 +34,37 @@ def snapshot_candidates(url, artifact, version):
     return candidates
 
 
-def dependency_key(pom, resolve=snapshot_candidates):
+def tracked_coordinates(pom):
     props = pom.find("{*}properties")
-    snapshots = next((repo.findtext("{*}url") for repo in pom.findall("{*}repositories/{*}repository")
-                      if repo.findtext("{*}id") == "snapshots-repo"), None)
     coordinates = [(props.findtext(f"{{*}}{name}.artifactId"), props.findtext(f"{{*}}{name}.version"))
                    for name in ("cudf-spark-jni", "cudf-spark-private")]
     history_version = props.findtext("{*}history-metrics.version")
     if history_version:
         coordinates.append(("cudf-spark-history-metrics-local", history_version))
-    identities = []
     for artifact, version in coordinates:
-        if not artifact or not version or "${" in artifact + version:
-            raise ValueError(f"Unresolved upstream coordinates in effective POM: {artifact}:{version}")
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", part or "") for part in (artifact, version)):
+            raise ValueError(f"Invalid upstream coordinates in effective POM: {artifact}:{version}")
+    return coordinates
+
+
+def discard_restored_snapshots(pom, home):
+    group = home.resolve() / ".m2/repository/com/nvidia"
+    for artifact, version in tracked_coordinates(pom):
+        if version.endswith("-SNAPSHOT"):
+            directory = group / artifact / version
+            if directory.resolve() != directory:
+                raise ValueError(f"Refusing to clean a symlinked Maven path: {directory}")
+            if directory.exists():
+                if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+                    raise ValueError("Refusing to clean restored SNAPSHOTs on a non-disposable runner")
+                shutil.rmtree(directory)
+
+
+def dependency_key(pom, resolve=snapshot_candidates):
+    snapshots = next((repo.findtext("{*}url") for repo in pom.findall("{*}repositories/{*}repository")
+                      if repo.findtext("{*}id") == "snapshots-repo"), None)
+    identities = []
+    for artifact, version in tracked_coordinates(pom):
         candidates = []
         if version.endswith("-SNAPSHOT"):
             if not snapshots:
@@ -55,11 +76,27 @@ def dependency_key(pom, resolve=snapshot_candidates):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("scala", choices=("2.12", "2.13"))
-    scala = parser.parse_args().scala
-    pom_file = "pom.xml" if scala == "2.12" else "scala2.13/pom.xml"
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("scala", nargs="?", choices=("2.12", "2.13"))
+    mode.add_argument("--discard-restored", type=Path, metavar="EFFECTIVE_POM",
+                      help="Remove tracked SNAPSHOT versions from an older restored cache")
+    mode.add_argument("--confirm-snapshots", nargs=2, metavar=("EFFECTIVE_POM", "EXPECTED_HASH"),
+                      help="Check the current upstream fingerprint before saving a warmed cache")
+    parser.add_argument("--keep-model", type=Path, metavar="FILE",
+                        help="Keep the effective POM used for fingerprinting for use after restore")
+    args = parser.parse_args()
+    if args.discard_restored:
+        discard_restored_snapshots(ET.parse(args.discard_restored).getroot(), Path.home())
+        sys.exit(0)
+    if args.confirm_snapshots:
+        model, expected = args.confirm_snapshots
+        actual = dependency_key(ET.parse(model).getroot())
+        if actual != expected:
+            sys.exit(f"Upstream SNAPSHOTs changed during warm-up ({expected} -> {actual}); not saving Maven cache")
+        sys.exit(0)
+    pom_file = "pom.xml" if args.scala == "2.12" else "scala2.13/pom.xml"
     with tempfile.TemporaryDirectory() as temp:
-        effective = Path(temp) / "effective.xml"
+        effective = args.keep_model or Path(temp) / "effective.xml"
         subprocess.run(["mvn", "-B", "-q", "-N", "-f", pom_file,
                         "org.apache.maven.plugins:maven-help-plugin:3.5.1:effective-pom",
                         f"-Doutput={effective}"], check=True, stdout=sys.stderr)
