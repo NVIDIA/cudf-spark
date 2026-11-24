@@ -150,6 +150,9 @@ trait GpuExec extends SparkPlan with Logging {
   def createMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.create(level, name)
 
+  def createMetric(level: MetricsLevel, metric: => SQLMetric): GpuMetric =
+    metricFactory.create(level, metric)
+
   def createNanoTimingMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.createNanoTiming(level, name)
 
@@ -208,10 +211,24 @@ trait GpuExec extends SparkPlan with Logging {
           DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME),
         HYBRID_SCAN_BYTES_REQUESTED -> createSizeMetric(MODERATE_LEVEL,
           DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED),
-        HYBRID_SCAN_DEVICE_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
-          DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ))
+        HYBRID_SCAN_NATIVE_HOST_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_NATIVE_HOST_BYTES_READ))
     } else {
       rowGroupsFetched
+    }
+  }
+
+  protected def createHybridScanGdsMetrics(): Map[String, GpuMetric] = {
+    if (RapidsConf.PARQUET_HYBRID_SCAN_ENABLED.get(conf) &&
+        RapidsConf.READER_GPU_DIRECT_STORAGE_MODE.get(conf) !=
+          RapidsConf.GpuDirectStorageMode.OFF.toString) {
+      Map(
+        HYBRID_SCAN_DEVICE_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ),
+        HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ))
+    } else {
+      Map.empty
     }
   }
 

@@ -90,10 +90,14 @@ trait ExternalSourceBase extends Logging {
     override val isEnabled: Boolean = true
     override def recognizes(writeClass: Class[_ <: Write]): Boolean =
       writeClass.getName == noopWriteClassName
-    override def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit = {}
+    override def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit = {
+      // NoopWrite requires no extra GPU compatibility checks.
+    }
     override def tagForGpu(
         cpuExec: OverwriteByExpressionExec,
-        meta: OverwriteByExpressionExecMeta): Unit = {}
+        meta: OverwriteByExpressionExecMeta): Unit = {
+      // NoopWrite requires no extra GPU compatibility checks.
+    }
     // NoopWrite does not modify table state, so there is no cache to refresh.
     override def convertToGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): GpuExec =
       GpuNoopAppendDataExec(meta.childPlans.head.convertIfNeeded())

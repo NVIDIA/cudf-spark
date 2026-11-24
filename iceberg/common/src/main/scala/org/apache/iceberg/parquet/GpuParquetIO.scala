@@ -88,14 +88,14 @@ object GpuParquetIO {
       (ShadedMessageType, ShadedMessageType) = {
     if (ParquetSchemaUtil.hasIds(fileSchema)) {
       val prepared = prepareSchema(fileSchema)
-      (prepared, ParquetSchemaUtil.pruneColumns(prepared, requiredSchema))
+      (prepared, ShimUtils.pruneColumns(prepared, requiredSchema, false))
     } else if (nameMapping.isDefined) {
       val typeWithIds = prepareSchema(
         ParquetSchemaUtil.applyNameMapping(fileSchema, nameMapping.get))
-      (typeWithIds, ParquetSchemaUtil.pruneColumns(typeWithIds, requiredSchema))
+      (typeWithIds, ShimUtils.pruneColumns(typeWithIds, requiredSchema, false))
     } else {
       val typeWithIds = prepareSchema(ParquetSchemaUtil.addFallbackIds(fileSchema))
-      (typeWithIds, ParquetSchemaUtil.pruneColumnsFallback(typeWithIds, requiredSchema))
+      (typeWithIds, ShimUtils.pruneColumns(typeWithIds, requiredSchema, true))
     }
   }
 

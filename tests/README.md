@@ -83,6 +83,25 @@ Apache Spark 3.3.0 on Scala 2.13 artifacts, issue:
 mvn package -f scala2.13 -pl tests -am -Dbuildver=330 -Dsuffixes='.*CastOpSuite' -Dtests=decimal
 ```
 
+### Spark 3.3 Hive Aggregation Tests
+
+Run both Hive aggregation suites through their shared wrapper, serially:
+
+```bash
+mvn package -pl tests -am -Dbuildver=330 -Drapids.parallelUnitTests=false \
+  -DwildcardSuites=org.apache.spark.sql.rapids.suites.RapidsHiveAggregationSuite \
+  -Dmaven.repo.local=./.mvn-repo \
+  -Drapids.test.gpu.allocFraction=0.3 \
+  -Drapids.test.gpu.maxAllocFraction=0.3 -Drapids.test.gpu.minAllocFraction=0
+```
+
+The wrapper creates its children only during execution to keep their shared Hive context alive.
+It exposes no child test names during discovery, so serial `-Dsuffixes` plus `-Dtests` selection
+can silently run zero tests (for example, `verify aggregator ser/de behavior`). Use the whole-suite
+command above instead. The child suites are marked `DoNotDiscover` and should not run independently.
+The wrapper skips Hive initialization when `org.apache.spark.tags.SlowHiveTest` is excluded or
+when include tags do not select that tag.
+
 ### Large Host Memory Tests
 
 Some tests build host columns up to the 2 GiB limit of a cuDF column. They need a GPU and, per

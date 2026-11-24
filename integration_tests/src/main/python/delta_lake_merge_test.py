@@ -207,6 +207,188 @@ def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_fact
         error_message="DELTA_NUM_RECORDS_MISMATCH")
 
 
+def _normalize_table_path(spark, path):
+    """Normalizes `path` the way Spark qualifies a table location (through a Hadoop Path).
+
+    Delta rejects a table whose location doesn't end with the path in its identifier
+    (DELTA_AMBIGUOUS_PATHS_IN_CREATE_TABLE), so the identifier must already be in this form."""
+    return spark._jvm.org.apache.hadoop.fs.Path(path).toString()
+
+
+def _target_path(spark, spark_tmp_path):
+    """Separate target table per run so the CPU and GPU runs of one test don't share state."""
+    gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+    return _normalize_table_path(spark, spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU"))
+
+
+def _create_empty_schema_target(spark, path):
+    from delta.tables import DeltaTable
+    DeltaTable.create(spark).location(path).execute()
+
+
+def _create_plain_target(spark, path):
+    """Creates (id, value) with a single row, id = 0."""
+    spark.createDataFrame([(0, "old")], "id BIGINT, value STRING") \
+        .write.format("delta").save(path)
+
+
+def _create_generated_column_target(spark, path, column_kind):
+    """Creates (id, value, gen) where `gen` is a "generated" or an "identity" column."""
+    from delta.tables import DeltaTable, IdentityGenerator
+    generated_always_as = IdentityGenerator() if column_kind == "identity" else "id + 1"
+    DeltaTable.create(spark).location(path) \
+        .addColumn("id", LongType()) \
+        .addColumn("value", StringType()) \
+        .addColumn("gen", LongType(), generatedAlwaysAs=generated_always_as) \
+        .execute()
+
+
+def _generated_column_target_creator(column_kind):
+    return lambda spark, path: _create_generated_column_target(spark, path, column_kind)
+
+
+_GPU_MERGE_COMMANDS = ("GpuMergeIntoCommand43x", "GpuMergeIntoCommand")
+
+
+def _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql):
+    """Returns `run(spark)`: creates the target, runs the MERGE and returns the final table."""
+    source_view = spark_tmp_table_factory.get()
+
+    def run(spark):
+        target_path = _target_path(spark, spark_tmp_path)
+        create_target(spark, target_path)
+        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
+            .createOrReplaceTempView(source_view)
+        spark.sql(merge_sql.format(path=target_path, source=source_view)).collect()
+        result = spark.read.format("delta").load(target_path)
+        return result.schema.simpleString(), result.collect()
+
+    return run
+
+
+def _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql, error_message, conf):
+    """Asserts CPU and GPU fail with the same error for a MERGE the Delta analyzer rejects, and
+    that no MERGE command was planned for execution (the error is analyzer-owned)."""
+    run = _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        assert_gpu_and_cpu_error(run, conf=conf, error_message=error_message)
+        captured_plans = callback.getResultsWithTimeout(10000)
+    finally:
+        callback.endCapture()
+    # The target's creation is planned before the failing MERGE, so an empty capture means the
+    # listener never saw anything and the checks below would pass vacuously.
+    assert len(captured_plans) > 0, "No plans were captured, so the MERGE check proves nothing"
+    for plan in captured_plans:
+        for command in _GPU_MERGE_COMMANDS + ("MergeIntoCommand",):
+            assert not callback.contains(plan, command), \
+                f"{command} was planned although the analyzer should have rejected the MERGE"
+
+
+def _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql, conf):
+    """Asserts the GPU MERGE command ran and produced the same schema and rows as the CPU."""
+    run = _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql)
+    cpu_schema, cpu_rows = with_cpu_session(run, conf=conf)
+    gpu_schema, gpu_rows = assert_rapids_gpu_merge_ran(
+        run, conf, expected_command=_GPU_MERGE_COMMANDS[0])
+    assert cpu_schema == gpu_schema
+    assert_equal_with_local_sort(cpu_rows, gpu_rows)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 MERGE test helper coverage")
+@pytest.mark.parametrize("path, expected", [
+    ("/tmp//warehouse//GPU", "/tmp/warehouse/GPU"),
+    ("file:///tmp//warehouse//GPU", "file:/tmp/warehouse/GPU"),
+    ("hdfs:///warehouse//GPU", "hdfs:/warehouse/GPU"),
+    ("hdfs://host:9000//warehouse//GPU", "hdfs://host:9000/warehouse/GPU"),
+    ("s3a://bucket//warehouse//GPU", "s3a://bucket/warehouse/GPU"),
+], ids=["local", "file_no_authority", "hdfs_no_authority", "hdfs_host_port", "s3a"])
+def test_delta_merge_target_path_normalization(path, expected):
+    """The target path helper keeps the scheme and authority and collapses repeated slashes, so
+    the table identifier and the location Spark qualifies for it stay identical."""
+    assert with_cpu_session(lambda spark: _normalize_table_path(spark, path)) == expected
+
+
+empty_schema_error_merge_sqls = [
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT *",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN MATCHED THEN UPDATE SET *",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN MATCHED THEN DELETE",
+]
+
+duplicate_insert_columns_merge_sql = (
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT (id, ID, value) "
+    "VALUES (source.id, source.id, source.value)")
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE into an empty-schema target error was added in OSS Delta 4.3")
+@pytest.mark.parametrize("merge_sql", empty_schema_error_merge_sqls,
+                         ids=["not_matched_insert_star", "not_matched_insert_columns",
+                              "matched_update_star", "matched_delete"])
+def test_delta_merge_empty_schema_target_error(
+        spark_tmp_path, spark_tmp_table_factory, merge_sql):
+    # Without schema evolution, MERGE into a target with no columns must fail with a user error.
+    _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target, merge_sql,
+        "DELTA_MERGE_INTO_EMPTY_SCHEMA_TARGET",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": "false"}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
+@pytest.mark.parametrize("auto_merge", [False, True], ids=["no_schema_evolution", "schema_evolution"])
+@pytest.mark.parametrize("column_kind", ["generated", "identity"])
+def test_delta_merge_case_variant_duplicate_insert_columns_error(
+        spark_tmp_path, spark_tmp_table_factory, column_kind, auto_merge):
+    _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, _generated_column_target_creator(column_kind),
+        duplicate_insert_columns_merge_sql, "DELTA_DUPLICATE_COLUMNS_ON_INSERT",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": str(auto_merge).lower()}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE into an empty-schema target was changed in OSS Delta 4.3")
+def test_delta_merge_empty_schema_target_with_schema_evolution(
+        spark_tmp_path, spark_tmp_table_factory):
+    # With schema evolution enabled the source schema is adopted instead of raising an error.
+    _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target,
+        "MERGE INTO delta.`{path}` AS target USING {source} AS source ON 1 = 0 "
+        "WHEN NOT MATCHED THEN INSERT *",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": "true"}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
+def test_delta_merge_case_variant_duplicate_insert_columns_plain_table(
+        spark_tmp_path, spark_tmp_table_factory):
+    # Tables without generated or identity columns keep tolerating case-variant duplicates.
+    _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, _create_plain_target,
+        duplicate_insert_columns_merge_sql, delta_merge_no_cpu_bridge_conf)
+
+
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -3042,3 +3224,164 @@ def test_delta_merge_dv_clauses(spark_tmp_path, use_cdf, persistent_dv, merge_ca
             assert_equal(cdf_results[0], cdf_results[1])
 
     with_cpu_session(check_tables, conf=conf)
+
+
+@allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU MERGE into an identity column table needs DBR 17.3+")
+@pytest.mark.parametrize("start,step,column_mapping",
+                         [(1, 1, False), (10, 5, False), (100, -3, False),
+                          (1, 1, True), (100, -3, True)], ids=idfn)
+@pytest.mark.parametrize("num_slices", [1, 7], ids=idfn)
+@pytest.mark.parametrize("low_shuffle_merge", [False, True], ids=idfn)
+def test_delta_merge_identity_column(spark_tmp_path, spark_tmp_table_factory, start, step,
+                                     column_mapping, num_slices, low_shuffle_merge):
+    """
+    The identity value is planned inside the MERGE output projection. It must be generated on
+    the GPU, with the CPU's values, so the projection stays columnar. The second MERGE runs
+    with the high water mark written by the first. With column mapping the data is written
+    under physical column names, which the high water mark tracking must use.
+    """
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.rapids.sql.delta.lowShuffleMerge.enabled": str(low_shuffle_merge).lower()})
+    mapping_mode = "name" if column_mapping else "none"
+
+    def create_table(spark, table, path):
+        spark.sql(
+            f"CREATE TABLE {table} (skey BIGINT GENERATED BY DEFAULT AS IDENTITY "
+            f"(START WITH {start} INCREMENT BY {step}), id BIGINT, v STRING) USING DELTA "
+            f"LOCATION '{path}' TBLPROPERTIES ('delta.enableDeletionVectors' = 'false', "
+            f"'delta.columnMapping.mode' = '{mapping_mode}')")
+        spark.range(0, 30, 1, num_slices).selectExpr("id", "'t' || id as v") \
+            .createOrReplaceTempView("identity_seed")
+        spark.sql(f"INSERT INTO {table} (id, v) SELECT id, v FROM identity_seed")
+
+    def do_merge(spark, table, path):
+        for lo, hi in [(10, 50), (40, 90)]:
+            spark.range(lo, hi, 1, num_slices).selectExpr("id", "'s' || id as v") \
+                .createOrReplaceTempView("identity_src")
+            # The identity column is left out of the insert list so it is generated.
+            spark.sql(
+                f"MERGE INTO {table} t USING identity_src s ON t.id = s.id "
+                "WHEN MATCHED AND s.id % 5 = 0 THEN DELETE "
+                "WHEN MATCHED THEN UPDATE SET v = s.v "
+                "WHEN NOT MATCHED AND s.id % 2 = 0 THEN INSERT (id, v) VALUES (s.id, s.v) "
+                "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)").collect()
+        return spark.read.format("delta").load(path).collect()
+
+    cpu_table, gpu_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()
+    cpu_path, gpu_path = spark_tmp_path + "/CPU", spark_tmp_path + "/GPU"
+    with_cpu_session(lambda spark: create_table(spark, cpu_table, cpu_path), conf=conf)
+    with_cpu_session(lambda spark: create_table(spark, gpu_table, gpu_path), conf=conf)
+    cpu_result = with_cpu_session(lambda spark: do_merge(spark, cpu_table, cpu_path), conf=conf)
+    gpu_result = assert_rapids_delta_write(lambda spark: do_merge(spark, gpu_table, gpu_path),
+                                           conf=conf,
+                                           expected_command=(
+                                               "GpuLowShuffleMergeCommand" if low_shuffle_merge
+                                               else "GpuMergeIntoCommand"),
+                                           forbidden_cpu_fallback_classes=[
+                                               "GenerateIdentityValues"])
+    # Which partition a new row lands in after the MERGE join is not deterministic, so the
+    # generated values need not match the CPU's row for row. Compare everything else, and
+    # check the values are valid: unique, on the START/STEP progression and past the old
+    # high water mark.
+    seed_rows = 30
+    def old_rows(rows):
+        return sorted((r.skey, r.id, r.v) for r in rows if r.id < seed_rows)
+    assert_equal([(r.id, r.v) for r in sorted(cpu_result, key=lambda r: r.id)],
+                 [(r.id, r.v) for r in sorted(gpu_result, key=lambda r: r.id)])
+    assert_equal(old_rows(cpu_result), old_rows(gpu_result))
+    new_skeys = [r.skey for r in gpu_result if r.id >= seed_rows]
+    assert len(new_skeys) > 0
+    assert all((k - start) % step == 0 for k in new_skeys)
+    assert len({r.skey for r in gpu_result}) == len(gpu_result)
+    assert len({r.skey for r in cpu_result}) == len(cpu_result)
+    # New keys come after the high water mark of the seeded rows (before for a negative step).
+    old_skeys = [k for k, _, _ in old_rows(gpu_result)]
+    if step > 0:
+        assert min(new_skeys) > max(old_skeys)
+    else:
+        assert max(new_skeys) < min(old_skeys)
+
+
+@allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow, "ProjectExec",
+               "GenerateIdentityValues")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU MERGE into an identity column table needs DBR 17.3+")
+@pytest.mark.parametrize("start,step,on_gpu", [
+    (2**63 - 1 - 3000, 1, False),        # near the Long maximum
+    # The guard looks at the high water mark left by the 1500 seeded rows: start + 1499 * step.
+    (2**62 - 1 - 1499, 1, True),         # high water mark exactly Long.MaxValue / 2
+    (2**62 - 1498, 1, False),            # one past Long.MaxValue / 2
+    (-2**63 + 3000, -1, False),          # near the Long minimum
+    (-2**62 + 1499, -1, True),           # high water mark exactly Long.MinValue / 2
+    (-2**62 + 1498, -1, False),          # one past Long.MinValue / 2
+    (1, 10**12, False),                  # step too large to evaluate every row safely
+    (1, -10**12, False),
+    (1, 2**20, True),                    # the largest step accelerated
+], ids=idfn)
+def test_delta_merge_identity_column_overflow_guard(
+        spark_tmp_path, spark_tmp_table_factory, start, step, on_gpu):
+    """
+    The GPU generates an identity value for every row of a batch, so for sequences that start
+    near the Long limits, or have a large step, it could overflow where the CPU does not. Those
+    stay on the CPU: the MERGE must succeed and match the CPU, with the matched rows not
+    consuming values. The accepted cases must stay on the GPU.
+    """
+    conf = delta_merge_enabled_conf
+    seed_rows = 1500
+
+    def create_table(spark, table, path):
+        spark.sql(
+            f"CREATE TABLE {table} (skey BIGINT GENERATED BY DEFAULT AS IDENTITY "
+            f"(START WITH {start} INCREMENT BY {step}), id BIGINT, v STRING) USING DELTA "
+            f"LOCATION '{path}' TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')")
+        spark.range(0, seed_rows, 1, 1).selectExpr("id", "'t' || id as v") \
+            .createOrReplaceTempView("identity_seed")
+        spark.sql(f"INSERT INTO {table} (id, v) SELECT id, v FROM identity_seed")
+
+    def do_merge(spark, table, path):
+        spark.range(0, seed_rows + 3, 1, 1).selectExpr("id", "'s' || id as v") \
+            .createOrReplaceTempView("identity_src")
+        spark.sql(
+            f"MERGE INTO {table} t USING identity_src s ON t.id = s.id "
+            "WHEN MATCHED THEN UPDATE SET v = s.v "
+            "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)").collect()
+        return spark.read.format("delta").load(path).collect()
+
+    cpu_table, gpu_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()
+    cpu_path, gpu_path = spark_tmp_path + "/CPU", spark_tmp_path + "/GPU"
+    with_cpu_session(lambda spark: create_table(spark, cpu_table, cpu_path), conf=conf)
+    with_cpu_session(lambda spark: create_table(spark, gpu_table, gpu_path), conf=conf)
+    cpu_result = with_cpu_session(lambda spark: do_merge(spark, cpu_table, cpu_path), conf=conf)
+    plans = []
+    gpu_result = assert_rapids_delta_write(
+        lambda spark: do_merge(spark, gpu_table, gpu_path), conf=conf,
+        expected_command="GpuMergeIntoCommand",
+        forbidden_cpu_fallback_classes=["GenerateIdentityValues"] if on_gpu else None,
+        captured_plans_out=plans)
+    # The GPU expression prints as gpu_generateidentityvalues.
+    gpu_expr_used = any("gpu_generateidentityvalues" in str(p).lower() for p in plans)
+    assert gpu_expr_used == on_gpu, \
+        f"expected identity values on {'GPU' if on_gpu else 'CPU'}, plans: {plans}"
+    assert len(gpu_result) == seed_rows + 3
+    # Which partition a new row lands in after the join is not deterministic, so the new
+    # values need not equal the CPU's. Compare everything else and check the new values are
+    # valid: unique, past the old high water mark and still within the Long range.
+    assert_equal(sorted((r.id, r.v) for r in cpu_result),
+                 sorted((r.id, r.v) for r in gpu_result))
+    def old_rows(rows):
+        return sorted(tuple(r) for r in rows if r.id < seed_rows)
+    assert_equal(old_rows(cpu_result), old_rows(gpu_result))
+    new_skeys = [r.skey for r in gpu_result if r.id >= seed_rows]
+    assert len(set(new_skeys)) == 3
+    assert all(-2**63 <= k <= 2**63 - 1 for k in new_skeys)
+    old_skeys = [r.skey for r in gpu_result if r.id < seed_rows]
+    if step > 0:
+        assert min(new_skeys) > max(old_skeys)
+    else:
+        assert max(new_skeys) < min(old_skeys)

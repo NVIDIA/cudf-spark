@@ -17,6 +17,7 @@
 package org.apache.spark.sql.rapids.delta
 
 import com.nvidia.spark.rapids.delta.GpuDeltaIdentityColumnStatsTracker
+import com.nvidia.spark.rapids.delta.shims.ShimDeltaColumnMapping
 
 import org.apache.spark.sql.{Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
@@ -41,7 +42,9 @@ object GpuIdentityColumn {
       } else {
         true
       }
-      f.name -> useMax
+      // The written data uses physical column names, which differ from logical names when
+      // column mapping is enabled.
+      ShimDeltaColumnMapping.getPhysicalName(f) -> useMax
     }
     assert(identityInfo.size == highWaterMarks.size,
       s"expected $highWaterMarks found $identityInfo")

@@ -1,0 +1,85 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Run the CPU checks selected for each pull request and report their combined result.
+name: CPU CI
+
+on:
+  pull_request:
+    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Reject stale manual reruns in select without cancelling a newer automatic run.
+  group: cpu-ci-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt > 1 && github.run_id || 'auto' }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select Dockerfiles
+    runs-on: ubuntu-latest
+    outputs:
+      validate: ${{ steps.title.outputs.skip == 'true' && '[]' || steps.recipes.outputs.validate }}
+    steps:
+      - name: Read the current PR title
+        id: title
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # A manual rerun reuses the original event payload, including its old title.
+          if [[ $GITHUB_RUN_ATTEMPT == 1 ]]; then
+            pr=$(jq -c '.pull_request' "$GITHUB_EVENT_PATH")
+          else
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          fi
+          skip=$(jq -er --arg head "$HEAD_SHA" --arg base "$BASE_REF" '
+            if .state == "open" and .head.sha == $head and .base.ref == $base
+            then .title | ascii_downcase | contains("[skip ci]") | tostring
+            else error("PR is closed or its head or base has changed")
+            end' <<< "$pr")
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [[ $skip == true ]]; then
+            echo 'CPU CI skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        if: steps.title.outputs.skip == 'false'
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select image recipes
+        id: recipes
+        if: steps.title.outputs.skip == 'false'
+        run: python3 .github/workflows/ci-images/select.py
+      - name: Test image CI
+        if: steps.recipes.outputs.run-tests == 'true'
+        run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
+
+  validate:
+    name: Validate ${{ matrix.image.id }}
+    needs: select
+    if: needs.select.outputs.validate != '' && needs.select.outputs.validate != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.validate) }}
+    uses: ./.github/workflows/build-docker-image.yml
+    with:
+      config: ${{ toJSON(matrix.image) }}
+
+  result:
+    name: CPU CI gate
+    if: always()
+    needs: [select, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: ${{ needs.select.outputs.validate == '[]' && '["select"]' || '["select","validate"]' }}

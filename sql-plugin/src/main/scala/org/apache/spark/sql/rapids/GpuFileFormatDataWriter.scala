@@ -238,7 +238,7 @@ abstract class GpuFileFormatDataWriter(
     }
   }
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Writers are closed in releaseResources */ }
 }
 
 /** GPU data writer for empty partitions */
@@ -672,7 +672,9 @@ class GpuDynamicPartitionDataSingleWriter(
    *
    * @param curWriterId the current writer index
    */
-  protected def preUpdateCurrentWriterStatus(curWriterId: WriterIndex): Unit ={}
+  protected def preUpdateCurrentWriterStatus(curWriterId: WriterIndex): Unit = {
+    // Default no-op; overridden by writers that flush before switching status.
+  }
 
   override def write(batch: ColumnarBatch): Unit = {
     // The input batch that is entirely sorted, so split it up by partitions and (or)

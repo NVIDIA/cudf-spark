@@ -1,0 +1,55 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Remove old temporary and unreferenced GHCR images while preserving published tags and their manifests.
+name: CI image cleanup
+
+on:
+  schedule:
+    - cron: '57 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    if: github.repository == 'NVIDIA/cudf-spark' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.catalog.outputs.images }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          persist-credentials: false
+      - id: catalog
+        run: |
+          echo "images=$(jq -c '.["ci-toolchains"] | keys' .github/workflows/ci-images/suites.json)" >> "$GITHUB_OUTPUT"
+
+  cleanup:
+    needs: select
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: docker-maintenance-${{ matrix.image }}
+      cancel-in-progress: false
+      queue: max
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.images) }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/ghcr-cleanup@main
+        with:
+          package: ${{ github.event.repository.name }}/${{ matrix.image }}
+          tag-patterns: '["build-*"]'
+          retention-days: '7'
+          max-delete: '20'
+          dry-run: ${{ github.event_name != 'schedule' && inputs.dry-run }}

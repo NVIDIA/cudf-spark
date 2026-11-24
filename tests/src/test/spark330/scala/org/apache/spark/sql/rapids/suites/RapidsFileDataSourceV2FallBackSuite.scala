@@ -52,6 +52,8 @@ class RapidsFileDataSourceV2FallBackSuite
             commands += funcName -> qe.logical
           }
         }
+        // Drain commands from earlier tests before registering this listener.
+        sparkContext.listenerBus.waitUntilEmpty()
         spark.listenerManager.register(listener)
 
         try {
@@ -62,10 +64,11 @@ class RapidsFileDataSourceV2FallBackSuite
             assert(
               exceptions.isEmpty,
               s"Unexpected QueryExecutionListener failures: ${exceptions.mkString(", ")}")
-            assert(commands.length == 1)
-            assert(commands.head._1 == "command")
-            assert(commands.head._2.isInstanceOf[InsertIntoHadoopFsRelationCommand])
-            assert(commands.head._2.asInstanceOf[InsertIntoHadoopFsRelationCommand]
+            // A previous read's collect callback may still be delivered asynchronously.
+            val writeCommands = commands.filter(_._1 == "command")
+            assert(writeCommands.length == 1)
+            assert(writeCommands.head._2.isInstanceOf[InsertIntoHadoopFsRelationCommand])
+            assert(writeCommands.head._2.asInstanceOf[InsertIntoHadoopFsRelationCommand]
               .fileFormat.isInstanceOf[ParquetFileFormat])
             val df = spark.read.format(format).load(path.getCanonicalPath)
             checkAnswer(df, inputData.toDF())
