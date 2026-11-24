@@ -165,10 +165,33 @@ class GpuV2RowLevelWriteSummarySuite extends AnyFunSuite with FQSuiteName {
       GpuV2WriteCommitShims.commit(exec, recorder, Array.empty, plainScan)
       assert(recorder.summaryCommitCount === 1)
       val summary = recorder.lastSummary.get.asInstanceOf[DeleteSummary]
-      // SQLMetric.set(-1) is a no-op, so DeleteSummary must receive -1 directly rather than 0.
+      // SQLMetric.set(-1) is a no-op (value stays 0), so DeleteSummary must receive -1 directly.
+      assert(exec.metrics(GpuRowLevelWriteExec.NUM_DELETED_ROWS).value === 0L)
       assert(summary.numDeletedRows() === -1L)
       assert(summary.numCopiedRows() === 3L)
     }
+  }
+
+  test("non-row-level GpuAppendDataExec commits without summary even over MergeRowsExec") {
+    withSparkSession { spark =>
+      val child = spark.range(1).queryExecution.executedPlan
+      val merge = GpuMergeRowsExec(
+        Literal(true, BooleanType), Literal(true, BooleanType), Nil, Nil, Nil,
+        checkCardinality = false, child.output, child)
+      val appendExec = GpuAppendDataExec(merge, () => (), new StubGpuWrite)
+
+      val recorder = new RecordingBatchWrite
+      GpuV2WriteCommitShims.commit(appendExec, recorder, Array.empty, merge)
+      assert(recorder.summaryCommitCount === 0)
+      assert(recorder.plainCommitCount === 1)
+      assert(recorder.lastSummary.isEmpty)
+    }
+  }
+
+  test("getUpdateSummary returns -1 sentinels when metrics are absent") {
+    val summary = GpuV2WriteCommitShims.getUpdateSummary(Map.empty).get
+    assert(summary.numUpdatedRows === -1L)
+    assert(summary.numCopiedRows === -1L)
   }
 
   test("GpuWriteDeltaExec UPDATE and DELETE commit summaries and survive stage retries") {

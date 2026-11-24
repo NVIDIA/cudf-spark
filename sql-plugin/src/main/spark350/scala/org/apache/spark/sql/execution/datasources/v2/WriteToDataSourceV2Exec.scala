@@ -64,6 +64,9 @@ trait GpuV2ExistingTableWriteExec extends GpuV2TableWriteExec {
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = customMetrics
 
+  override protected def taskCustomMetrics: Map[String, SQLMetric] =
+    GpuMetric.unwrap(customMetrics)
+
   override protected def run(): Seq[InternalRow] = {
     val writtenRows = writeWithV2(write.toBatch)
     refreshCache()
@@ -122,6 +125,10 @@ trait GpuV2TableWriteExec extends V2CommandExec with UnaryExecNode with GpuExec 
   def query: SparkPlan
 
   def writingTask: GpuWritingSparkTask[_] = GpuDataWritingSparkTask
+
+  // Only connector-declared custom metrics are updated by CustomMetrics.updateMetrics so
+  // Spark/GPU-owned row-level SQLLastAttemptMetrics cannot be overwritten by a connector metric.
+  protected def taskCustomMetrics: Map[String, SQLMetric] = Map.empty
 
   var commitProgress: Option[StreamWriterCommitProgress] = None
 
@@ -220,7 +227,7 @@ trait GpuV2TableWriteExec extends V2CommandExec with UnaryExecNode with GpuExec 
       s"The input RDD has ${messages.length} partitions.")
 
     // Avoid object not serializable issue.
-    val writeMetrics: Map[String, SQLMetric] = metrics
+    val writeMetrics: Map[String, SQLMetric] = taskCustomMetrics
 
     try {
       sparkContext.runJob(

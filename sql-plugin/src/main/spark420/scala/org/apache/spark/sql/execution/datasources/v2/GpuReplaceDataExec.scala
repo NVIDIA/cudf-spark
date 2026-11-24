@@ -77,13 +77,10 @@ case class GpuReplaceDataWritingSparkTask(
   }
 
   private def countOperation(batch: ColumnarBatch, op: Int): Long = {
-    withRetryNoSplit {
-      withResource(CudfScalar.fromInt(op)) { cudfOp =>
-        withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(cudfOp)) {
-          mask =>
-            withResource(mask.sum(DType.INT64)) { s =>
-              if (s.isValid) s.getLong else 0L
-            }
+    withResource(CudfScalar.fromInt(op)) { cudfOp =>
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(cudfOp)) { mask =>
+        withResource(mask.sum(DType.INT64)) { s =>
+          if (s.isValid) s.getLong else 0L
         }
       }
     }
@@ -94,25 +91,31 @@ case class GpuReplaceDataWritingSparkTask(
       batch: ColumnarBatch): Unit = {
     val trackUpdated = sparkMetrics.contains(GpuRowLevelWriteExec.NUM_UPDATED_ROWS)
     val trackCopied = sparkMetrics.contains(GpuRowLevelWriteExec.NUM_COPIED_ROWS)
-    val numUpdated = if (trackUpdated && batch.numRows() > 0) {
-      countOperation(batch, UPDATE_OPERATION)
-    } else {
-      0L
-    }
-    val numCopied = if (trackCopied && batch.numRows() > 0) {
-      countOperation(batch, COPY_OPERATION)
-    } else {
-      0L
-    }
+    val (numUpdated, numCopied) = withResource(batch) { _ =>
+      val counts = if (batch.numRows() > 0 && (trackUpdated || trackCopied)) {
+        withRetryNoSplit {
+          val updated = if (trackUpdated) countOperation(batch, UPDATE_OPERATION) else 0L
+          val copied = if (trackCopied) countOperation(batch, COPY_OPERATION) else 0L
+          (updated, copied)
+        }
+      } else {
+        (0L, 0L)
+      }
 
-    withResource(rowProjection.project(batch)) { projected =>
+      // Preserve the full-batch write order; RewriteMergeIntoTable already nullifies INSERT
+      // metadata columns so passing metadata uniformly matches row-lineage expectations.
       metadataProjection match {
         case Some(projection) =>
-          withResource(projection.project(batch)) { metadata =>
-            writer.write(metadata, projected)
+          withResource(rowProjection.project(batch)) { projected =>
+            withResource(projection.project(batch)) { metadata =>
+              writer.write(metadata, projected)
+            }
           }
-        case None => writer.write(projected)
+        case None =>
+          // DataWriter.write(ColumnarBatch) takes ownership of the projected batch.
+          writer.write(rowProjection.project(batch))
       }
+      counts
     }
 
     if (trackUpdated) {

@@ -78,7 +78,7 @@ object GpuV2WriteCommitShims extends AdaptiveSparkPlanHelper {
             getMergeSummary(query)
         }
       case _ =>
-        getMergeSummary(query)
+        None
     }
   }
 
