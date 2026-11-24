@@ -24,7 +24,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.sql.catalyst.plans.physical.UnknownPartitioning
 import org.apache.spark.sql.execution.exchange.REPARTITION_BY_NUM
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, sum}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 
@@ -166,5 +166,43 @@ class GpuUnionExecSuite extends SparkQueryCompareTestSuite {
         }
       }, testConf)
     }
+  }
+
+  test("GpuUnionExec follows AQE-coalesced child partition counts") {
+    val testConf = new SparkConf()
+      .setAll(conf.getAll)
+      .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
+      .set(SQLConf.COALESCE_PARTITIONS_ENABLED.key, "true")
+      .set(SQLConf.SHUFFLE_PARTITIONS.key, "20")
+      .set(SQLConf.UNION_OUTPUT_PARTITIONING.key, "true")
+
+    withGpuSparkSession({ spark =>
+      val left = spark.range(0, 100, 1, 4)
+        .selectExpr("id % 10 AS k")
+        .groupBy("k")
+        .count()
+      val right = spark.range(100, 200, 1, 4)
+        .selectExpr("id % 10 AS k")
+        .groupBy("k")
+        .count()
+      val df = left.union(right)
+        .groupBy("k")
+        .agg(sum("count").as("c"))
+
+      val actual = df.collect()
+        .map(row => row.getLong(0) -> row.getLong(1))
+        .sortBy(_._1)
+        .toSeq
+      assertResult((0L until 10L).map(_ -> 20L))(actual)
+
+      val plan = df.queryExecution.executedPlan
+      val planHelper = ShimLoaderTemp.newAdaptiveSparkPlanHelperShim()
+      val gpuUnions = planHelper.collect(plan) { case union: GpuUnionExec => union }
+      assertResult(1, s"GPU unions in:\n$plan")(gpuUnions.size)
+      val childCounts = gpuUnions.head.children.map(_.outputPartitioning.numPartitions)
+      assert(childCounts.distinct.size == 1 && childCounts.head < 20,
+        s"Expected AQE-coalesced child partitions, got $childCounts:\n$plan")
+      assertResult(childCounts.head)(gpuUnions.head.outputPartitioning.numPartitions)
+    }, testConf)
   }
 }

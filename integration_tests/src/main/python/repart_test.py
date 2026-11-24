@@ -15,7 +15,8 @@
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect, collect_plan_nodes, plan_metric
-from spark_session import is_before_spark_320, is_spark_411_or_later, with_cpu_session
+from spark_session import (is_before_spark_320, is_databricks_version,
+                           is_spark_411_or_later, with_cpu_session)
 from conftest import is_not_utc
 from data_gen import *
 from marks import ignore_order, allow_non_gpu, shuffle_test
@@ -389,14 +390,14 @@ def _assert_union_attribute_map_partitioning(cpu_plan, gpu_plan):
         node for node in collect_plan_nodes(gpu_plan)
         if node.getClass().getSimpleName() == "GpuUnionExec"
     ]
-    assert len(gpu_unions) == 1, "Expected one GpuUnionExec in:\n{}".format(gpu_plan)
+    assert len(gpu_unions) == 1, f"Expected one GpuUnionExec in:\n{gpu_plan}"
     partitioning = gpu_unions[0].outputPartitioning()
     assert partitioning.getClass().getSimpleName() == "HashPartitioning"
     assert partitioning.numPartitions() == 4
 
 
-@pytest.mark.skipif(not is_spark_411_or_later(),
-                    reason="SPARK-52921 union output partitioning requires Spark 4.1.1+")
+@pytest.mark.skipif(not (is_spark_411_or_later() or is_databricks_version(18, 3)),
+                    reason="SPARK-52921 union output partitioning requires Spark 4.1.1+ or DBR 18.3")
 @pytest.mark.parametrize(
     "final_query",
     [
@@ -430,15 +431,15 @@ def test_union_partitioning_attribute_map(final_query):
             JOIN union_attribute_map_aggregate a ON b.id = a.id
             GROUP BY b.id, a.v
         """)
-        return spark.sql("""
+        return spark.sql(f"""
             WITH union4 AS (
               SELECT * FROM union_attribute_map_aggregate
               UNION ALL SELECT * FROM union_attribute_map_joined
               UNION ALL SELECT * FROM union_attribute_map_joined
               UNION ALL SELECT * FROM union_attribute_map_joined
             )
-            {}
-        """.format(final_query))
+            {final_query}
+        """)
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
