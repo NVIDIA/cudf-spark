@@ -29,10 +29,11 @@ env:
     -DskipTests
     -Dmaven.artifact.threads=10
     --batch-mode
+    --update-snapshots
     -Dmaven.wagon.http.retryHandler.count=3
     -Dmaven.wagon.httpconnectionManager.ttlSeconds=30
     -Daether.connector.http.connectionMaxTtl=30
-    -Drapids.secondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
+    -DsecondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
 
 permissions:
   contents: read
@@ -48,7 +49,7 @@ jobs:
   cache-dependencies:
     runs-on: ubuntu-latest
     outputs:
-      dailyCacheKey: ${{ steps.generateCacheKey.outputs.dailyCacheKey }}
+      dailyCacheKey: ${{ steps.maven-cache.outputs.key }}
       defaultSparkVersion: ${{ steps.all212ShimVersionsStep.outputs.defaultSparkVersion }}
       sparkTailVersions: ${{ steps.all212ShimVersionsStep.outputs.tailVersions }}
       sparkJDKVersions: ${{ steps.all212ShimVersionsStep.outputs.jdkVersions }}
@@ -58,31 +59,16 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: 17
-      - name: Generate daily cache key
-        id: generateCacheKey
+      - name: Test Maven cache preparation
         run: |
-          set -x
-          depsSHA1=$(. .github/workflows/mvn-verify-check/get-deps-sha1.sh 2.12)
-          hashfile=$(echo ${{ hashFiles('**/pom.xml') }})
-          md5sum=$(echo -n "$depsSHA1-$hashfile" | md5sum | awk '{print $1}')
-          cacheKey="${{ runner.os }}-maven-${{ github.event.pull_request.base.ref }}-${md5sum}"
-          echo "dailyCacheKey=$cacheKey" | tee $GITHUB_ENV $GITHUB_OUTPUT
-      - name: Cache local Maven repository
-        id: cache
+          python3 -B -m unittest discover -s .github/workflows/mvn-verify-check
+          python3 -B -m unittest discover -s .github/workflows/premerge-spark-cache
+      - name: Prepare Maven dependency cache
+        id: maven-cache
+        uses: ./.github/workflows/mvn-verify-check
         continue-on-error: true
-        uses: actions/cache@v5
         with:
-          path: ~/.m2
-          key: ${{ env.dailyCacheKey }}
-          restore-keys: ${{ runner.os }}-maven-
-      - name: populate-daily-cache
-        timeout-minutes: 30
-        continue-on-error: true
-        if: steps.cache.outputs.cache-hit != 'true'
-        env:
-          SCALA_VER: '2.12'
-        run: |
-          . .github/workflows/mvn-verify-check/populate-daily-cache.sh
+          scala: '2.12'
       - name: all shim versions
         id: all212ShimVersionsStep
         run: |
@@ -130,11 +116,12 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Cache local Maven repository
+      - name: Restore Maven dependencies
+        if: needs.cache-dependencies.outputs.dailyCacheKey != ''
         continue-on-error: true
-        uses: actions/cache@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.m2
+          path: ~/.m2/repository
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
 
       - name: check runtime before tests
@@ -167,7 +154,7 @@ jobs:
   cache-dependencies-scala213:
     runs-on: ubuntu-latest
     outputs:
-      scala213dailyCacheKey: ${{ steps.generateCacheKey.outputs.scala213dailyCacheKey }}
+      scala213dailyCacheKey: ${{ steps.maven-cache.outputs.key }}
       scala213Versions: ${{ steps.all213ShimVersionsStep.outputs.scala213Versions }}
       sparkJDK17Versions: ${{ steps.all213ShimVersionsStep.outputs.jdkVersions }}
     steps:
@@ -176,31 +163,12 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: 17
-      - name: Generate daily cache key
-        id: generateCacheKey
-        run: |
-          set -x
-          depsSHA1=$(. .github/workflows/mvn-verify-check/get-deps-sha1.sh 2.13)
-          hashfile=$(echo ${{ hashFiles('**/pom.xml') }})
-          md5sum=$(echo -n "$depsSHA1-$hashfile" | md5sum | awk '{print $1}')
-          cacheKey="${{ runner.os }}-maven-${{ github.event.pull_request.base.ref }}-${md5sum}"
-          echo "scala213dailyCacheKey=$cacheKey" | tee $GITHUB_ENV $GITHUB_OUTPUT
-      - name: Cache local Maven repository
-        id: cache
+      - name: Prepare Maven dependency cache
+        id: maven-cache
+        uses: ./.github/workflows/mvn-verify-check
         continue-on-error: true
-        uses: actions/cache@v5
         with:
-          path: ~/.m2
-          key: ${{ env.scala213dailyCacheKey }}
-          restore-keys: ${{ runner.os }}-maven-
-      - name: populate-daily-cache
-        timeout-minutes: 30
-        continue-on-error: true
-        if: steps.cache.outputs.cache-hit != 'true'
-        env:
-          SCALA_VER: '2.13'
-        run: |
-          . .github/workflows/mvn-verify-check/populate-daily-cache.sh
+          scala: '2.13'
       - name: all 213 shim verions
         id: all213ShimVersionsStep
         run: |
@@ -241,11 +209,12 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Cache local Maven repository
+      - name: Restore Maven dependencies
+        if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
         continue-on-error: true
-        uses: actions/cache@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.m2
+          path: ~/.m2/repository
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
 
       - name: check runtime before tests
@@ -297,11 +266,12 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Cache local Maven repository
+      - name: Restore Maven dependencies
+        if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
         continue-on-error: true
-        uses: actions/cache@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.m2
+          path: ~/.m2/repository
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
 
       - name: check runtime before tests
@@ -352,11 +322,12 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java-version }}
 
-      - name: Cache local Maven repository
+      - name: Restore Maven dependencies
+        if: needs.cache-dependencies.outputs.dailyCacheKey != ''
         continue-on-error: true
-        uses: actions/cache@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.m2
+          path: ~/.m2/repository
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
 
       - name: check runtime before tests
@@ -400,11 +371,12 @@ jobs:
           distribution: temurin
           java-version: 11
 
-      - name: Cache local Maven repository
+      - name: Restore Maven dependencies
+        if: needs.cache-dependencies.outputs.dailyCacheKey != ''
         continue-on-error: true
-        uses: actions/cache@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.m2
+          path: ~/.m2/repository
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
 
       - name: Setup Maven Wrapper
@@ -447,11 +419,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Cache local Maven repository
+      - name: Restore Maven dependencies
+        if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
         continue-on-error: true
-        uses: actions/cache@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.m2
+          path: ~/.m2/repository
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
       - name: Check JSON against canonical Scala 2.13 packaging
         run: python3 -B scripts/get_iceberg_versions.py validate

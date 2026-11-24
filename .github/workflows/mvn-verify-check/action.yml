@@ -1,0 +1,94 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Share the same Maven dependency cache between the branch warmer and PR checks.
+name: Prepare Maven Verify dependencies
+description: Restore or populate the Maven repository for one Scala binary version.
+inputs:
+  scala:
+    description: Scala binary version used by Maven Verify
+    required: true
+  base-branch:
+    description: PR target for callers not running on a pull_request event
+    required: false
+  premerge:
+    description: Seed premerge runtime dependencies; an existing full cache is not downloaded
+    default: 'false'
+outputs:
+  key:
+    description: Exact cache key for downstream verification jobs
+    value: ${{ steps.target.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - name: Identify Maven dependencies
+      id: key
+      shell: bash
+      env:
+        SCALA_VER: ${{ inputs.scala }}
+        BRANCH: ${{ inputs.base-branch || github.base_ref || github.ref_name }}
+        INPUT_HASH: >-
+          ${{ hashFiles('**/pom.xml', 'build/get_buildvers.py', '.github/workflows/mvn-verify-check/*.sh',
+                        '.github/workflows/mvn-verify-check/dependency-key.py',
+                        '.github/workflows/mvn-verify-check/action.yml',
+                        '.github/workflows/mvn-verify-check.yml') }}
+        PREMERGE_HASH: ${{ hashFiles('integration_tests/run_unity_catalog_server.sh') }}
+      run: |
+        snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER")
+        java_major=$(java -XshowSettings:properties -version 2>&1 | awk '$1 == "java.specification.version" {print $3}')
+        [[ -n "$java_major" ]] || { echo "Cannot determine Java version for Maven cache" >&2; exit 1; }
+        prefix="mvn-verify-${RUNNER_OS}-${RUNNER_ARCH}-jdk${java_major}-${SCALA_VER}-${BRANCH}-"
+        stem="${prefix}${INPUT_HASH}-${snapshot_hash}"
+        spark=$(jq -er --arg scala "$SCALA_VER" '.[$scala].version' .github/workflows/premerge-spark-cache/releases.json)
+        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "stem=$stem" >> "$GITHUB_OUTPUT"
+        echo "full=$stem-premerge-$spark-$PREMERGE_HASH" >> "$GITHUB_OUTPUT"
+
+    - name: Check for an existing premerge seed
+      if: inputs.premerge == 'true'
+      id: existing
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.key.outputs.full }}
+        lookup-only: true
+
+    - name: Restore Maven dependencies
+      if: steps.existing.outputs.cache-hit != 'true'
+      id: restore
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.key.outputs.full }}
+        restore-keys: |
+          ${{ steps.key.outputs.stem }}-premerge-
+          ${{ steps.key.outputs.stem }}-verify
+          ${{ steps.key.outputs.prefix }}
+
+    - name: Select cache to use or populate
+      id: target
+      shell: bash
+      env:
+        STEM: ${{ steps.key.outputs.stem }}
+        FULL: ${{ steps.key.outputs.full }}
+        MATCH: ${{ steps.existing.outputs.cache-matched-key || steps.restore.outputs.cache-matched-key }}
+        PREMERGE: ${{ inputs.premerge }}
+      run: bash "$GITHUB_ACTION_PATH/cache-target.sh" >> "$GITHUB_OUTPUT"
+
+    - name: Warm missing dependencies
+      if: steps.target.outputs.ready != 'true'
+      shell: bash
+      env:
+        SCALA_VER: ${{ inputs.scala }}
+        WARM_PREMERGE: ${{ inputs.premerge }}
+        WARM_TIMEOUT: ${{ inputs.premerge == 'true' && '55m' || '30m' }}
+      run: timeout "$WARM_TIMEOUT" "$GITHUB_ACTION_PATH/populate-daily-cache.sh"
+
+    - name: Save Maven dependencies
+      if: success() && steps.target.outputs.ready != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.target.outputs.key }}
