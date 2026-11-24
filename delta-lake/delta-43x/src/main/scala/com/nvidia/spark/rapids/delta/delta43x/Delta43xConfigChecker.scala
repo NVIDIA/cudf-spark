@@ -87,8 +87,18 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       meta: RapidsMeta[_, _, _],
       spark: SparkSession,
       properties: Map[String, String],
-      writeOptions: Map[String, String],
+      execWriteOptions: Map[String, String],
       hasPartitionColumns: Boolean): Unit = {
+    // SQL `OPTIONS (...)` reach the exec only as properties with an "option." prefix, and Delta's
+    // catalog uses them as the write options when the exec has none. They are write options, so
+    // their keys match whatever their case, unlike the same key given as a table property.
+    val writeOptions = if (execWriteOptions.isEmpty) {
+      properties.collect {
+        case (k, v) if k.startsWith("option.") => k.stripPrefix("option.") -> v
+      }
+    } else {
+      execWriteOptions
+    }
     val created = try {
       Right(creationProperties(spark, properties, writeOptions))
     } catch {
@@ -197,14 +207,12 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       spark: SparkSession,
       options: Map[String, String],
       effectiveProperties: Map[String, String]): Unit = {
-    // Delta matches these keys exactly, but its catalog and commit path normalize their case.
+    // Delta normalizes the case of `delta.*` keys itself, but it matches `parquet.writer.version`
+    // exactly in both options and properties, so another spelling of it is ignored and the CPU
+    // writes Parquet v1. A write option in another case is still treated as the real option here:
+    // falling back for a spelling that Delta may start to accept is cheaper than guessing.
     val writerVersionKey = ParquetOutputFormat.WRITER_VERSION
-    // The writer version may also arrive as a property, e.g. an option SQL CTAS/RTAS persisted
-    // with its original case. An explicit write option still wins.
-    val propertyVersion = effectiveProperties.collectFirst {
-      case (k, v) if k.equalsIgnoreCase(writerVersionKey) => writerVersionKey -> v
-    }
-    val normalizedOptions = propertyVersion.toMap ++ normalizeKey(options, writerVersionKey)
+    val normalizedOptions = normalizeKey(options, writerVersionKey)
     val normalizedProperties =
       normalizeKey(effectiveProperties, DeltaConfigs.PARQUET_FORMAT_VERSION.key)
     try {
