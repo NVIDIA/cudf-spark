@@ -165,20 +165,21 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       }
       None
     } else {
-      // A MULTITHREADED pool thread can't take the GPU semaphore that dictionary pruning needs, so
-      // it fetches before the task prunes and this can count more row groups than PERFILE does.
-      addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
       setDecodeFilter(reader, ast)
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)
       }
-      addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(ranges))
       // Checked before any release, so a device read keeps the GPU semaphore the dictionary
       // compare took rather than releasing it and waiting for it again.
       if (useDeviceRead(split.source, ranges)) {
+        // Counted when read, since a MULTITHREADED task may prune some first.
         Some(new FetchedColumnChunks(rowGroups, Array.empty,
           deviceFetch = Some(DeviceFetch(split.source, ranges))))
       } else {
+        // A MULTITHREADED pool thread can't take the GPU semaphore that dictionary pruning needs,
+        // so it fetches before the task prunes and this can count more row groups than PERFILE.
+        addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
+        addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(ranges))
         if (releaseSemaphoreBeforeHostFetch) {
           // Leaving the GPU for a while: reading the column chunks the pruning selected is the
           // longest IO of the read.
@@ -568,6 +569,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       rowGroups: Array[Int],
       deviceFetch: DeviceFetch): Table = {
+    addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
+    addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(deviceFetch.ranges))
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
     // The device chunks do not outlive an attempt, so a retry reads them from the file again.
     withRetryNoSplit[Table] {
