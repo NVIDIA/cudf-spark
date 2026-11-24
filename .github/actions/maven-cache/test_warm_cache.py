@@ -11,11 +11,35 @@ import tempfile
 import unittest
 
 
-WARMER = Path(__file__).resolve().with_name("populate-daily-cache.sh")
+WARMER = Path(__file__).resolve().with_name("populate-cache.sh")
 ROOT = WARMER.parents[3]
 
 
 class MavenCacheWarmupTest(unittest.TestCase):
+    def test_incomplete_restore_discards_only_hosted_dependencies(self):
+        script = WARMER.with_name("recover-restore.sh")
+        with tempfile.TemporaryDirectory() as home:
+            m2 = Path(home) / ".m2"
+            repo = m2 / "repository"
+            repo.mkdir(parents=True)
+            (repo / "partial.jar").touch()
+            settings = m2 / "settings.xml"
+            settings.write_text("keep this file")
+            github_env = Path(home) / "github-env"
+            subprocess.run(["bash", script, "verify"], env=dict(os.environ, HOME=home,
+                           GITHUB_ENV=str(github_env), RUNNER_TEMP=home, MAVEN_OPTS="-Xmx1g"), check=True)
+            opts, path = github_env.read_text().splitlines()
+            fresh_repo = Path(path.removeprefix("MAVEN_REPOSITORY="))
+            self.assertEqual(opts, f"MAVEN_OPTS=-Xmx1g -Dmaven.repo.local={fresh_repo}")
+            self.assertTrue(fresh_repo.is_dir())
+            self.assertFalse(any(fresh_repo.iterdir()))
+            self.assertTrue((repo / "partial.jar").exists())
+            for runner, retained in [("self-hosted", True), ("github-hosted", False)]:
+                subprocess.run(["bash", script, "warm"], env=dict(os.environ, HOME=home,
+                               RUNNER_ENVIRONMENT=runner), check=True)
+                self.assertEqual(repo.exists(), retained)
+                self.assertEqual(settings.read_text(), "keep this file")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

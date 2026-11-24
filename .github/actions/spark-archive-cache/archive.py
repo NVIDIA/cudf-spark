@@ -70,7 +70,7 @@ def main():
     name, url, digest = archive(args.scala)
     path = Path.home() / ".cache/cudf-spark/spark" / name
     if args.operation == "metadata":
-        print(f"name={name}\npath={path}\nkey=premerge-spark-v1-{name}-{digest}")
+        print(f"name={name}\npath={path}\nkey=spark-archive-v1-{name}-{digest}")
     else:
         ensure(path, url, digest)
 

@@ -9,9 +9,8 @@ on:
     paths:
       - '.github/workflows/cache.yml'
       - '.github/workflows/mvn-verify-check.yml'
-      - '.github/workflows/mvn-verify-check/**'
-      - '.github/workflows/premerge-spark-cache/**'
-      - '.github/workflows/setup-maven-mirror.py'
+      - '.github/actions/maven-cache/**'
+      - '.github/actions/spark-archive-cache/**'
       - '**/pom.xml'
       - 'build/get_buildvers.py'
       - 'dist/build/package-parallel-worlds.py'
@@ -25,13 +24,13 @@ on:
       - 'dist/build/package-parallel-worlds.py'
       - 'integration_tests/run_unity_catalog_server.sh'
       - 'scripts/get_iceberg_versions.py'
-      - '.github/workflows/mvn-verify-check/*.sh'
-      - '.github/workflows/mvn-verify-check/dependency-key.py'
-      - '.github/workflows/mvn-verify-check/action.yml'
+      - '.github/actions/maven-cache/*.sh'
+      - '.github/actions/maven-cache/dependency-key.py'
+      - '.github/actions/maven-cache/action.yml'
       - '.github/workflows/mvn-verify-check.yml'
       - '.github/workflows/cache.yml'
-      - '.github/workflows/setup-maven-mirror.py'
-      - '.github/workflows/premerge-spark-cache/**'
+      - '.github/actions/maven-cache/settings.xml'
+      - '.github/actions/spark-archive-cache/**'
   schedule:
     # JNI and private SNAPSHOTs can advance without a change in this repository.
     - cron: '43 4 * * *'
@@ -53,8 +52,8 @@ jobs:
         with:
           persist-credentials: false
       - run: |
-          python3 -B -m unittest discover -s .github/workflows/mvn-verify-check
-          python3 -B -m unittest discover -s .github/workflows/premerge-spark-cache
+          python3 -B -m unittest discover -s .github/actions/maven-cache
+          python3 -B -m unittest discover -s .github/actions/spark-archive-cache
 
   prepare:
     name: Prepare Scala ${{ matrix.scala }} caches
@@ -86,14 +85,14 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
-      - uses: ./.github/workflows/mvn-verify-check
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
+      - uses: ./.github/actions/maven-cache
         with:
           scala: ${{ matrix.scala }}
           premerge: 'true'
       - name: Warm Apache Spark distribution
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        uses: ./.github/workflows/premerge-spark-cache
+        uses: ./.github/actions/spark-archive-cache
         with:
           scala: ${{ matrix.scala }}
           save: 'true'

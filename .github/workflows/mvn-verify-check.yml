@@ -24,6 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
   COMMON_MVN_FLAGS: >-
     -Ddist.jar.compress=false
     -DskipTests
@@ -33,7 +34,7 @@ env:
     -Dmaven.wagon.http.retryHandler.count=3
     -Dmaven.wagon.httpconnectionManager.ttlSeconds=30
     -Daether.connector.http.connectionMaxTtl=30
-    -DsecondaryCacheDir=$HOME/.m2/repository/.sbt/1.0/zinc/org.scala-sbt
+    -DsecondaryCacheDir=${MAVEN_REPOSITORY:-$HOME/.m2/repository}/.sbt/1.0/zinc/org.scala-sbt
 
 permissions:
   contents: read
@@ -60,13 +61,18 @@ jobs:
           distribution: 'temurin'
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
       - name: Prepare Maven dependency cache
         id: maven-cache
-        uses: ./.github/workflows/mvn-verify-check
+        timeout-minutes: 40
+        uses: ./.github/actions/maven-cache
         continue-on-error: true
         with:
           scala: '2.12'
+      - &cold-after-prepare
+        name: Ignore failed Maven cache preparation
+        if: ${{ !cancelled() && steps.maven-cache.outcome == 'failure' }}
+        run: bash .github/actions/maven-cache/recover-restore.sh verify
       - name: all shim versions
         id: all212ShimVersionsStep
         run: |
@@ -114,15 +120,23 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
 
       - name: Restore Maven dependencies
+        id: restore-maven
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
+        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
+      - &cold-maven
+        name: Ignore incomplete Maven restore
+        if: >-
+          !cancelled() && steps.restore-maven.outcome != 'skipped' &&
+          (steps.restore-maven.outcome != 'success' || steps.restore-maven.outputs.cache-hit != 'true')
+        run: bash .github/actions/maven-cache/recover-restore.sh verify
 
       - name: check runtime before tests
         run: |
@@ -164,13 +178,15 @@ jobs:
           distribution: 'temurin'
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
       - name: Prepare Maven dependency cache
         id: maven-cache
-        uses: ./.github/workflows/mvn-verify-check
+        timeout-minutes: 40
+        uses: ./.github/actions/maven-cache
         continue-on-error: true
         with:
           scala: '2.13'
+      - *cold-after-prepare
       - name: all 213 shim verions
         id: all213ShimVersionsStep
         run: |
@@ -211,15 +227,18 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
 
       - name: Restore Maven dependencies
+        id: restore-maven
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
+        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
+      - *cold-maven
 
       - name: check runtime before tests
         run: |
@@ -270,15 +289,18 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
 
       - name: Restore Maven dependencies
+        id: restore-maven
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
+        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
+      - *cold-maven
 
       - name: check runtime before tests
         run: |
@@ -328,15 +350,18 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java-version }}
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
 
       - name: Restore Maven dependencies
+        id: restore-maven
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
+        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
+      - *cold-maven
 
       - name: check runtime before tests
         run: |
@@ -366,6 +391,9 @@ jobs:
 
   install-modules:
     needs: cache-dependencies
+    env:
+      # The wrapper downloads Maven before it can read settings.xml.
+      MVNW_REPOURL: https://maven-central.storage-download.googleapis.com/maven2
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -379,15 +407,18 @@ jobs:
           distribution: temurin
           java-version: 11
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
 
       - name: Restore Maven dependencies
+        id: restore-maven
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
+        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ needs.cache-dependencies.outputs.dailyCacheKey }}
+      - *cold-maven
 
       - name: Setup Maven Wrapper
         run: mvn wrapper:wrapper -Dmaven=${{ matrix.maven-version }}
@@ -430,14 +461,17 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
       - name: Restore Maven dependencies
+        id: restore-maven
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
+        timeout-minutes: 6
         continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.m2/repository
           key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
+      - *cold-maven
       - name: Check JSON against canonical Scala 2.13 packaging
         run: python3 -B scripts/get_iceberg_versions.py validate
 
@@ -448,7 +482,7 @@ jobs:
       - uses: NVIDIA/spark-rapids-common/checkout@main
 
       - name: Configure Maven Central mirror
-        run: python3 .github/workflows/setup-maven-mirror.py
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
 
       - name: Report withResource nesting violations
         run: |

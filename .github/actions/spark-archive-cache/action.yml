@@ -1,11 +1,11 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Prepare premerge Spark archive
-description: Restore or download the checksum-verified Apache Spark binary for one premerge lane.
+name: Prepare Spark archive
+description: Restore or download the checksum-verified Apache Spark distribution.
 inputs:
   scala:
-    description: Scala binary version for the premerge lane
+    description: Scala binary version of the Spark distribution
     required: true
   save:
     description: Warm the cache without restoring existing entries (trusted branch warmer only)
@@ -47,7 +47,13 @@ runs:
         SCALA: ${{ inputs.scala }}
       run: python3 "$GITHUB_ACTION_PATH/archive.py" ensure "$SCALA"
     - name: Save archive
-      if: steps.archive.outputs.warm_only == 'true' && steps.restore.outputs.cache-hit != 'true'
+      # A PR miss may seed only its merge ref, never a trusted caller's branch.
+      if: >-
+        steps.restore.outputs.cache-hit != 'true' &&
+        (steps.archive.outputs.warm_only == 'true' ||
+        (github.event_name == 'pull_request' &&
+        github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)))
+      continue-on-error: ${{ steps.archive.outputs.warm_only != 'true' }}
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/cudf-spark/spark/${{ steps.archive.outputs.name }}

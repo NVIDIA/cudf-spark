@@ -78,7 +78,7 @@ warm_premerge_dependencies() {
 
     if [[ "$SCALA_VER" == 2.13 ]]; then
         spark_version=$(jq -er --arg scala "$SCALA_VER" '.[$scala].version' \
-            .github/workflows/premerge-spark-cache/releases.json) || return $?
+            .github/actions/spark-archive-cache/releases.json) || return $?
         for delta_property in delta42x.version delta43x.version; do
             delta_version=$(mvn "${maven_flags[@]}" -N -q help:evaluate \
                 "-Dexpression=$delta_property" -DforceStdout) || return $?
