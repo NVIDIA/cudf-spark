@@ -59,10 +59,8 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: 17
-      - name: Test Maven cache preparation
-        run: |
-          python3 -B -m unittest discover -s .github/workflows/mvn-verify-check
-          python3 -B -m unittest discover -s .github/workflows/premerge-spark-cache
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
       - name: Prepare Maven dependency cache
         id: maven-cache
         uses: ./.github/workflows/mvn-verify-check
@@ -115,6 +113,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
 
       - name: Restore Maven dependencies
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
@@ -163,6 +163,8 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
       - name: Prepare Maven dependency cache
         id: maven-cache
         uses: ./.github/workflows/mvn-verify-check
@@ -208,6 +210,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
 
       - name: Restore Maven dependencies
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
@@ -265,6 +269,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
 
       - name: Restore Maven dependencies
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
@@ -321,6 +327,8 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.java-version }}
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
 
       - name: Restore Maven dependencies
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
@@ -370,6 +378,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 11
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
 
       - name: Restore Maven dependencies
         if: needs.cache-dependencies.outputs.dailyCacheKey != ''
@@ -419,6 +429,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
       - name: Restore Maven dependencies
         if: needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey != ''
         continue-on-error: true
@@ -434,6 +446,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: NVIDIA/spark-rapids-common/checkout@main
+
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
 
       - name: Report withResource nesting violations
         run: |

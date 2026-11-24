@@ -28,10 +28,11 @@ runs:
         SCALA_VER: ${{ inputs.scala }}
         BRANCH: ${{ inputs.base-branch || github.base_ref || github.ref_name }}
         INPUT_HASH: >-
-          ${{ hashFiles('**/pom.xml', 'build/get_buildvers.py', '.github/workflows/mvn-verify-check/*.sh',
+          ${{ hashFiles('**/pom.xml', 'build/get_buildvers.py', 'dist/build/package-parallel-worlds.py',
+                        'scripts/get_iceberg_versions.py', '.github/workflows/mvn-verify-check/*.sh',
                         '.github/workflows/mvn-verify-check/dependency-key.py',
                         '.github/workflows/mvn-verify-check/action.yml',
-                        '.github/workflows/mvn-verify-check.yml') }}
+                        '.github/workflows/mvn-verify-check.yml', '.github/workflows/setup-maven-mirror.py') }}
         PREMERGE_HASH: ${{ hashFiles('integration_tests/run_unity_catalog_server.sh') }}
       run: |
         snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER")

@@ -1,21 +1,36 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Seed the Maven Verify and Spark premerge dependencies on the target branch.
+# Test cache preparation on pull requests and seed Maven and Spark dependencies on target branches.
 name: Cache preparation
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/cache.yml'
+      - '.github/workflows/mvn-verify-check.yml'
+      - '.github/workflows/mvn-verify-check/**'
+      - '.github/workflows/premerge-spark-cache/**'
+      - '.github/workflows/setup-maven-mirror.py'
+      - '**/pom.xml'
+      - 'build/get_buildvers.py'
+      - 'dist/build/package-parallel-worlds.py'
+      - 'integration_tests/run_unity_catalog_server.sh'
+      - 'scripts/get_iceberg_versions.py'
   push:
     branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
     paths:
       - '**/pom.xml'
       - 'build/get_buildvers.py'
+      - 'dist/build/package-parallel-worlds.py'
       - 'integration_tests/run_unity_catalog_server.sh'
+      - 'scripts/get_iceberg_versions.py'
       - '.github/workflows/mvn-verify-check/*.sh'
       - '.github/workflows/mvn-verify-check/dependency-key.py'
       - '.github/workflows/mvn-verify-check/action.yml'
       - '.github/workflows/mvn-verify-check.yml'
       - '.github/workflows/cache.yml'
+      - '.github/workflows/setup-maven-mirror.py'
       - '.github/workflows/premerge-spark-cache/**'
   schedule:
     # JNI and private SNAPSHOTs can advance without a change in this repository.
@@ -30,9 +45,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    name: Test cache preparation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -B -m unittest discover -s .github/workflows/mvn-verify-check
+          python3 -B -m unittest discover -s .github/workflows/premerge-spark-cache
+
   prepare:
     name: Prepare Scala ${{ matrix.scala }} caches
+    needs: test
     if: >-
+      github.event_name != 'pull_request' &&
       github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
@@ -57,6 +85,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
       - uses: ./.github/workflows/mvn-verify-check
         with:
           scala: ${{ matrix.scala }}

@@ -21,6 +21,7 @@ on:
       - 'pom.xml'
       - 'scala2.13/**/pom.xml'
       - '.github/workflows/delta43-unit-tests.yml'
+      - '.github/workflows/setup-maven-mirror.py'
 
 concurrency:
   group: delta43-unit-tests-${{ github.event.pull_request.number || github.ref }}
@@ -35,6 +36,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Configure Maven Central mirror
+        run: python3 .github/workflows/setup-maven-mirror.py
       - name: Build Spark 4.1.1 test dependencies with Delta 4.3
         run: >-
           mvn -B -f scala2.13/pom.xml -pl tests -am

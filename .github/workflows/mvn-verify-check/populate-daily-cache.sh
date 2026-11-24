@@ -40,6 +40,24 @@ versions=$(python3 build/get_buildvers.py no_snapshots "$pom")
 read -r -a buildvers <<< "${versions//,/ }"
 (( ${#buildvers[@]} > 0 )) || { echo "No build versions found in $pom" >&2; exit 1; }
 
+warm_cli_plugins() (
+    # dist/build/package-parallel-worlds.py pins the dependency plugin for its standalone get goal.
+    goals=(help:evaluate -Dexpression=project.version
+           org.apache.maven.plugins:maven-dependency-plugin:2.10:help)
+    if [[ "$SCALA_VER" == 2.12 ]]; then
+        # The install matrix generates a wrapper. Running the goal also resolves its scripts ZIP.
+        wrapper_dir=$(mktemp -d "${TMPDIR:-/tmp}/maven-wrapper.XXXXXXXX") || exit $?
+        trap 'rm -rf "$wrapper_dir"' EXIT
+        cp "$pom" "$wrapper_dir/pom.xml" || exit $?
+        cd "$wrapper_dir" || exit $?
+        goals+=(wrapper:wrapper)
+    else
+        # Verify uses source-javadoc, and the Iceberg matrix pins its effective-POM reader.
+        goals+=(source:help org.apache.maven.plugins:maven-help-plugin:3.5.2:help)
+    fi
+    mvn "${maven_flags[@]}" -N -q "${goals[@]}"
+)
+
 warm_premerge_dependencies() {
     local buildver profile selected spark_version delta_property delta_version
     local premerge_shims=" ${buildvers[0]} "
@@ -73,6 +91,7 @@ warm_premerge_dependencies() {
 
 warm_dependencies() {
     local buildver
+    warm_cli_plugins || return $?
     for buildver in "${buildvers[@]}"; do
         mvn "${maven_flags[@]}" "-Dbuildver=$buildver" \
             de.qaware.maven:go-offline-maven-plugin:resolve-dependencies || return $?
