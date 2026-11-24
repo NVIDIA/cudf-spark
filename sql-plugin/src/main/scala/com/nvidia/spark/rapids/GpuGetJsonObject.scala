@@ -250,11 +250,8 @@ case class GpuGetJsonObject(
     }
   }
 
-  // ---- GpuBatchableExpression: sibling get_json_object calls over the SAME
-  // json column batch into ONE native multi-path call. The verify-mode side
-  // channel (CpuGetJsonObject.verify in doColumnar) is not batchable and keeps
-  // its per-column path via batchEligible = false.
-  override def batchEligible: Boolean = savePathForVerify.isEmpty
+  // Batch evaluation reads literal paths without evaluating the RHS and skips CPU verification.
+  override def batchEligible: Boolean = savePathForVerify.isEmpty && litPathOf(path).isDefined
 
   // The multi-path API reads only the first input. Structural equality keeps
   // comparisons from regrouping floating-point arithmetic via canonicalization.

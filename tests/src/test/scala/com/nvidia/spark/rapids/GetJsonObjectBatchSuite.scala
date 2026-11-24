@@ -32,8 +32,10 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.{ExprId, Expression}
+import org.apache.spark.sql.execution.SubqueryExec
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
+import org.apache.spark.sql.rapids.GpuScalarSubquery
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types.{ArrayType, DataType, IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -503,5 +505,27 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
         |FROM rounding_input""".stripMargin
     assertCpuGpuParity(sql, confs)
     assert(withGpuDelta(sql, confs) == ((2L, 2L, 0L)))
+  }
+
+  test("GPU projection evaluates a scalar-subquery JSON path per column") {
+    // SQL tagging requires a literal path, so exercise a prepared GPU expression directly.
+    val path = withCpu() { s =>
+      val plan = s.sql("SELECT '$.a'").queryExecution.executedPlan
+      val subquery = GpuScalarSubquery(SubqueryExec("json path", plan), ExprId(0))
+      subquery.updateResult()
+      subquery
+    }
+    val json = GpuBoundReference(0, StringType, nullable = false)(ExprId(1), "json")
+    val expr = GpuGetJsonObject(json, path)(None, 0)
+    val input = GpuColumnVector.from(CudfColumnVector.fromStrings("""{"a":"value"}"""),
+      StringType)
+    withResource(new ColumnarBatch(Array[ColumnVector](input), 1)) { batch =>
+      withResource(GpuProjectExec.project(batch, Seq(expr))) { result =>
+        withResource(result.column(0).asInstanceOf[GpuColumnVector].getBase.copyToHost()) { host =>
+          assert(!host.isNull(0))
+          assert(host.getJavaString(0) == "value")
+        }
+      }
+    }
   }
 }
