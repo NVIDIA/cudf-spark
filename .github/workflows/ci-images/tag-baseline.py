@@ -49,9 +49,13 @@ def manifest_digest(image, tag):
     status, digest, body = get(f"/v2/{package}/manifests/{tag}", headers)
     if status == 200 and DIGEST.fullmatch(digest or ""):
         return digest
-    if status == 404 and any(err.get("code") == "MANIFEST_UNKNOWN"
-                             for err in json.loads(body).get("errors", [])):
-        return None
+    if status == 404:
+        payload = json.loads(body)
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        # Only an unambiguous manifest-not-found response proves the tag is absent.
+        if isinstance(errors, list) and errors and all(
+                isinstance(err, dict) and err.get("code") == "MANIFEST_UNKNOWN" for err in errors):
+            return None
     raise ValueError(f"cannot determine manifest digest for {image}:{tag} (HTTP {status})")
 
 

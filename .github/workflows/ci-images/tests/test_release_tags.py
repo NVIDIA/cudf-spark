@@ -3,6 +3,7 @@
 
 """Verify branch tag freshness, release ownership and digest preservation."""
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from release_fixture import RELEASE_BRANCH, RELEASE_LINE
 
@@ -19,6 +21,23 @@ SOURCE = Path(__file__).resolve().parents[1]
 DIGEST = "sha256:" + "f" * 64
 PACKAGE = "integration-ubuntu"
 SUFFIX = "-test-toolchain"
+
+
+class ManifestLookupTest(unittest.TestCase):
+    def test_only_unambiguous_404_proves_absence(self):
+        spec = importlib.util.spec_from_file_location("tag_baseline", SOURCE / "tag-baseline.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        missing = {"code": "MANIFEST_UNKNOWN"}
+        image = "ghcr.io/nvidia/cudf-spark/spark-build"
+        with patch.object(guard, "pull_token", return_value="fixture"), patch.object(guard, "get") as get:
+            get.return_value = (404, None, json.dumps({"errors": [missing]}))
+            self.assertIsNone(guard.manifest_digest(image, "main"))
+            for errors in ([missing, {"code": "DENIED"}], [], [None], None):
+                with self.subTest(errors=errors):
+                    get.return_value = (404, None, json.dumps({"errors": errors}))
+                    with self.assertRaisesRegex(ValueError, "HTTP 404"):
+                        guard.manifest_digest(image, "main")
 
 
 class ReleaseTagTest(unittest.TestCase):
