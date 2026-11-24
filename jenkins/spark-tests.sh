@@ -287,6 +287,8 @@ run_delta_lake_tests() {
   # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
   # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
   SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
+  # Delta 4.2 and 4.3 publish Spark 4.1-line artifacts that are compatible with Spark 4.1.4.
+  SPARK_414_PATTERN="^(4\.1\.4)$"
 
   if [[ $SPARK_VER =~ $SPARK_32X_PATTERN ]]; then
     # There are multiple versions of deltalake that support SPARK 3.2.X
@@ -328,11 +330,19 @@ run_delta_lake_tests() {
       else
         DELTA_LAKE_VERSIONS="4.0.1"
       fi
-      if [[ "$SPARK_VER" == "4.0.1" ]]; then
+      if [[ "$SPARK_VER" == "4.0.1" || "$SPARK_VER" == "4.0.5" ]]; then
         DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
       fi
     else
       echo "Skipping Delta Lake 4.0.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
+    fi
+  fi
+
+  if [[ $SPARK_VER =~ $SPARK_414_PATTERN ]]; then
+    if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
+      DELTA_LAKE_VERSIONS="4.2.0 4.3.0"
+    else
+      echo "Skipping Delta Lake 4.2/4.3 tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
     fi
   fi
 
@@ -403,10 +413,10 @@ run_delta_lake_uc_tests() {
   fi
 
   # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
-  # those versions are only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated
-  # rather than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
-  # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
-  # rejects the same combinations outright; CI skips them instead.
+  # those versions are only exercised on Scala 2.13 with Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4.
+  # They are repeated rather than read from DELTA_LAKE_VERSIONS because that variable is assigned
+  # inside run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs.
+  # run_unity_catalog_server.sh rejects the same combinations outright; CI skips them instead.
   if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
     if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
       echo "!!!! Unity Catalog tests require Scala 2.13, found $SCALA_BINARY_VER"
@@ -415,14 +425,15 @@ run_delta_lake_uc_tests() {
     echo "!!!! Skipping Unity Catalog tests. They require Scala 2.13, found $SCALA_BINARY_VER"
     return 0
   fi
-  if [[ "$SPARK_VER" != "4.0.1" && "$SPARK_VER" != "4.1.1" ]]; then
+  if [[ "$SPARK_VER" != "4.0.1" && "$SPARK_VER" != "4.0.5" &&
+      "$SPARK_VER" != "4.1.1" && "$SPARK_VER" != "4.1.4" ]]; then
     if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
-      echo "!!!! Delta Lake $delta_version Unity Catalog tests require Spark 4.0.1 or 4.1.1," \
-        "found $SPARK_VER"
+      echo "!!!! Delta Lake $delta_version Unity Catalog tests require Spark 4.0.1, 4.0.5," \
+        "4.1.1, or 4.1.4; found $SPARK_VER"
       return 1
     fi
     echo "!!!! Skipping Unity Catalog tests. Delta Lake $delta_version is only tested against" \
-      "Spark 4.0.1 and 4.1.1, found $SPARK_VER"
+      "Spark 4.0.1, 4.0.5, 4.1.1, and 4.1.4; found $SPARK_VER"
     return 0
   fi
 

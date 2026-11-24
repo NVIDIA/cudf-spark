@@ -27,5 +27,7 @@ import org.apache.spark.sql.types.StructField
 
 object ParquetFieldRequestShims {
   def checkNoFieldRequestedMoreThanOnce(
-      fields: Seq[(StructField, Type)]): Unit = {}
+      fields: Seq[(StructField, Type)]): Unit = {
+    // Duplicate field check is not enforced in these Spark versions.
+  }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -362,7 +362,9 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
 
     override def name(): String = ident.name()
 
-    override def abortStagedChanges(): Unit = {}
+    override def abortStagedChanges(): Unit = {
+      // Staged changes are only materialized in commitStagedChanges.
+    }
 
     override def capabilities(): util.Set[TableCapability] = Set(V1_BATCH_WRITE).asJava
 

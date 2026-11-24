@@ -113,7 +113,8 @@
 359,413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtils.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtils.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuKnownNullable.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/GpuKnownNullable.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
-413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
+413,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark420/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala
 413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala
 413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuOneRowRelationExec.scala	sql-plugin/src/main/spark400db173/scala/com/nvidia/spark/rapids/shims/GpuOneRowRelationExec.scala
@@ -471,7 +472,7 @@
 413	src/test/scala/com/nvidia/spark/rapids/shims/spark413/SparkShimsSuite.scala	sql-plugin/src/test/spark413/scala/com/nvidia/spark/rapids/shims/spark413/SparkShimsSuite.scala
 500	src/test/scala/com/nvidia/spark/rapids/shims/spark500/SparkShimsSuite.scala	sql-plugin/src/test/spark500/scala/com/nvidia/spark/rapids/shims/spark500/SparkShimsSuite.scala
 359,413,410db183	src/test/scala/org/apache/spark/sql/execution/datasources/v2/GpuMergeRowMetricsSuite.scala	sql-plugin/src/test/spark350/scala/org/apache/spark/sql/execution/datasources/v2/GpuMergeRowMetricsSuite.scala
-413,410db183	src/test/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteSummarySuite.scala	sql-plugin/src/test/spark410db183/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteSummarySuite.scala
+413,410db183,500	src/test/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteSummarySuite.scala	sql-plugin/src/test/spark410db183/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteSummarySuite.scala
 359,350db143,400db173,410db183	src/test/scala/org/apache/spark/sql/rapids/GpuCreateNamedStructSuite.scala	sql-plugin/src/test/spark330/scala/org/apache/spark/sql/rapids/GpuCreateNamedStructSuite.scala
 413	src/test/scala/org/apache/spark/sql/rapids/GpuCreateNamedStructSuite.scala	sql-plugin/src/test/spark404/scala/org/apache/spark/sql/rapids/GpuCreateNamedStructSuite.scala
 410db183	src/test/scala/org/apache/spark/sql/rapids/execution/python/shims/GpuGroupedPythonRunnerFactorySuite.scala	sql-plugin/src/test/spark410db183/scala/org/apache/spark/sql/rapids/execution/python/shims/GpuGroupedPythonRunnerFactorySuite.scala
