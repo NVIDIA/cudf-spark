@@ -28,6 +28,7 @@ import org.apache.spark.sql.execution.SparkPlan
  */
 object GpuV2WriteCommitShims {
   def commit(
+      writeExec: GpuV2TableWriteExec,
       batchWrite: BatchWrite,
       messages: Array[WriterCommitMessage],
       query: SparkPlan): Unit = {

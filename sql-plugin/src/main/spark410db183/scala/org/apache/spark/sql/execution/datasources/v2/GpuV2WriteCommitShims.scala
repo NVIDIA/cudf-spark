@@ -16,7 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["410db183"],"carryForward":"none"}
-{"spark":["411","420"],"carryForward":"all"}
+{"spark":["411"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
@@ -36,6 +36,14 @@ import org.apache.spark.sql.execution.metric.SQLMetric
  * Lives under org.apache.spark.sql so it can construct private[sql] MergeSummaryImpl.
  */
 object GpuV2WriteCommitShims extends AdaptiveSparkPlanHelper {
+  def commit(
+      writeExec: GpuV2TableWriteExec,
+      batchWrite: BatchWrite,
+      messages: Array[WriterCommitMessage],
+      query: SparkPlan): Unit = {
+    commit(batchWrite, messages, query)
+  }
+
   def commit(
       batchWrite: BatchWrite,
       messages: Array[WriterCommitMessage],
