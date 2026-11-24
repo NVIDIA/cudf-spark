@@ -310,6 +310,38 @@ def _capture_rest_plans(do_test, conf):
         callback.endCapture()
 
 
+def _assert_rest_gpu_plans(plans, callback, expected_gpu_class):
+    assert len(plans) > 0, "No execution plans captured for the Delta REST operation"
+    assert any(callback.contains(plan, expected_gpu_class) for plan in plans), \
+        f"Delta REST operation did not run {expected_gpu_class} on the GPU: " \
+        f"{[str(plan) for plan in plans]}"
+    # The data plane must not fall back to the CPU inside the delegated staged write.
+    for plan in plans:
+        for cpu_class in ("AppendDataExecV1", "OverwriteByExpressionExecV1"):
+            assert not callback.didFallBack(plan, cpu_class), \
+                f"{cpu_class} fell back to the CPU during the delegated Delta REST write"
+
+
+def _assert_rest_gpu(do_test, conf, expected_gpu_class):
+    """Require that the data plane ran on the GPU while the CPU catalog owned the control plane."""
+    result, plans, callback = _capture_rest_plans(do_test, conf)
+    _assert_rest_gpu_plans(plans, callback, expected_gpu_class)
+    return result
+
+
+def _assert_rest_gpu_failure(do_test, conf, expected_gpu_class, error_match=None):
+    """Prove an injected failure happened after the GPU data plane was selected."""
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with pytest.raises(Exception, match=error_match):
+            with_gpu_session(do_test, conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        _assert_rest_gpu_plans(plans, callback, expected_gpu_class)
+    finally:
+        callback.endCapture()
+
+
 def _assert_rest_fallback(do_test, conf, expected_cpu_class):
     """Require fallback before a GPU staged table or Delta transaction is constructed."""
     result, plans, callback = _capture_rest_plans(do_test, conf)
@@ -511,11 +543,13 @@ def test_delta_rest_api_client_and_routing_detection():
             enabled, managed, _routing_properties(location="/tmp/external"))
         assert not shim.shouldRouteCreate(
             enabled, path, _routing_properties())
-        assert shim.shouldRouteOrValidateReplace(
+        assert shim.shouldRouteReplace(
             enabled, managed, _routing_properties())
-        assert shim.shouldRouteOrValidateReplace(
+        assert not shim.shouldRouteReplace(
             enabled, managed, _routing_properties(external=True))
-        assert not shim.shouldRouteOrValidateReplace(
+        assert not shim.shouldRouteReplace(
+            enabled, managed, _routing_properties(location="/tmp/external"))
+        assert not shim.shouldRouteReplace(
             enabled, path, _routing_properties())
 
         # The catalog's captured session, not the active caller session, owns path routing.
@@ -546,7 +580,7 @@ def test_delta_rest_api_client_and_routing_detection():
             assert shim.isRestApiEnabled(managed_catalog)
             assert shim.shouldRouteCreate(
                 managed_catalog, path, _routing_properties())
-            assert shim.shouldRouteOrValidateReplace(
+            assert shim.shouldRouteReplace(
                 managed_catalog, path, _routing_properties())
         finally:
             jvm_session.setActiveSession(spark._jsparkSession)
@@ -556,7 +590,7 @@ def test_delta_rest_api_client_and_routing_detection():
 
 @delta_lake
 @unity_catalog
-def test_delta_rest_direct_catalog_provider_tags_ctas_and_rtas(unity_catalog_server):
+def test_delta_rest_direct_catalog_provider_delegates_routed_ctas_and_rtas(unity_catalog_server):
     conf = {**_catalog_conf(unity_catalog_server), "spark.sql.sources.default": "delta"}
 
     def check(spark):
@@ -567,15 +601,21 @@ def test_delta_rest_direct_catalog_provider_tags_ctas_and_rtas(unity_catalog_ser
         shim = spark_jvm().org.apache.spark.sql.delta.catalog.DeltaCatalogRestApiShim
         assert shim.isRestApiEnabled(delta_catalog)
 
-        # No catalog-owned feature property: the initialized REST client alone must tag both.
+        # Requests Delta routes through its REST client are delegated to it and run on the GPU.
         for replace in (False, True):
             reason = _tag_direct_delta_catalog_write(spark, delta_catalog, replace=replace)
-            assert "Unity Catalog Delta REST API operations must run on CPU" in reason, reason
-            # Delta treats only the exact lowercase "provider" key as a provider override.
+            assert "will run on GPU" in reason, reason
+            # Delta treats only the exact lowercase "provider" key as a provider override, so
+            # a differently-cased key does not make the write non-Delta.
             reason = _tag_direct_delta_catalog_write(
                 spark, delta_catalog, replace=replace, provider=None,
                 table_properties={"Provider": "parquet"})
-            assert "Unity Catalog Delta REST API operations must run on CPU" in reason, reason
+            assert "will run on GPU" in reason, reason
+            # A location bypasses Delta's REST routing, so the CPU catalog keeps the request.
+            reason = _tag_direct_delta_catalog_write(
+                spark, delta_catalog, replace=replace,
+                table_properties={"location": "/tmp/rest-external"})
+            assert "must run on CPU" in reason, reason
 
     with_cpu_session(check, conf=conf)
 
@@ -650,7 +690,7 @@ def test_delta_rest_domain_metadata_intent_reaches_catalog(unity_catalog_server)
     _, table = _new_table_name("delta_rest_domain_metadata")
     with _proxied_unity_catalog(unity_catalog_server) as (proxy, conf):
         try:
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     CREATE TABLE {table}
                     USING DELTA
@@ -658,10 +698,10 @@ def test_delta_rest_domain_metadata_intent_reaches_catalog(unity_catalog_server)
                     AS SELECT * FROM VALUES
                         (1L, 'one'), (2L, 'two') AS source(id, value)
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicCreateTableAsSelectExec")
+                expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
 
             commit_index = proxy.commit_request_count()
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     REPLACE TABLE {table}
                     USING DELTA
@@ -669,7 +709,7 @@ def test_delta_rest_domain_metadata_intent_reaches_catalog(unity_catalog_server)
                     AS SELECT * FROM VALUES
                         (3L, 'three'), (4L, 'four') AS source(id, value)
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicReplaceTableAsSelectExec")
+                expected_gpu_class="GpuAtomicReplaceTableAsSelectExec")
             _assert_clustering_intent_reaches_catalog(proxy, commit_index, table, conf)
             assert _table_rows(table, conf) == [(3, "three"), (4, "four")]
             assert proxy.errors == []
@@ -709,11 +749,11 @@ def test_delta_rest_non_delta_catalog_write_stays_on_cpu(unity_catalog_server):
                *delta_meta_allow)
 @delta_lake
 @unity_catalog
-def test_delta_rest_managed_ctas_and_rtas_fall_back(unity_catalog_server):
+def test_delta_rest_managed_ctas_and_rtas_run_on_gpu(unity_catalog_server):
     _, table = _new_table_name("delta_rest_create_replace")
     with _proxied_unity_catalog(unity_catalog_server) as (proxy, conf):
         try:
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     CREATE TABLE {table}
                     USING DELTA
@@ -723,7 +763,7 @@ def test_delta_rest_managed_ctas_and_rtas_fall_back(unity_catalog_server):
                     AS SELECT * FROM VALUES
                         (1L, 'one'), (2L, 'two') AS source(id, value)
                     """).collect(),
-                conf=conf, expected_cpu_class="AtomicCreateTableAsSelectExec")
+                conf=conf, expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
             create_paths = proxy.create_request_paths()
             assert len(create_paths) == 2, create_paths
             assert create_paths[0].endswith("/staging-tables"), create_paths
@@ -742,7 +782,7 @@ def test_delta_rest_managed_ctas_and_rtas_fall_back(unity_catalog_server):
             assert "ucTableId" not in detail["properties"]
 
             commit_index = proxy.commit_request_count()
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     REPLACE TABLE {table}
                     USING DELTA
@@ -750,7 +790,7 @@ def test_delta_rest_managed_ctas_and_rtas_fall_back(unity_catalog_server):
                     AS SELECT * FROM VALUES
                         (3L, 'three'), (4L, 'four') AS source(id, value)
                     """).collect(),
-                conf=conf, expected_cpu_class="AtomicReplaceTableAsSelectExec")
+                conf=conf, expected_gpu_class="GpuAtomicReplaceTableAsSelectExec")
             requests = proxy.commit_requests_since(commit_index)
             assert len(requests) == 1, f"Expected one Delta commit request, found {requests}"
             property_updates = [
@@ -796,13 +836,13 @@ def test_delta_rest_replace_validation_propagates_and_preserves_table(
             """).collect()
 
     try:
-        _assert_rest_fallback(
+        _assert_rest_gpu(
             lambda spark: spark.sql(f"""
                 CREATE TABLE {table} USING DELTA
                 TBLPROPERTIES ('user.validation.property' = 'preserved')
                 AS SELECT 1L AS id, 'original' AS value
                 """).collect(), conf=conf,
-            expected_cpu_class="AtomicCreateTableAsSelectExec")
+            expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
         before_state = with_cpu_session(
             lambda spark: _preserved_table_state(spark, table), conf=conf)
         before_catalog = _catalog_identity_state(
@@ -832,13 +872,13 @@ def test_delta_rest_server_commit_rejection_propagates_and_aborts(unity_catalog_
 
     with _proxied_unity_catalog(unity_catalog_server) as (proxy, conf):
         try:
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     CREATE TABLE {table} USING DELTA
                     TBLPROPERTIES ('user.rejection.property' = 'preserved')
                     AS SELECT 1L AS id, 'original' AS value
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicCreateTableAsSelectExec")
+                expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
             before_state = with_cpu_session(
                 lambda spark: _preserved_table_state(spark, table), conf=conf)
             before_catalog = _catalog_identity_state(
@@ -848,13 +888,13 @@ def test_delta_rest_server_commit_rejection_propagates_and_aborts(unity_catalog_
                 before_catalog["properties"])
 
             proxy.reject_next_commit()
-            _assert_rest_failure(
+            _assert_rest_gpu_failure(
                 lambda spark: spark.sql(f"""
                     REPLACE TABLE {table} USING DELTA
                     TBLPROPERTIES ('user.rejection.property' = 'preserved')
                     AS SELECT 2L AS id, 'rejected' AS value
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicReplaceTableAsSelectExec",
+                expected_gpu_class="GpuAtomicReplaceTableAsSelectExec",
                 error_match=_SERVER_REJECTION_MESSAGE)
             assert proxy.rejected_body is not None
             assert before_catalog["id"] in proxy.rejected_body
@@ -863,13 +903,13 @@ def test_delta_rest_server_commit_rejection_propagates_and_aborts(unity_catalog_
             assert _catalog_identity_state(
                 unity_catalog_server["tables_api"], table) == before_catalog
 
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     REPLACE TABLE {table} USING DELTA
                     TBLPROPERTIES ('user.rejection.property' = 'preserved')
                     AS SELECT 3L AS id, 'retry' AS value
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicReplaceTableAsSelectExec")
+                expected_gpu_class="GpuAtomicReplaceTableAsSelectExec")
             retry_catalog = _catalog_identity_state(
                 unity_catalog_server["tables_api"], table)
             assert retry_catalog["id"] == before_catalog["id"]
@@ -888,10 +928,17 @@ def test_delta_rest_server_commit_rejection_propagates_and_aborts(unity_catalog_
                "OverwriteByExpressionExecV1", *delta_meta_allow)
 @delta_lake
 @unity_catalog
-def test_delta_rest_metadata_changing_writes_fall_back(unity_catalog_server):
+def test_delta_rest_metadata_changing_writes(unity_catalog_server):
     _, table = _new_table_name("delta_rest_metadata_writes")
-    with _proxied_unity_catalog(unity_catalog_server) as (proxy, conf):
+    with _proxied_unity_catalog(unity_catalog_server) as (proxy, catalog_conf):
+        # Persistent-deletion-vector mutations are a separate documented CPU fallback.
+        conf = {**catalog_conf,
+                "spark.databricks.delta.delete.deletionVectors.persistent": "false",
+                "spark.databricks.delta.update.deletionVectors.persistent": "false",
+                "spark.databricks.delta.merge.deletionVectors.persistent": "false"}
         try:
+            # Partitioned Unity Catalog creates stay on the CPU, so it creates the table that the
+            # accelerated operations below modify.
             _assert_rest_fallback(
                 lambda spark: spark.sql(f"""
                     CREATE TABLE {table}
@@ -902,17 +949,24 @@ def test_delta_rest_metadata_changing_writes_fall_back(unity_catalog_server):
                         AS source(id, value, p)
                     """).collect(), conf=conf,
                 expected_cpu_class="AtomicCreateTableAsSelectExec")
-            create_high_water_mark = _row_tracking_domain_state(
-                table, conf, require_latest_action=True)
 
             def dynamic_overwrite(spark):
                 return spark.createDataFrame(
                     [(10, "ten", 0)], "id LONG, value STRING, p INT") \
                     .writeTo(table).overwritePartitions()
 
+            # Without optimized write each task writes many small files, which the GPU writer
+            # does slower than the CPU, so the overwrite stays on the CPU.
+            _assert_rest_fallback(
+                dynamic_overwrite, conf=conf,
+                expected_cpu_class="DeltaDynamicPartitionOverwriteCommand")
+            create_high_water_mark = _row_tracking_domain_state(
+                table, conf, require_latest_action=True)
+            optimized_conf = {**conf, "spark.databricks.delta.optimizeWrite.enabled": "true"}
+
             commit_index = proxy.commit_request_count()
-            _assert_rest_fallback(dynamic_overwrite, conf=conf,
-                                  expected_cpu_class="ExecutedCommandExec")
+            _assert_rest_gpu(dynamic_overwrite, conf=optimized_conf,
+                             expected_gpu_class="GpuDeltaDynamicPartitionOverwriteCommand")
             overwrite_high_water_mark = _row_tracking_domain_state(
                 table, conf, require_latest_action=True)
             assert overwrite_high_water_mark > create_high_water_mark
@@ -920,19 +974,21 @@ def test_delta_rest_metadata_changing_writes_fall_back(unity_catalog_server):
                 proxy, commit_index, table, conf, overwrite_high_water_mark)
 
             commit_index = proxy.commit_request_count()
+            # Row tracking forces the rewrite scan onto the CPU, and copying every row to the GPU
+            # is slower than rewriting on the CPU, so UPDATE stays on the CPU.
             _assert_rest_fallback(
                 lambda spark: spark.sql(
                     f"UPDATE {table} SET value = 'TEN' WHERE id = 10").collect(),
-                conf=conf, expected_cpu_class="ExecutedCommandExec")
+                conf=conf, expected_cpu_class="UpdateCommand")
             update_high_water_mark = _row_tracking_domain_state(
                 table, conf, require_latest_action=True)
             assert update_high_water_mark > overwrite_high_water_mark
             _assert_row_tracking_commit_reaches_catalog(
                 proxy, commit_index, table, conf, update_high_water_mark)
 
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"DELETE FROM {table} WHERE id = 2").collect(), conf=conf,
-                expected_cpu_class="ExecutedCommandExec")
+                expected_gpu_class="GpuDeleteCommand")
             assert _row_tracking_domain_state(table, conf) == update_high_water_mark
 
             def merge(spark):
@@ -947,7 +1003,7 @@ def test_delta_rest_metadata_changing_writes_fall_back(unity_catalog_server):
                     """).collect()
 
             commit_index = proxy.commit_request_count()
-            _assert_rest_fallback(merge, conf=conf, expected_cpu_class="ExecutedCommandExec")
+            _assert_rest_gpu(merge, conf=conf, expected_gpu_class="GpuMergeIntoCommand")
             merge_high_water_mark = _row_tracking_domain_state(
                 table, conf, require_latest_action=True)
             assert merge_high_water_mark > update_high_water_mark
@@ -963,6 +1019,73 @@ def test_delta_rest_metadata_changing_writes_fall_back(unity_catalog_server):
             _drop_table(table, conf)
 
 
+@allow_non_gpu("AppendDataExecV1", "AtomicCreateTableAsSelectExec",
+               "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1",
+               *delta_meta_allow)
+@delta_lake
+@unity_catalog
+def test_delta_rest_partitioned_writes_without_optimized_write_fall_back(
+        unity_catalog_server):
+    _, table = _new_table_name("delta_rest_partitioned_small_files")
+    conf = {**_catalog_conf(unity_catalog_server),
+            "spark.databricks.delta.optimizeWrite.enabled": "false"}
+    source = "SELECT * FROM VALUES (1L, 'one', 0), (2L, 'two', 1) AS source(id, value, p)"
+    try:
+        _assert_rest_fallback(
+            lambda spark: spark.sql(
+                f"CREATE TABLE {table} USING DELTA PARTITIONED BY (p) AS {source}").collect(),
+            conf=conf, expected_cpu_class="AtomicCreateTableAsSelectExec")
+        _assert_rest_fallback(
+            lambda spark: spark.sql(
+                f"REPLACE TABLE {table} USING DELTA PARTITIONED BY (p) AS {source}").collect(),
+            conf=conf, expected_cpu_class="AtomicReplaceTableAsSelectExec")
+        # Appends to the partitioned table have the same small-files cost.
+        _assert_rest_fallback(
+            lambda spark: spark.sql(
+                f"INSERT INTO {table} SELECT * FROM VALUES (3L, 'three', 1) "
+                "AS source(id, value, p)").collect(),
+            conf=conf, expected_cpu_class="AppendDataExecV1")
+        assert _table_rows(table, conf) == [(1, "one", 0), (2, "two", 1), (3, "three", 1)]
+    finally:
+        _drop_table(table, conf)
+
+
+@allow_non_gpu("AppendDataExecV1", "AtomicCreateTableAsSelectExec", *delta_meta_allow)
+@delta_lake
+@unity_catalog
+@pytest.mark.parametrize("enable_via", ["session", "table_property"])
+def test_delta_rest_partitioned_ctas_and_append_with_optimized_write_run_on_gpu(
+        unity_catalog_server, enable_via):
+    """Unity Catalog tables use column mapping, which optimized write must handle."""
+    _, table = _new_table_name("delta_rest_partitioned_optimized")
+    catalog_conf = _catalog_conf(unity_catalog_server)
+    if enable_via == "session":
+        conf = {**catalog_conf, "spark.databricks.delta.optimizeWrite.enabled": "true"}
+        properties = ""
+    else:
+        conf = catalog_conf
+        properties = "TBLPROPERTIES ('delta.autoOptimize.optimizeWrite' = 'true')"
+    try:
+        _assert_rest_gpu(
+            lambda spark: spark.sql(f"""
+                CREATE TABLE {table} USING DELTA PARTITIONED BY (p) {properties}
+                AS SELECT * FROM VALUES (1L, 'one', 0), (2L, 'two', 1) AS source(id, value, p)
+                """).collect(),
+            conf=conf, expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
+        _assert_rest_gpu(
+            lambda spark: spark.createDataFrame(
+                [(3, "three", 0), (4, "four", 1)], "id LONG, value STRING, p INT")
+                .writeTo(table).append(),
+            conf=conf, expected_gpu_class="GpuAppendDataExecV1")
+        assert _table_rows(table, conf) == [
+            (1, "one", 0), (2, "two", 1), (3, "three", 0), (4, "four", 1)]
+        detail = with_cpu_session(
+            lambda spark: spark.sql(f"DESCRIBE DETAIL {table}").first().asDict(), conf=conf)
+        assert "columnMapping" in detail["tableFeatures"]
+    finally:
+        _drop_table(table, conf)
+
+
 @allow_non_gpu("AppendDataExecV1", "AtomicCreateTableAsSelectExec", *delta_meta_allow)
 @delta_lake
 @unity_catalog
@@ -976,12 +1099,12 @@ def test_delta_rest_failed_ctas_does_not_publish_partial_table(
     with _proxied_unity_catalog(unity_catalog_server) as (proxy, conf):
         try:
             credential_fs.failNextCreateEndingWith(fail_suffix)
-            _assert_rest_failure(
+            _assert_rest_gpu_failure(
                 lambda spark: spark.sql(f"""
                     CREATE TABLE {table} USING DELTA
                     AS SELECT 1L AS id, 'failed' AS value
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicCreateTableAsSelectExec",
+                expected_gpu_class="GpuAtomicCreateTableAsSelectExec",
                 error_match="Injected create failure")
             create_paths = proxy.create_request_paths()
             assert len(create_paths) == 1, create_paths
@@ -993,12 +1116,12 @@ def test_delta_rest_failed_ctas_does_not_publish_partial_table(
             _assert_failed_create_did_not_publish(
                 credential_fs, unity_catalog_server["storage_root"])
 
-            _assert_rest_fallback(
+            _assert_rest_gpu(
                 lambda spark: spark.sql(f"""
                     CREATE TABLE {table} USING DELTA
                     AS SELECT 2L AS id, 'retry' AS value
                     """).collect(), conf=conf,
-                expected_cpu_class="AtomicCreateTableAsSelectExec")
+                expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
             assert _table_rows(table, conf) == [(2, "retry")]
             history = with_cpu_session(
                 lambda spark: spark.sql(f"DESCRIBE HISTORY {table}").collect(), conf=conf)
@@ -1023,13 +1146,13 @@ def test_delta_rest_failed_rtas_preserves_table(
     credential_fs = spark_jvm().com.nvidia.spark.rapids.tests.delta.CredentialTestFileSystem
 
     try:
-        _assert_rest_fallback(
+        _assert_rest_gpu(
             lambda spark: spark.sql(f"""
                 CREATE TABLE {table} USING DELTA
                 TBLPROPERTIES ('user.atomicity.property' = 'preserved')
                 AS SELECT 1L AS id, 'original' AS value
                 """).collect(), conf=conf,
-            expected_cpu_class="AtomicCreateTableAsSelectExec")
+            expected_gpu_class="GpuAtomicCreateTableAsSelectExec")
         before_state = with_cpu_session(
             lambda spark: _preserved_table_state(spark, table), conf=conf)
         before_detail = with_cpu_session(
@@ -1043,13 +1166,13 @@ def test_delta_rest_failed_rtas_preserves_table(
         if failure_stage == "delta-commit":
             # A one-shot staged-commit failure is otherwise retried by Delta.
             failure_conf["spark.databricks.delta.maxNonConflictCommitAttempts"] = "0"
-        _assert_rest_failure(
+        _assert_rest_gpu_failure(
             lambda spark: spark.sql(f"""
                 REPLACE TABLE {table} USING DELTA
                 TBLPROPERTIES ('user.atomicity.property' = 'preserved')
                 AS SELECT 2L AS id, 'failed' AS value
                 """).collect(), conf=failure_conf,
-            expected_cpu_class="AtomicReplaceTableAsSelectExec",
+            expected_gpu_class="GpuAtomicReplaceTableAsSelectExec",
             error_match="Injected create failure")
         failed_uri = credential_fs.getLastFailedCreatePath()
         assert failed_uri, "The injected filesystem failure did not record its target path"
@@ -1067,13 +1190,13 @@ def test_delta_rest_failed_rtas_preserves_table(
         assert _catalog_identity_state(
             unity_catalog_server["tables_api"], table) == before_catalog
 
-        _assert_rest_fallback(
+        _assert_rest_gpu(
             lambda spark: spark.sql(f"""
                 REPLACE TABLE {table} USING DELTA
                 TBLPROPERTIES ('user.atomicity.property' = 'preserved')
                 AS SELECT 3L AS id, 'replacement' AS value
                 """).collect(), conf=conf,
-            expected_cpu_class="AtomicReplaceTableAsSelectExec")
+            expected_gpu_class="GpuAtomicReplaceTableAsSelectExec")
         assert _table_rows(table, conf) == [(3, "replacement")]
         assert _latest_version(table, conf) == before_state["identity"]["version"] + 1
     finally:

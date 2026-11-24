@@ -18,7 +18,9 @@ package org.apache.spark.sql.delta.catalog
 
 import java.util
 
+import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.delta.Snapshot
 
 /** Delta 4.3 accessors for catalog state that is intentionally package-private upstream. */
 object DeltaCatalogRestApiShim {
@@ -42,16 +44,42 @@ object DeltaCatalogRestApiShim {
   }
 
   /**
-   * Keeps REPLACE and RTAS on CPU when Delta will either route through REST or reject properties
-   * that are invalid on its REST path before creating a staged table.
+   * Mirrors Delta's routing gate for REPLACE, RTAS and CREATE OR REPLACE. Delta rejects a
+   * location or external property on its REST path before staging, so those requests are not
+   * routed and stay with the CPU catalog, which reports Delta's own error.
    */
-  def shouldRouteOrValidateReplace(
+  def shouldRouteReplace(
       catalog: DeltaCatalog,
       ident: Identifier,
       properties: util.Map[String, String]): Boolean = {
     isRestApiEnabled(catalog) &&
-      (properties.containsKey(TableCatalog.PROP_LOCATION) ||
-        properties.containsKey(TableCatalog.PROP_EXTERNAL) ||
-        !DeltaCatalogPathIdentifierAccess.isPathIdentifier(catalog, ident))
+      !properties.containsKey(TableCatalog.PROP_LOCATION) &&
+      !properties.containsKey(TableCatalog.PROP_EXTERNAL) &&
+      !DeltaCatalogPathIdentifierAccess.isPathIdentifier(catalog, ident)
+  }
+
+  /** Prefix Delta puts on `delta.*` properties that a catalog-managed REPLACE carries forward. */
+  def carryForwardPrefix: String = AbstractDeltaCatalogClient.CARRY_FORWARD_PREFIX
+
+  /**
+   * Mirrors Delta's create callback: publishes a committed catalog-managed table through the
+   * Delta REST client together with the committed snapshot. Returns false, without side effects,
+   * when Delta would not route the table through the client.
+   */
+  def createManagedTable(
+      catalog: DeltaCatalog,
+      ident: Identifier,
+      table: CatalogTable,
+      snapshot: Snapshot): Boolean = catalog.deltaCatalogClient match {
+    case Some(client) if table.tableType == CatalogTableType.MANAGED =>
+      client.createTable(
+        ident,
+        table,
+        snapshot.metadata,
+        snapshot.domainMetadata,
+        snapshot.protocol,
+        snapshot.timestamp)
+      true
+    case _ => false
   }
 }

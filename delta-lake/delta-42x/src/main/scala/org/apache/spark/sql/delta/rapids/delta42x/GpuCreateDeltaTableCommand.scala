@@ -47,7 +47,8 @@ case class GpuCreateDeltaTableCommand(
     override val output: Seq[Attribute] = Nil,
     protocol: Option[Protocol] = None,
     allowCatalogManaged: Boolean = false,
-    createTableFunc: Option[CatalogTable => Unit] = None)(@transient rapidsConf: RapidsConf)
+    createTableFunc: Option[(CatalogTable, Snapshot) => Unit] = None)(
+    @transient rapidsConf: RapidsConf)
   extends GpuCreateDeltaTableCommand40x42xBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,
     createTableFunc, rapidsConf) {
@@ -118,10 +119,12 @@ case class GpuCreateDeltaTableCommand(
   override protected def createCatalogTableForCreateOrReplace(
       sparkSession: SparkSession,
       table: CatalogTable,
-      createTableFunc: Option[CatalogTable => Unit]): Unit = {
+      snapshot: Snapshot,
+      createTableFunc: Option[(CatalogTable, Snapshot) => Unit]): Unit = {
     createTableFunc match {
-      case Some(createFunc) => createFunc(table)
-      case None => super.createCatalogTableForCreateOrReplace(sparkSession, table, createTableFunc)
+      case Some(createFunc) => createFunc(table, snapshot)
+      case None => super.createCatalogTableForCreateOrReplace(
+        sparkSession, table, snapshot, createTableFunc)
     }
   }
 

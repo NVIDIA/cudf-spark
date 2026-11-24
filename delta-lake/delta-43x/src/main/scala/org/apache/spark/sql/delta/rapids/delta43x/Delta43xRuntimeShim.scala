@@ -176,8 +176,14 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
 
   override protected def constructOptimisticTransaction(
       arg: StartTransactionArg): GpuOptimisticTransactionBase =
+    // Like Delta's own transaction, resolve the snapshot with the catalog table so that a
+    // catalog-managed table gets its commit coordinator from the catalog instead of its path.
     new GpuOptimisticTransaction43x(
-      arg.log, arg.catalogTable, arg.snapshot, arg.conf, GpuAutoCompact43x)
+      arg.log,
+      arg.catalogTable,
+      Some(arg.snapshot.getOrElse(arg.log.update(catalogTableOpt = arg.catalogTable))),
+      arg.conf,
+      GpuAutoCompact43x)
 
   override def createCpuWrite(
       deltaLog: DeltaLog,

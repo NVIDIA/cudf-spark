@@ -22,16 +22,20 @@
 package org.apache.spark.sql.delta.rapids.delta43x
 
 import com.nvidia.spark.rapids.RapidsConf
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.{SaveMode, SparkSession}
-import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.util.CharVarcharUtils
 import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaErrors, Snapshot, UniversalFormat}
 import org.apache.spark.sql.delta.actions.{Metadata, Protocol, TableFeatureProtocolUtils}
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.coordinatedcommits.CatalogOwnedTableUtils
+import org.apache.spark.sql.delta.hooks.{UpdateCatalog, UpdateCatalogFactory}
 import org.apache.spark.sql.delta.rapids.{GpuCreateDeltaTableCommand40x42xBase, GpuDeltaLog, GpuOptimisticTransactionBase}
+import org.apache.spark.sql.delta.util.{Utils => DeltaUtils}
 
 case class GpuCreateDeltaTableCommand(
     table: CatalogTable,
@@ -43,7 +47,8 @@ case class GpuCreateDeltaTableCommand(
     override val output: Seq[Attribute] = Nil,
     protocol: Option[Protocol] = None,
     allowCatalogManaged: Boolean = false,
-    createTableFunc: Option[CatalogTable => Unit] = None)(@transient rapidsConf: RapidsConf)
+    createTableFunc: Option[(CatalogTable, Snapshot) => Unit] = None)(
+    @transient rapidsConf: RapidsConf)
   extends GpuCreateDeltaTableCommand40x42xBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,
     createTableFunc, rapidsConf) {
@@ -101,13 +106,55 @@ case class GpuCreateDeltaTableCommand(
 
   override protected def catalogTableForTransaction: Option[CatalogTable] = existingTableOpt
 
+  override protected def getGpuDeltaLogForTable(
+      sparkSession: SparkSession,
+      existingTableOpt: Option[CatalogTable],
+      tableLocation: Path,
+      fileSystemOptions: Map[String, String]): GpuDeltaLog = {
+    new GpuDeltaLog(
+      DeltaUtils.getDeltaLogFromTableOrPath(
+        sparkSession, existingTableOpt, tableLocation, fileSystemOptions),
+      rapidsConf)
+  }
+
   override protected def createCatalogTableForCreateOrReplace(
       sparkSession: SparkSession,
       table: CatalogTable,
-      createTableFunc: Option[CatalogTable => Unit]): Unit = {
+      snapshot: Snapshot,
+      createTableFunc: Option[(CatalogTable, Snapshot) => Unit]): Unit = {
     createTableFunc match {
-      case Some(createFunc) => createFunc(table)
-      case None => super.createCatalogTableForCreateOrReplace(sparkSession, table, createTableFunc)
+      case Some(createFunc) => createFunc(table, snapshot)
+      case None => super.createCatalogTableForCreateOrReplace(
+        sparkSession, table, snapshot, createTableFunc)
+    }
+  }
+
+  // Catalog-managed tables are owned by the delegated V2 catalog plugin (for example Unity
+  // Catalog), so the session catalog's post-commit UpdateCatalogHook must not run.
+  override protected def updateExistingCatalogTable(
+      sparkSession: SparkSession,
+      table: CatalogTable,
+      snapshot: Snapshot): Unit = {
+    if (!allowCatalogManaged) {
+      UpdateCatalogFactory.getUpdateCatalogHook(table, sparkSession)
+        .updateSchema(sparkSession, snapshot)
+    }
+  }
+
+  override protected def cleanupTableDefinitionWhenCatalogUpdateDisabled(
+      table: CatalogTable,
+      snapshot: Snapshot,
+      storage: CatalogStorageFormat): CatalogTable = {
+    if (allowCatalogManaged) {
+      // Setting table properties is required for creating catalogManaged tables.
+      table.copy(
+        schema = CharVarcharUtils.getRawSchema(snapshot.schema),
+        partitionColumnNames = snapshot.metadata.partitionColumns,
+        properties = UpdateCatalog.updatedProperties(snapshot),
+        storage = storage,
+        tracksPartitionsInCatalog = true)
+    } else {
+      super.cleanupTableDefinitionWhenCatalogUpdateDisabled(table, snapshot, storage)
     }
   }
 }

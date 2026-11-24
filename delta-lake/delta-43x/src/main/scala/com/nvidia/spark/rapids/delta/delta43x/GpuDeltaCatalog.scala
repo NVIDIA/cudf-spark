@@ -21,24 +21,36 @@
 
 package com.nvidia.spark.rapids.delta.delta43x
 
+import java.util
+
 import com.nvidia.spark.rapids.RapidsConf
+import io.delta.storage.commit.uccommitcoordinator.UCCommitCoordinatorClient
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.{DataFrame, SaveMode}
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.connector.catalog.{DelegatingCatalogExtension, Identifier}
-import org.apache.spark.sql.delta.catalog.DeltaCatalog
+import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
+import org.apache.spark.sql.connector.catalog.{DelegatingCatalogExtension, Identifier,
+  StagedTable, StagingTableCatalog}
+import org.apache.spark.sql.connector.expressions.Transform
+import org.apache.spark.sql.delta.{DeltaLog, Snapshot}
+import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaCatalogRestApiShim}
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.rapids.{
   GpuCreateDeltaTableCommand40x42xBase,
   GpuDeltaCatalog4x,
+  GpuUnityCatalogWrapper,
   GpuWriteIntoDeltaLike}
 import org.apache.spark.sql.delta.rapids.delta43x.GpuCreateDeltaTableCommand
+import org.apache.spark.sql.delta.util.{Utils => DeltaUtils}
+import org.apache.spark.sql.types.StructType
 
 class GpuDeltaCatalog(
     cpuCatalog: DeltaCatalog,
     rapidsConf: RapidsConf)
   extends GpuDeltaCatalog4x(cpuCatalog, rapidsConf) {
+
+  override def name(): String = cpuCatalog.name()
 
   override protected lazy val isUnityCatalog: Boolean = {
     val delegateField = classOf[DelegatingCatalogExtension].getDeclaredField("delegate")
@@ -66,6 +78,76 @@ class GpuDeltaCatalog(
     isUnityCatalog
   }
 
+  override protected def getDeltaLogForWrite(
+      existingTableOpt: Option[CatalogTable],
+      tablePath: Path,
+      fileSystemOptions: Map[String, String]): DeltaLog = {
+    DeltaUtils.getDeltaLogFromTableOrPath(
+      spark, existingTableOpt, tablePath, fileSystemOptions)
+  }
+
+  override protected def normalizeStagedTableProperties(
+      properties: util.Map[String, String]): Unit = {
+    if (isUnityCatalog) {
+      Option(properties.remove(UCCommitCoordinatorClient.UC_TABLE_ID_KEY_OLD)).foreach {
+        oldTableId =>
+          properties.putIfAbsent(UCCommitCoordinatorClient.UC_TABLE_ID_KEY, oldTableId)
+      }
+    }
+  }
+
+  override protected def splitCarriedForwardProperties(
+      properties: Map[String, String]): (Map[String, String], Map[String, String]) = {
+    val prefix = DeltaCatalogRestApiShim.carryForwardPrefix
+    val (carried, remaining) = properties.partition { case (key, _) => key.startsWith(prefix) }
+    (remaining, carried.map { case (key, value) => key.stripPrefix(prefix) -> value })
+  }
+
+  /**
+   * Publishes the committed table through the CPU catalog's Delta REST client, exactly as Delta's
+   * own create callback does. Tagging only admits requests Delta routes through that client, so
+   * any other table reaching this point would have bypassed the catalog's control plane.
+   */
+  override protected def createTableInCatalog(
+      ident: Identifier,
+      table: CatalogTable,
+      snapshot: Snapshot): Unit = {
+    if (!DeltaCatalogRestApiShim.createManagedTable(cpuCatalog, ident, table, snapshot)) {
+      throw new IllegalStateException(
+        s"$ident is not a catalog-managed table of a Delta REST catalog; " +
+          "it must not be created by the GPU Delta catalog")
+    }
+  }
+
+  /**
+   * Delegates staging to the initialized CPU catalog so that its Delta REST client reserves or
+   * loads the catalog entry and returns the effective properties (table ID, location, storage
+   * credentials, replace carry-forward). The GPU staged table writes the data and commits with
+   * those properties; aborting it aborts the CPU staged table.
+   */
+  override protected def createGpuStagedDeltaTableV2(
+      ident: Identifier,
+      schema: StructType,
+      partitions: Array[Transform],
+      properties: util.Map[String, String],
+      operation: TableCreationModes.CreationMode): StagedTable = {
+    if (!DeltaCatalogRestApiShim.isRestApiEnabled(cpuCatalog)) {
+      super.createGpuStagedDeltaTableV2(ident, schema, partitions, properties, operation)
+    } else {
+      val cpuStaged = operation match {
+        case TableCreationModes.Create =>
+          cpuCatalog.stageCreate(ident, schema, partitions, properties)
+        case TableCreationModes.Replace =>
+          cpuCatalog.stageReplace(ident, schema, partitions, properties)
+        case TableCreationModes.CreateOrReplace =>
+          cpuCatalog.stageCreateOrReplace(ident, schema, partitions, properties)
+      }
+      new GpuStagedDeltaTableV2(ident, schema, partitions, cpuStaged.properties(), operation) {
+        override def abortStagedChanges(): Unit = cpuStaged.abortStagedChanges()
+      }
+    }
+  }
+
   override protected def buildGpuCreateDeltaTableCommand(
       withDb: CatalogTable,
       existingTableOpt: Option[CatalogTable],
@@ -73,7 +155,8 @@ class GpuDeltaCatalog(
       writer: Option[GpuWriteIntoDeltaLike],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): GpuCreateDeltaTableCommand40x42xBase = {
+      tableCreateFunc: Option[(CatalogTable, Snapshot) => Unit])
+      : GpuCreateDeltaTableCommand40x42xBase = {
     GpuCreateDeltaTableCommand(
       withDb,
       existingTableOpt,
@@ -81,6 +164,22 @@ class GpuDeltaCatalog(
       writer,
       operation,
       tableByPath = isByPath,
+      allowCatalogManaged = isUnityCatalog && withDb.tableType == CatalogTableType.MANAGED,
       createTableFunc = tableCreateFunc)(rapidsConf)
   }
+}
+
+object GpuDeltaCatalog {
+
+  def isUnityCatalog(catalog: StagingTableCatalog): Boolean =
+    GpuUnityCatalogWrapper.isUnityCatalog(catalog)
+
+  def unsupportedUnityCatalogReason(catalog: StagingTableCatalog): Option[String] =
+    GpuUnityCatalogWrapper.unsupportedReason(catalog, classOf[GpuDeltaCatalog])
+
+  def wrapUnityCatalog(
+      catalog: StagingTableCatalog,
+      rapidsConf: RapidsConf): StagingTableCatalog =
+    GpuUnityCatalogWrapper.wrap(
+      catalog, classOf[GpuDeltaCatalog], new GpuDeltaCatalog(_, rapidsConf))
 }

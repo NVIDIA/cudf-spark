@@ -653,10 +653,10 @@ If Spark has been configured to support Delta Lake then these tests can be enabl
 ### Enabling Unity Catalog catalog-managed table tests
 
 `delta_lake_catalog_managed_test.py` covers Delta Lake 4.2 catalog-managed (catalog-owned) tables
-through an OSS Unity Catalog server. `delta_lake_catalog_rest_test.py` covers the Delta 4.3 REST
-API safety boundary. They need a running catalog server, so they are disabled by default and are
-skipped unless both `--delta_lake` and `--unity_catalog` are passed and `DELTA_UC_URI` names a
-reachable server.
+through an OSS Unity Catalog server. `delta_lake_catalog_rest_test.py` covers GPU managed writes
+that delegate to the Delta 4.3 CPU catalog's REST control plane. They need a running catalog
+server, so they are disabled by default and are skipped unless both `--delta_lake` and
+`--unity_catalog` are passed and `DELTA_UC_URI` names a reachable server.
 
 The suites only apply to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0 or 4.3.0,
 Unity Catalog 0.6.0, and Spark 4.0.1 or 4.1.1. The 4.2 implementation validates the expected 0.6.0

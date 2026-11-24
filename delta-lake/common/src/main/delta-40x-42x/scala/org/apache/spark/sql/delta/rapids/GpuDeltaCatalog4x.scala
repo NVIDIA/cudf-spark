@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.delta.GpuDeltaCatalogBase
 
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.delta.Snapshot
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
 
@@ -43,7 +44,8 @@ abstract class GpuDeltaCatalog4x(
       writer: Option[GpuWriteIntoDeltaLike],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): GpuCreateDeltaTableCommand40x42xBase
+      tableCreateFunc: Option[(CatalogTable, Snapshot) => Unit])
+      : GpuCreateDeltaTableCommand40x42xBase
 
   override protected def createGpuCreateDeltaTableCommand(
       withDb: CatalogTable,
@@ -52,7 +54,7 @@ abstract class GpuDeltaCatalog4x(
       writer: Option[GpuWriteIntoDeltaLike],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): Unit = {
+      tableCreateFunc: Option[(CatalogTable, Snapshot) => Unit]): Unit = {
     buildGpuCreateDeltaTableCommand(
       withDb,
       existingTableOpt,

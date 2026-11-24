@@ -27,6 +27,7 @@ import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.delta.Snapshot
 import org.apache.spark.sql.delta.actions.Protocol
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
@@ -43,7 +44,7 @@ abstract class GpuCreateDeltaTableCommand40x42xBase(
     tableByPath: Boolean = false,
     override val output: Seq[Attribute] = Nil,
     protocol: Option[Protocol] = None,
-    createTableFunc: Option[CatalogTable => Unit] = None,
+    createTableFunc: Option[(CatalogTable, Snapshot) => Unit] = None,
     rapidsConf: RapidsConf)
   extends GpuCreateDeltaTableCommandBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,

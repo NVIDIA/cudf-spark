@@ -40,9 +40,6 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       meta.willNotWorkOnGpu(
         "Delta 4.3 null-intolerant dynamic partition overwrite is not supported on GPU")
     }
-    if (deltaLog.exists(_.unsafeVolatileSnapshot.isCatalogOwned)) {
-      meta.willNotWorkOnGpu("Delta 4.3 catalog-managed table writes are not supported on GPU")
-    }
     deltaLog.map(_.unsafeVolatileSnapshot).foreach { snapshot =>
       if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMetaData(snapshot.metadata)) {
         meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")

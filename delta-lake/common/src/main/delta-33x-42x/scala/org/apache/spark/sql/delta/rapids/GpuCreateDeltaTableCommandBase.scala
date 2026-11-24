@@ -62,8 +62,9 @@ import org.apache.spark.sql.types.StructType
  *                - CTAS
  *                - saveAsTable
  * @param protocol This is used to create a table with specific protocol version
- * @param createTableFunc If specified, call this function to create the table, instead of
- *                        Spark `SessionCatalog#createTable` which is backed by Hive Metastore.
+ * @param createTableFunc If specified, call this function with the cleaned catalog table and the
+ *                        committed snapshot to create the table, instead of Spark
+ *                        `SessionCatalog#createTable` which is backed by Hive Metastore.
  */
 abstract class GpuCreateDeltaTableCommandBase(
     table: CatalogTable,
@@ -74,7 +75,7 @@ abstract class GpuCreateDeltaTableCommandBase(
     tableByPath: Boolean,
     override val output: Seq[Attribute],
     protocol: Option[Protocol],
-    createTableFunc: Option[CatalogTable => Unit],
+    createTableFunc: Option[(CatalogTable, Snapshot) => Unit],
     rapidsConf: RapidsConf)
   extends LeafRunnableCommand
     with GpuDeltaCommandLike
@@ -189,7 +190,8 @@ abstract class GpuCreateDeltaTableCommandBase(
   protected def createCatalogTableForCreateOrReplace(
       spark: SparkSession,
       table: CatalogTable,
-      createTableFunc: Option[CatalogTable => Unit]): Unit = {
+      snapshot: Snapshot,
+      createTableFunc: Option[(CatalogTable, Snapshot) => Unit]): Unit = {
     spark.sessionState.catalog.createTable(
       table,
       ignoreIfExists = false,
@@ -815,7 +817,7 @@ abstract class GpuCreateDeltaTableCommandBase(
       case _ if tableByPath => // do nothing with the metastore if this is by path
       case TableCreationModes.Create =>
         if (createTableFunc.isDefined) {
-          createTableFunc.get.apply(cleaned)
+          createTableFunc.get.apply(cleaned, snapshot)
         } else {
           spark.sessionState.catalog.createTable(
             cleaned,
@@ -829,7 +831,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         val ident = Identifier.of(table.identifier.database.toArray, table.identifier.table)
         throw DeltaErrors.cannotReplaceMissingTableException(ident)
       case TableCreationModes.CreateOrReplace =>
-        createCatalogTableForCreateOrReplace(spark, cleaned, createTableFunc)
+        createCatalogTableForCreateOrReplace(spark, cleaned, snapshot, createTableFunc)
     }
   }
 

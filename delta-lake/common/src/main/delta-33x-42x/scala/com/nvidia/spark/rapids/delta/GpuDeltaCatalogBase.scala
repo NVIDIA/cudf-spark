@@ -34,7 +34,7 @@ import org.apache.spark.sql.connector.catalog.{Identifier, StagedTable, StagingT
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, SupportsTruncate, V1Write, WriteBuilder}
-import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, DeltaErrors, DeltaLog, DeltaOptions, DeltaTableUtils}
+import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, DeltaErrors, DeltaLog, DeltaOptions, DeltaTableUtils, Snapshot}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.metering.DeltaLogging
@@ -68,7 +68,7 @@ abstract class GpuDeltaCatalogBase(
       writer: Option[GpuWriteIntoDeltaLike],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): Unit
+      tableCreateFunc: Option[(CatalogTable, Snapshot) => Unit]): Unit
 
   /**
    * Converts a V2 catalog identifier to a V1 table identifier.
@@ -123,12 +123,32 @@ abstract class GpuDeltaCatalogBase(
     DeltaLog.forTable(spark, tablePath)
   }
 
-  /** Creates the final catalog entry after a staged Delta commit. */
+  /**
+   * Creates the final catalog entry after a staged Delta commit. Delta versions whose catalog
+   * needs the committed snapshot (for example to report it to a REST catalog) override the
+   * overload that accepts it.
+   */
+  protected def createTableInCatalog(
+      ident: Identifier,
+      table: CatalogTable,
+      snapshot: Snapshot): Unit = createTableInCatalog(ident, table)
+
   protected def createTableInCatalog(ident: Identifier, table: CatalogTable): Unit = {
     val v1Table = DeltaTrampoline.getV1Table(table)
     cpuCatalog.createTable(
       ident, v1Table.columns(), v1Table.partitioning, v1Table.properties)
   }
+
+  /**
+   * Splits table properties into those that become the table's properties and those that a
+   * replace carries forward from the existing table. Carried-forward properties skip validation
+   * but are committed with the new metadata.
+   *
+   * @return the properties to validate and the carried-forward properties, prefix removed
+   */
+  protected def splitCarriedForwardProperties(
+      properties: Map[String, String]): (Map[String, String], Map[String, String]) =
+    (properties, Map.empty)
 
   /** copied from trait SupportsPathIdentifier */
   private def supportSQLOnFile: Boolean = spark.sessionState.conf.runSQLonFile
@@ -221,7 +241,7 @@ abstract class GpuDeltaCatalogBase(
     "DeltaCatalog", "createDeltaTable") {
     // These two keys are tableProperties in data source v2 but not in v1, so we have to filter
     // them out. Otherwise property consistency checks will fail.
-    val tableProperties = allTableProperties.asScala.filterKeys {
+    val filteredProperties = allTableProperties.asScala.filterKeys {
       case TableCatalog.PROP_LOCATION => false
       case TableCatalog.PROP_PROVIDER => false
       case TableCatalog.PROP_COMMENT => false
@@ -231,6 +251,7 @@ abstract class GpuDeltaCatalogBase(
       case "option.path" => false
       case _ => true
     }.toMap
+    val (tableProperties, carriedForwardProps) = splitCarriedForwardProperties(filteredProperties)
     val (partitionColumns, maybeBucketSpec, maybeClusterBySpec) =
       DeltaTrampoline.convertTransforms(partitions)
     cpuCatalog.validateClusterBySpec(maybeClusterBySpec, schema)
@@ -298,12 +319,14 @@ abstract class GpuDeltaCatalogBase(
       comment = commentOpt
     )
 
-    val withDb =
-      cpuCatalog.verifyTableAndSolidify(
-        tableDesc,
-        None,
-        maybeClusterBySpec
-      )
+    val withDb = {
+      val solidified = cpuCatalog.verifyTableAndSolidify(tableDesc, None, maybeClusterBySpec)
+      if (carriedForwardProps.isEmpty) {
+        solidified
+      } else {
+        solidified.copy(properties = solidified.properties ++ carriedForwardProps)
+      }
+    }
 
     val writer = sourceQuery.map { df =>
       val fileSystemOptions = writeOptions.filter { case (k, _) =>
@@ -331,8 +354,8 @@ abstract class GpuDeltaCatalogBase(
     //       Before this bug is fixed, we should only call the catalog plugin API to create tables
     //       if UC is enabled to replace `V2SessionCatalog`.
     val tableCreateFunc = if (useCatalogCreateTable(sourceQuery)) {
-      Some[CatalogTable => Unit](v1Table => {
-        createTableInCatalog(ident, v1Table)
+      Some[(CatalogTable, Snapshot) => Unit]((v1Table, snapshot) => {
+        createTableInCatalog(ident, v1Table, snapshot)
       })
     } else {
       None
@@ -393,7 +416,7 @@ abstract class GpuDeltaCatalogBase(
       properties: util.Map[String, String]): StagedTable =
     recordFrameProfile("DeltaCatalog", "stageReplace") {
       if (DeltaSourceUtils.isDeltaDataSourceName(getProvider(properties))) {
-        new GpuStagedDeltaTableV2(
+        createGpuStagedDeltaTableV2(
           ident,
           schema,
           partitions,
@@ -411,7 +434,7 @@ abstract class GpuDeltaCatalogBase(
       properties: util.Map[String, String]): StagedTable =
     recordFrameProfile("DeltaCatalog", "stageCreateOrReplace") {
       if (DeltaSourceUtils.isDeltaDataSourceName(getProvider(properties))) {
-        new GpuStagedDeltaTableV2(
+        createGpuStagedDeltaTableV2(
           ident,
           schema,
           partitions,

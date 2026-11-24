@@ -2389,6 +2389,37 @@ def test_delta_write_optimized_sql_conf_aqe(spark_tmp_path, enable_conf_key, aqe
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(), reason="Delta Lake optimized writes are not supported before Spark 3.5.3 on Apache Spark")
+@pytest.mark.parametrize("column_mapping_mode", ["none", "name"], ids=idfn)
+def test_delta_write_optimized_partitioned_column_mapping(spark_tmp_path, column_mapping_mode):
+    """Optimized write must find the partition columns when column mapping renames them."""
+    num_partitions = 4
+    confs = copy_and_update(delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": "true",
+        "spark.databricks.delta.optimizeWrite.enabled": "true",
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": column_mapping_mode,
+    })
+    data_path = os.path.join(spark_tmp_path, "DELTA_DATA")
+
+    def do_write(spark, path):
+        df = spark.range(100).selectExpr(
+            "id", "CAST(id % {} AS INT) AS p".format(num_partitions), "CAST(id AS STRING) AS v") \
+            .repartition(8)
+        df.write.format("delta").partitionBy("p").save(path)
+        df.write.format("delta").mode("append").save(path)
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        do_write,
+        lambda spark, path: spark.read.format("delta").load(path),
+        data_path,
+        conf=confs)
+    # Each write consolidates its output into one file per partition.
+    opmetrics = get_last_operation_metrics(os.path.join(data_path, "GPU"))
+    assert int(opmetrics["numFiles"]) == num_partitions
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
 @pytest.mark.parametrize("confkey", ["optimizeWrite"], ids=idfn)
 @pytest.mark.parametrize("aqe_enabled", [True, False], ids=idfn)
 @pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(), reason="Delta Lake optimized writes are not supported before Spark 3.5.3 on Apache Spark")

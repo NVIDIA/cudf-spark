@@ -28,6 +28,7 @@ import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.connector.catalog.Identifier
+import org.apache.spark.sql.delta.Snapshot
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.rapids.GpuWriteIntoDeltaLike
@@ -52,7 +53,7 @@ class GpuDeltaCatalog(
       writer: Option[GpuWriteIntoDeltaLike],
       operation: TableCreationModes.CreationMode,
       isByPath: Boolean,
-      tableCreateFunc: Option[CatalogTable => Unit]): Unit = {
+      tableCreateFunc: Option[(CatalogTable, Snapshot) => Unit]): Unit = {
     GpuCreateDeltaTableCommand(
       withDb,
       existingTableOpt,

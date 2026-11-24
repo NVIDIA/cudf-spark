@@ -41,7 +41,8 @@ case class GpuCreateDeltaTableCommand(
     tableByPath: Boolean = false,
     override val output: Seq[Attribute] = Nil,
     protocol: Option[Protocol] = None,
-    createTableFunc: Option[CatalogTable => Unit] = None)(@transient rapidsConf: RapidsConf)
+    createTableFunc: Option[(CatalogTable, Snapshot) => Unit] = None)(
+    @transient rapidsConf: RapidsConf)
   extends GpuCreateDeltaTableCommand40x42xBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,
     createTableFunc, rapidsConf) {
