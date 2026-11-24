@@ -1129,7 +1129,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     allMetas.foreach(_.tagForGpu())
     val canReplace = allMetas.forall(_.canExprTreeBeReplaced) &&
         context.rapidsConf.isOperatorEnabled(
-          "spark.rapids.sql.exec.RapidsProcessDeltaMergeJoinExec", false, false)
+          "spark.cudf.sql.exec.RapidsProcessDeltaMergeJoinExec", false, false)
     if (context.rapidsConf.shouldExplainAll || (context.rapidsConf.shouldExplain && !canReplace)) {
       val exprExplains = allMetas.map(_.explain(context.rapidsConf.shouldExplainAll))
       val execWorkInfo = if (canReplace) {

@@ -15,7 +15,10 @@
  */
 package com.nvidia.spark.rapids
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.HashMap
+
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
@@ -84,7 +87,7 @@ object ConfHelper {
   def makeConfAnchor(key: String, text: String = null): String = {
     val t = if (text != null) text else key
     // The anchor cannot be too long, so for now
-    val a = key.replaceFirst("spark.rapids.", "")
+    val a = CudfConfKeys.canonicalKey(key).stripPrefix(CudfConfKeys.CANONICAL_PREFIX)
     "<a name=\"" + s"$a" + "\"></a>" + t
   }
 
@@ -108,9 +111,21 @@ object ConfHelper {
   }
 }
 
-abstract class ConfEntry[T](val key: String, val converter: String => T, val doc: String,
+abstract class ConfEntry[T](rawKey: String, val converter: String => T, val doc: String,
     val isInternal: Boolean, val isStartUpOnly: Boolean, val isCommonlyUsed: Boolean,
     val versionInfo: ConfVersionInfo) {
+
+  val key: String = CudfConfKeys.canonicalKey(rawKey)
+  val legacyKey: String = CudfConfKeys.legacyKey(key)
+
+  protected final def getRaw(conf: Map[String, String]): Option[String] = {
+    Option(CudfConfKeys.get(conf.asJava, key))
+  }
+
+  protected final def getRaw(conf: SQLConf): Option[String] = {
+    Option(conf.getConfString(key, null))
+      .orElse(Option(conf.getConfString(legacyKey, null)))
+  }
 
   def get(conf: Map[String, String]): T
   def get(conf: SQLConf): T
@@ -127,23 +142,18 @@ abstract class ConfEntry[T](val key: String, val converter: String => T, val doc
   override def toString: String = key
 }
 
-class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
+class ConfEntryWithDefault[T](rawKey: String, converter: String => T, doc: String,
     isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false,
     val defaultValue: T, versionInfo: ConfVersionInfo = ConfVersionInfo.UNKNOWN)
-  extends ConfEntry[T](key, converter, doc, isInternal, isStartupOnly, isCommonlyUsed,
+  extends ConfEntry[T](rawKey, converter, doc, isInternal, isStartupOnly, isCommonlyUsed,
     versionInfo) {
 
   override def get(conf: Map[String, String]): T = {
-    conf.get(key).map(converter).getOrElse(defaultValue)
+    getRaw(conf).map(converter).getOrElse(defaultValue)
   }
 
   override def get(conf: SQLConf): T = {
-    val tmp = conf.getConfString(key, null)
-    if (tmp == null) {
-      defaultValue
-    } else {
-      converter(tmp)
-    }
+    getRaw(conf).map(converter).getOrElse(defaultValue)
   }
 
   override def help(asTable: Boolean = false): Unit = {
@@ -164,23 +174,18 @@ class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
   }
 }
 
-class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: String,
+class OptionalConfEntry[T](rawKey: String, val rawConverter: String => T, doc: String,
     isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false,
     versionInfo: ConfVersionInfo = ConfVersionInfo.UNKNOWN)
-  extends ConfEntry[Option[T]](key, s => Some(rawConverter(s)), doc, isInternal,
+  extends ConfEntry[Option[T]](rawKey, s => Some(rawConverter(s)), doc, isInternal,
   isStartupOnly, isCommonlyUsed, versionInfo) {
 
   override def get(conf: Map[String, String]): Option[T] = {
-    conf.get(key).map(rawConverter)
+    getRaw(conf).map(rawConverter)
   }
 
   override def get(conf: SQLConf): Option[T] = {
-    val tmp = conf.getConfString(key, null)
-    if (tmp == null) {
-      None
-    } else {
-      Some(rawConverter(tmp))
-    }
+    getRaw(conf).map(rawConverter)
   }
 
   override def help(asTable: Boolean = false): Unit = {
@@ -262,9 +267,11 @@ class TypedConfBuilder[T](
   }
 }
 
-class ConfBuilder(val key: String, val register: ConfEntry[_] => Unit) {
+class ConfBuilder(rawKey: String, val register: ConfEntry[_] => Unit) {
 
   import ConfHelper._
+
+  val key: String = CudfConfKeys.canonicalKey(rawKey)
 
   var doc: String = null
   var isInternal: Boolean = false

@@ -275,7 +275,7 @@ object GpuIcebergParquetReader {
         throw new UnsupportedOperationException(
           s"GPU Iceberg reader does not support shredded or incompatible Variant input " +
             s"(column: ${physical.getName}). Expected exactly two REQUIRED BINARY fields " +
-            "named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false " +
+            "named value and metadata. Set spark.cudf.sql.format.iceberg.read.enabled=false " +
             "and rerun the query to read Variant with the CPU reader.")
       }
       val group = physical.asGroupType()

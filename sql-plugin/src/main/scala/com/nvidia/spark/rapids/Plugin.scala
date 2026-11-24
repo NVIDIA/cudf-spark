@@ -33,6 +33,7 @@ import com.nvidia.spark.rapids.RapidsConf.AllowMultipleJars
 import com.nvidia.spark.rapids.RapidsPluginUtils.buildInfoEvent
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
 import com.nvidia.spark.rapids.parquet.HybridScanPipeline
@@ -587,8 +588,9 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
 
     FileCacheLocalityManager.init(sc)
     historyMetricsSparkContext = sc
+    // Providers read canonical names; materialize legacy aliases for them.
     historyMetricsConfiguration =
-      new HashMap[String, String](sparkConf.getAll.toMap.asJava)
+      new HashMap[String, String](CudfConfKeys.withAliases(sparkConf.getAll.toMap.asJava))
     historyMetricsProviderName = conf.historyMetricsProvider
     logInfo(s"History metrics: requested=$historyMetricsProviderName, " +
       "activation deferred until Spark assigns the application ID")

@@ -66,6 +66,14 @@ class CudfConfKeysSuite extends AnyFunSuite {
     assert(both.isSqlEnabled)
   }
 
+  test("since-version metadata resolves under both aliases") {
+    val canonical = RapidsConf.CONCURRENT_GPU_TASKS.key
+    assert(canonical === "spark.cudf.sql.concurrentGpuTasks")
+    assert(ConfVersionInfo.forKey(canonical).sinceVersion === "0.1.0")
+    assert(ConfVersionInfo.forKey(CudfConfKeys.legacyKey(canonical)).sinceVersion === "0.1.0")
+    assert(RapidsConf.CONCURRENT_GPU_TASKS.versionInfo.sinceVersion === "0.1.0")
+  }
+
   test("private entries expose canonical names and canonical configuration references") {
     val fileCacheEntry = RapidsPrivateUtil.getPrivateConfigs().find(
       _.key == "spark.cudf.filecache.enabled").get

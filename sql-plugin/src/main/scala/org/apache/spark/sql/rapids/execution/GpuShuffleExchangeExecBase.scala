@@ -595,7 +595,7 @@ object GpuShuffleExchangeExecBase {
             throw new SparkException("Cannot retry a GPU round-robin shuffle with indeterminate " +
               "output after a reader was submitted because batch boundaries can change between " +
               "attempts. Rerun with a new DataFrame, unpersisting a cached one first, or set " +
-              "spark.rapids.sql.partitioning.RoundRobinPartitioning=false to repartition " +
+              "spark.cudf.sql.partitioning.RoundRobinPartitioning=false to repartition " +
               "on the CPU.")
           }
           super.compute(split, context)

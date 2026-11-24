@@ -31,7 +31,7 @@ import org.apache.spark.sql.execution.{FileSourceScanExec, FilterExec, ProjectEx
 /** Reader eligibility checks shared by file-format tagging and provider selection. */
 object DeltaReadSupport {
   private val LOW_SHUFFLE_MERGE_OPTION_PREFIX =
-    "spark.rapids.internal.delta.lowShuffleMerge."
+    "spark.cudf.internal.delta.lowShuffleMerge."
 
   val LOW_SHUFFLE_MERGE_REWRITE_SCAN_OPTION =
     LOW_SHUFFLE_MERGE_OPTION_PREFIX + "rewriteScan"
