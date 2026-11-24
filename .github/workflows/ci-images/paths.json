@@ -12,7 +12,8 @@
     ".github/workflows/ci-images/publish-tag.sh"
   ],
   "multi-platform-publication": [
-    ".github/workflows/ci-images/promote-platforms.sh"
+    ".github/workflows/ci-images/promote-platforms.sh",
+    ".github/workflows/ci-images/tag-baseline.py"
   ],
   "release-version-file": "pom.xml",
   "unit-tests": {

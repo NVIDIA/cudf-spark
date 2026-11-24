@@ -65,8 +65,11 @@ To select an alternate JDK, set `JAVA_HOME` and put its `bin` directory first on
 `PATH`.
 
 New GHCR packages may need public read access enabled for anonymous verification.
-To retry multi-platform publication, dispatch a fresh **Docker image CI** run
-on the target branch. The [cleanup workflow](../ci-image-cleanup.yml) defines
+Use **Re-run failed jobs** to retry an image without rebuilding successful
+images. For example, a failed Spark AMD64 build can reuse the same run's
+verified ARM64 digest. If the records have expired or the tag has since moved
+to a different image, dispatch **Docker image CI** for just that image family.
+The [cleanup workflow](../ci-image-cleanup.yml) defines
 retention and deletion limits and preserves published tags and their platform
 manifests. Cleanup runs at 04:57 and 16:57 UTC daily; manual cleanup defaults
 to a dry run.
