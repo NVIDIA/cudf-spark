@@ -47,9 +47,14 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   private def isDelta43: Boolean = DeltaRuntimeShim.isDelta43Version(io.delta.VERSION)
 
   test("Delta 4.3 test profile selects the required runtime") {
-    sys.props.get("rapids.test.delta43.version").foreach { expectedVersion =>
-      assert(isDelta43, s"delta43-tests must run against Delta 4.3.x, found ${io.delta.VERSION}")
-      assert(io.delta.VERSION == expectedVersion)
+    sys.props.get("rapids.test.delta43.version") match {
+      case Some(expectedVersion) =>
+        assert(isDelta43, s"delta43-tests must run against Delta 4.3.x, found ${io.delta.VERSION}")
+        assert(io.delta.VERSION == expectedVersion)
+      case None =>
+        assert(!isDelta43,
+          s"rapids.test.delta43.version must be set when testing Delta ${io.delta.VERSION}")
+        cancel("delta43-tests profile is not active")
     }
   }
 

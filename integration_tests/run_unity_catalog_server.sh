@@ -136,10 +136,10 @@ SPARK_LINE=${SPARK_VER%.*}
 # somebody asked for it explicitly, so silence would be the wrong answer.
 [[ "$SCALA_BINARY_VER" == "2.13" ]] ||
   die "Delta Lake $DELTA_VERSION requires Scala 2.13, found $SCALA_BINARY_VER"
-case "$DELTA_VERSION" in
-  4.2.0|4.3.[0-9]*) ;;
-  *) die "Unity Catalog tests support Delta Lake 4.2.0 and 4.3.x, found $DELTA_VERSION" ;;
-esac
+ALLOWED_DELTA_VERSION_RE='^(4\.2\.0|4\.3\.[0-9]+(\.[0-9]+)*(-[A-Za-z0-9._-]+)?)$'
+if [[ "$DELTA_VERSION" == *$'\n'* || ! "$DELTA_VERSION" =~ $ALLOWED_DELTA_VERSION_RE ]]; then
+  die "Unity Catalog tests support Delta Lake 4.2.0 and 4.3.x, found $DELTA_VERSION"
+fi
 case "$SPARK_VER" in
   4.0.1|4.1.1) ;;
   *) die "Delta Lake $DELTA_VERSION is only tested against Spark 4.0.1 and 4.1.1, found $SPARK_VER" ;;
