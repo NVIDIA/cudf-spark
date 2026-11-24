@@ -97,8 +97,7 @@ case class UnionExecRuleMeta(
     r: DataFromReplacementRule)
   extends SparkPlanMeta[UnionExec](union, conf, p, r) {
   override def convertToGpu(): GpuExec =
-    GpuUnionExec(
-      childPlans.map(_.convertIfNeeded()),
+    GpuUnionExec(childPlans.map(_.convertIfNeeded()))(
       UnionExecShims.isPlainUnion(union))
 }
 

@@ -63,4 +63,38 @@ class GpuUnionExecSuite extends SparkQueryCompareTestSuite {
       }
     }, conf)
   }
+
+  test("GpuUnionExec keeps its plain decision when SQLConf changes") {
+    withGpuSparkSession({ spark =>
+      val left = spark.range(0, 20, 1, 2).selectExpr("id % 5 AS k")
+      val right = spark.range(20, 40, 1, 2).selectExpr("id % 5 AS k")
+      val planned = left.repartition(4, col("k"))
+        .union(right.repartition(4, col("k"))).groupBy("k").count()
+
+      withSQLConf(SQLConf.UNION_OUTPUT_PARTITIONING.key -> "false") {
+        val plan = planned.queryExecution.executedPlan
+        val unions = plan.collect { case union: GpuUnionExec => union }
+        assertResult(1, s"GPU unions in:\n$plan")(unions.size)
+        assert(unions.head.isPlainUnion, s"expected a plain GPU union, got:\n$plan")
+        assert(unions.head.outputPartitioning.isInstanceOf[UnknownPartitioning],
+          s"expected the GPU union to report unknown partitioning, got:\n$plan")
+      }
+
+      withSQLConf(SQLConf.UNION_OUTPUT_PARTITIONING.key -> "true") {
+        val plan = planned.queryExecution.executedPlan
+        val unions = plan.collect { case union: GpuUnionExec => union }
+        assertResult(1, s"GPU unions in:\n$plan")(unions.size)
+        assert(unions.head.isPlainUnion, s"expected the GPU union to remain plain, got:\n$plan")
+        assert(unions.head.outputPartitioning.isInstanceOf[UnknownPartitioning],
+          s"expected the GPU union to retain unknown partitioning, got:\n$plan")
+        assertResult(8, "plain union partitions")(unions.head.executeColumnar().getNumPartitions)
+
+        val actual = planned.collect()
+          .map(row => row.getLong(0) -> row.getLong(1))
+          .sortBy(_._1)
+          .toSeq
+        assertResult((0L until 5L).map(_ -> 8L))(actual)
+      }
+    }, conf)
+  }
 }

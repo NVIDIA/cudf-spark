@@ -1766,18 +1766,22 @@ case class GpuRangeExec(
 }
 
 
-case class GpuUnionExec(
-    children: Seq[SparkPlan],
-    isPlainUnion: Boolean = true) extends ShimSparkPlan with GpuExec {
-
+object GpuUnionExec {
   // GpuUnionExecShim implementations retain Spark's SQLConf-based API. Use a private snapshot
   // that always enables partitioning when this node was stamped non-plain, rather than consulting
   // the live session conf again.
-  @transient private lazy val partitioningAwareUnionConf = {
+  private lazy val partitioningAwareUnionConf = {
     val snapshot = new SQLConf()
     snapshot.setConfString("spark.sql.unionOutputPartitioning", "true")
     snapshot
   }
+}
+
+case class GpuUnionExec(children: Seq[SparkPlan])(
+    val isPlainUnion: Boolean = true) extends ShimSparkPlan with GpuExec {
+
+  override def otherCopyArgs: Seq[AnyRef] =
+    Seq[AnyRef](isPlainUnion.asInstanceOf[java.lang.Boolean])
 
   // updating nullability to make all the children consistent
   override def output: Seq[Attribute] = {
@@ -1798,7 +1802,8 @@ case class GpuUnionExec(
     if (isPlainUnion) {
       UnknownPartitioning(0)
     } else {
-      GpuUnionExecShim.getOutputPartitioning(children, output, partitioningAwareUnionConf)
+      GpuUnionExecShim.getOutputPartitioning(
+        children, output, GpuUnionExec.partitioningAwareUnionConf)
     }
 
   // The smallest of our children

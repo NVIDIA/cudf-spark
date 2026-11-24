@@ -58,7 +58,7 @@ trait Spark350db143Shims extends Spark341PlusDBShims {
         }
 
         override def convertToGpu(): GpuExec =
-          GpuUnionExec(childPlans.map(_.convertIfNeeded()))
+          GpuUnionExec(childPlans.map(_.convertIfNeeded()))()
       })
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
