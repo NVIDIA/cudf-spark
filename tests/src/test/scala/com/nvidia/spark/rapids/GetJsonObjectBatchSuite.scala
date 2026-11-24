@@ -66,9 +66,11 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
   // tests cannot leak confs into each other (the Rapids toggle is reset too).
   private val perTestConfKeys = Seq(
     "spark.sql.ansi.enabled",
+    "spark.sql.subexpressionElimination.enabled",
     "spark.rapids.sql.batchSizeBytes",
     "spark.sql.files.maxPartitionBytes",
     "spark.rapids.sql.batchFusion.enabled",
+    "spark.rapids.sql.tiered.project.enabled",
     "spark.rapids.sql.expression.GetJsonObject.debugPath")
 
   private def clearPerTestConfs(): Unit = perTestConfKeys.foreach { key =>
@@ -480,5 +482,26 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assertCpuGpuParity(sql, confs)
     assert(withGpuDelta(sql, confs) == ((0L, 0L, 0L)),
       s"disabled conf must not fire any batch-fusion group, got ${withGpuDelta(sql, confs)}")
+  }
+
+  test("batch fusion preserves floating-point evaluation order in distinct JSON inputs") {
+    val confs = Map("spark.rapids.sql.tiered.project.enabled" -> "false",
+      "spark.sql.subexpressionElimination.enabled" -> "false",
+      "spark.sql.ansi.enabled" -> "false")
+    withCpu(confs) { s =>
+      import s.implicits._
+      Seq((1.0, 1e16, -1e16)).toDF("a", "b", "c")
+        .write.mode("overwrite").parquet(bigTableDir.getAbsolutePath + "/rounding")
+      s.read.parquet(bigTableDir.getAbsolutePath + "/rounding")
+        .createOrReplaceTempView("rounding_input")
+    }
+    val sql =
+      """SELECT get_json_object(IF((a + b) + c > 0.5D, '{"x":"p","y":"p"}',
+        |                          '{"x":"q","y":"q"}'), '$.x'),
+        |       get_json_object(IF(a + (b + c) > 0.5D, '{"x":"p","y":"p"}',
+        |                          '{"x":"q","y":"q"}'), '$.y')
+        |FROM rounding_input""".stripMargin
+    assertCpuGpuParity(sql, confs)
+    assert(withGpuDelta(sql, confs) == ((2L, 2L, 0L)))
   }
 }

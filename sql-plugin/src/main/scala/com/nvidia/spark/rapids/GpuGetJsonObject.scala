@@ -123,6 +123,8 @@ class GpuGetJsonObjectMeta(
 }
 
 object GpuGetJsonObject {
+  private case class JsonInputKey(expression: Expression)
+
   def parseJsonPath(path: GpuScalar): Option[List[PathInstruction]] = {
     if (path.isValid) {
       val pathStr = path.getValue.toString
@@ -254,9 +256,10 @@ case class GpuGetJsonObject(
   // its per-column path via batchEligible = false.
   override def batchEligible: Boolean = savePathForVerify.isEmpty
 
-  // Input child identity: siblings sharing the same `json` child share one
-  // multi-path native call (the native multi-path API takes ONE input column).
-  override def batchGroupKey: Any = json
+  // The multi-path API reads only the first input. Structural equality keeps
+  // comparisons from regrouping floating-point arithmetic via canonicalization.
+  @transient private lazy val jsonInputKey = JsonInputKey(json)
+  override def batchGroupKey: Any = jsonInputKey
 
   override def batchInput: Expression = json
 
