@@ -19,12 +19,15 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.GpuProjectExec
+import com.nvidia.spark.rapids.{GpuArrayTransform, GpuProjectExec}
 
 import org.apache.spark.sql.DataFrameComplexTypeSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDataFrameComplexTypeSuite extends DataFrameComplexTypeSuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "ArrayTransform with scan input"
+class RapidsDataFrameComplexTypeSuite
+  extends DataFrameComplexTypeSuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "ArrayTransform with scan input")
   override protected def gpuOperator: Class[GpuProjectExec] = classOf[GpuProjectExec]
+  override protected def gpuExpressions = Seq(classOf[GpuArrayTransform])
 }

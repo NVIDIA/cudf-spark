@@ -19,33 +19,70 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
-import com.nvidia.spark.rapids.{GpuExec, ShimLoaderTemp}
+import scala.collection.mutable.ArrayBuffer
+
+import com.nvidia.spark.rapids.GpuExec
 import org.scalactic.source.Position
 import org.scalatest.Tag
 
+import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 
-/** Verifies a representative inherited action while retaining the suite's auxiliary checks. */
-trait RapidsGpuPlanTest extends RapidsSQLTestsTrait {
-  protected def gpuTestName: String
+/** Verifies GPU execution of the upstream scenario selected by the version-delta audit. */
+trait RapidsGpuPlanTest extends RapidsSQLTestsTrait with AdaptiveSparkPlanHelper {
+  protected def gpuTestNames: Set[String]
   protected def gpuOperator: Class[_ <: GpuExec]
+  protected def requireGpuForEveryAnswer: Boolean = false
+  protected def gpuExpressions: Seq[Class[_ <: Expression]] = Seq.empty
+
+  private var checkingGpuTest = false
+  private val answerPlans = ArrayBuffer.empty[SparkPlan]
+
+  override protected def checkAnswer(df: => DataFrame, expectedAnswer: Seq[Row]): Unit = {
+    val actual = df
+    super.checkAnswer(actual, expectedAnswer)
+    if (checkingGpuTest) {
+      // Keep the actual result plan, excluding any reference action used to build expectedAnswer.
+      answerPlans += actual.queryExecution.executedPlan
+    }
+  }
 
   override protected def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit
       pos: Position): Unit = {
     super.test(testName, testTags: _*) {
-      if (testName == gpuTestName) {
+      if (gpuTestNames.contains(testName)) {
+        answerPlans.clear()
+        checkingGpuTest = true
         ExecutionPlanCaptureCallback.startCapture()
         try {
           testFun
-          val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
-          val helper = ShimLoaderTemp.newAdaptiveSparkPlanHelperShim()
-          val operators = plans.toSeq.flatMap { plan =>
-            helper.collect(plan) { case gpu: GpuExec if gpuOperator.isInstance(gpu) => gpu }
+          val captured = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+          // Tests using count()/collect() directly have no checkAnswer result to retain.
+          val plans = if (answerPlans.nonEmpty) answerPlans.toSeq else captured.toSeq
+          val operatorsByPlan = plans.map { plan =>
+            collectWithSubqueries(plan) {
+              case gpu: GpuExec if gpuOperator.isInstance(gpu) => gpu
+            }
+          }
+          val operators = operatorsByPlan.flatten
+          if (requireGpuForEveryAnswer) {
+            assert(operatorsByPlan.forall(_.nonEmpty),
+              s"GPU execution missing from a result query in $testName")
           }
           assert(operators.nonEmpty,
             s"No ${gpuOperator.getSimpleName} executed in $testName:\n${plans.mkString("\n")}")
-          info(s"GPU execution verified for $testName: ${gpuOperator.getSimpleName}")
+          gpuExpressions.foreach { expressionClass =>
+            assert(operators.exists(_.expressions.exists(_.exists(expressionClass.isInstance))),
+              s"No ${expressionClass.getSimpleName} executed in $testName")
+          }
+          info(s"GPU delta verified for $testName: ${gpuOperator.getSimpleName}" +
+            gpuExpressions.map(_.getSimpleName).mkString(" [", ", ", "]"))
         } finally {
+          checkingGpuTest = false
+          answerPlans.clear()
           ExecutionPlanCaptureCallback.endCapture()
         }
       } else {

@@ -24,7 +24,9 @@ import com.nvidia.spark.rapids.GpuExpandExec
 import org.apache.spark.sql.DatasetUnpivotSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDatasetUnpivotSuite extends DatasetUnpivotSuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "unpivot with single id"
+class RapidsDatasetUnpivotSuite
+  extends DatasetUnpivotSuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "unpivot with single id")
   override protected def gpuOperator: Class[GpuExpandExec] = classOf[GpuExpandExec]
 }

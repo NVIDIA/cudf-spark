@@ -19,12 +19,14 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.GpuRangeExec
-
-import org.apache.spark.sql.DataFrameRangeSuite
+import org.apache.spark.sql.SubqueryHintPropagationSuite
+import org.apache.spark.sql.rapids.execution.GpuBroadcastHashJoinExec
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDataFrameRangeSuite extends DataFrameRangeSuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "SPARK-7150 range api"
-  override protected def gpuOperator: Class[GpuRangeExec] = classOf[GpuRangeExec]
+class RapidsSubqueryHintPropagationSuite
+  extends SubqueryHintPropagationSuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "Correlated Exists with hints in tempView")
+  override protected def gpuOperator: Class[GpuBroadcastHashJoinExec] =
+    classOf[GpuBroadcastHashJoinExec]
 }

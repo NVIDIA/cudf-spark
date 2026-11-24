@@ -19,11 +19,15 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.catalyst.expressions.NullExpressionsSuite
-import org.apache.spark.sql.rapids.utils.RapidsTestsTrait
+import com.nvidia.spark.rapids.GpuHashAggregateExec
 
-class RapidsNullExpressionsSuite extends NullExpressionsSuite with RapidsTestsTrait {
-  override def shouldNotFallback(): Unit = {
-    fail("Spark 4.2 null expression evaluation fell back to the CPU")
-  }
+import org.apache.spark.sql.PlanMergeSuite
+import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
+
+class RapidsPlanMergeSuite
+  extends PlanMergeSuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "SPARK-56677: Merge scalar subqueries with filter propagation through Join")
+  override protected def requireGpuForEveryAnswer: Boolean = true
+  override protected def gpuOperator: Class[GpuHashAggregateExec] = classOf[GpuHashAggregateExec]
 }

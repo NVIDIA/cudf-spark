@@ -26,6 +26,7 @@ import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
 class RapidsUnwrapCastInComparisonEndToEndSuite
   extends UnwrapCastInComparisonEndToEndSuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "cases when literal is within range (min, max)"
+  override protected def gpuTestNames: Set[String] = Set(
+    "SPARK-46069: Support unwrap timestamp type to date type")
   override protected def gpuOperator: Class[GpuFilterExec] = classOf[GpuFilterExec]
 }

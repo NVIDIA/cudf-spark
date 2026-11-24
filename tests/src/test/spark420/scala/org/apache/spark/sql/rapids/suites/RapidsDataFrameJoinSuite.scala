@@ -19,13 +19,14 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.GpuSortExec
-
-import org.apache.spark.sql.ReplaceIntegerLiteralsWithOrdinalsSqlSuite
+import org.apache.spark.sql.DataFrameJoinSuite
+import org.apache.spark.sql.rapids.execution.GpuBroadcastHashJoinExec
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsReplaceIntegerLiteralsWithOrdinalsSqlSuite
-  extends ReplaceIntegerLiteralsWithOrdinalsSqlSuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "Order by ordinal - SQL"
-  override protected def gpuOperator: Class[GpuSortExec] = classOf[GpuSortExec]
+class RapidsDataFrameJoinSuite
+  extends DataFrameJoinSuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "SPARK-47810: replace equivalent expression to <=> in join condition")
+  override protected def gpuOperator: Class[GpuBroadcastHashJoinExec] =
+    classOf[GpuBroadcastHashJoinExec]
 }

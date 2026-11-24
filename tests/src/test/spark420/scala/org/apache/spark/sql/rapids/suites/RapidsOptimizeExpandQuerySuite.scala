@@ -24,7 +24,10 @@ import com.nvidia.spark.rapids.GpuHashAggregateExec
 import org.apache.spark.sql.OptimizeExpandQuerySuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsOptimizeExpandQuerySuite extends OptimizeExpandQuerySuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "correctness: pure count distinct with group by"
+class RapidsOptimizeExpandQuerySuite
+  extends OptimizeExpandQuerySuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "correctness: pure count distinct with group by")
+  override protected def requireGpuForEveryAnswer: Boolean = true
   override protected def gpuOperator: Class[GpuHashAggregateExec] = classOf[GpuHashAggregateExec]
 }

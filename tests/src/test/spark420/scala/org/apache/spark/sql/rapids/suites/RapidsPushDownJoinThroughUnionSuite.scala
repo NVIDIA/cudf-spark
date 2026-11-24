@@ -19,12 +19,14 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.GpuFilterExec
-
-import org.apache.spark.sql.DataFrameNaFunctionsSuite
+import org.apache.spark.sql.PushDownJoinThroughUnionSuite
+import org.apache.spark.sql.rapids.execution.GpuBroadcastHashJoinExec
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDataFrameNaFunctionsSuite extends DataFrameNaFunctionsSuite with RapidsGpuPlanTest {
-  override protected def gpuTestName: String = "drop with nested columns"
-  override protected def gpuOperator: Class[GpuFilterExec] = classOf[GpuFilterExec]
+class RapidsPushDownJoinThroughUnionSuite
+  extends PushDownJoinThroughUnionSuite with RapidsGpuPlanTest {
+  override protected def gpuTestNames: Set[String] = Set(
+    "UNION ALL + broadcast JOIN produces correct results")
+  override protected def gpuOperator: Class[GpuBroadcastHashJoinExec] =
+    classOf[GpuBroadcastHashJoinExec]
 }
