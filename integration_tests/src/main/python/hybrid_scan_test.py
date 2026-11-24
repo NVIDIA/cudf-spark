@@ -303,6 +303,24 @@ def _remove_checksum_files(data_path):
     return local_paths
 
 
+def _gds_required():
+    """Whether the session was launched with GPUDirect Storage ON, as a GDS run is so that KvikIO
+    is set up for cuFile at startup. The GDS ON tests then fail unless reads go to the device."""
+    launch_conf = with_cpu_session(lambda spark: dict(spark.sparkContext.getConf().getAll()))
+    if launch_conf.get('spark.rapids.sql.reader.gpuDirectStorage.mode', 'OFF').upper() != 'ON':
+        return False
+    assert launch_conf.get('spark.rapids.sql.format.parquet.hybridScan.enabled',
+                           'false').lower() == 'true', \
+        'a GDS run must launch with hybrid scan enabled too, or KvikIO is not set up for cuFile'
+    return True
+
+
+def write_gds_data(spark, path):
+    """`write_test_data` in one row group, so its payload column chunks are each several MiB,
+    above KvikIO's default 1 MiB GPUDirect Storage threshold."""
+    write_test_data(spark, path, num_rows=1 << 20, row_group_size=128 << 20)
+
+
 @_metric_reader_modes
 def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
     """A local file's bytes are all read with KvikIO, and any other file's with none. The local
@@ -715,24 +733,36 @@ def test_hybrid_scan_multithreaded_reads_to_host(spark_tmp_path, gds_mode):
         gpu_plan_assertion=check)
 
 
-@pytest.mark.parametrize('where', [
-    'sorted_int < 500',
-    'filter_int = 7',
-    "filter_str = 'key_500'",
+@pytest.mark.parametrize('where,survives', [
+    ('sorted_int < 500', True),
+    ('filter_int = 7', True),
+    ("filter_str = 'key_500'", False),
 ], ids=['stats', 'dict', 'none_survive_dict'])
-def test_hybrid_scan_multithreaded_gds_on(spark_tmp_path, where):
+def test_hybrid_scan_multithreaded_gds_on(spark_tmp_path, where, survives):
     """In ON mode the task thread reads a file's chunks to the device where KvikIO
     can, after pruning with dictionary pages read from the file, and a pool thread reads the rest
     to host memory. Which way these small files go depends on the machine and KvikIO's GPUDirect
-    Storage threshold, but the answer is the same either way."""
+    Storage threshold, but the answer is the same either way.
+
+    In a GDS run, a large local file is read instead, and its surviving chunks must go to the
+    device."""
+    required = _gds_required()
+
     def check(cpu_plan, gpu_plan):
         scan = [node for node in collect_plan_nodes(gpu_plan)
                 if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
         assert plan_metric(scan, 'hybridScanSplits') > 0, 'the hybrid reader did not run'
+        if required and survives:
+            assert plan_metric(scan, 'hybridScanDeviceBytesRead') > 0, \
+                'nothing was read with GPUDirect Storage'
 
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
-    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
-    _remove_checksum_files(data_path)
+    if required:
+        with_cpu_session(lambda spark: write_gds_data(spark, data_path))
+    else:
+        with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
+    is_local = _remove_checksum_files(data_path) is not None
+    assert is_local or not required, 'a GDS run needs --tmp_path on a local GDS filesystem'
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter(where),
         conf=hybrid_mt_conf(**_pruning_metrics_conf,
