@@ -19,9 +19,19 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
-import org.apache.spark.sql.rapids.suites.{RapidsConditionalExpressionSuite, RapidsDataFrameTungstenSuite}
+import org.apache.spark.sql.rapids.suites._
 
 class RapidsTestSettings extends BackendTestSettings {
+  enableSuite[RapidsDataFrameComplexTypeSuite]
+  enableSuite[RapidsDataFrameNaFunctionsSuite]
+  enableSuite[RapidsDataFrameRangeSuite]
+  enableSuite[RapidsDatasetUnpivotSuite]
+  enableSuite[RapidsDeprecatedAPISuite]
+  enableSuite[RapidsNullExpressionsSuite]
+  enableSuite[RapidsOptimizeExpandQuerySuite]
+  enableSuite[RapidsReplaceIntegerLiteralsWithOrdinalsDataframeSuite]
+  enableSuite[RapidsReplaceIntegerLiteralsWithOrdinalsSqlSuite]
+  enableSuite[RapidsUnwrapCastInComparisonEndToEndSuite]
   enableSuite[RapidsConditionalExpressionSuite]
   enableSuite[RapidsDataFrameTungstenSuite]
 }
