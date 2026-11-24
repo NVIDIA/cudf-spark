@@ -73,15 +73,15 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val RANGE_PARTITIONING_PRUNE_THROUGH_OPERATORS =
     conf("spark.rapids.sql.rangePartitioning.pruneThroughOperators")
       .doc("Disabled by default. When enabled along with sampleKeysOnly, range boundary " +
-        "collection may also step through row-boundary islands (columnar-to-row, " +
-        "BatchEvalPython or Arrow Python, row-to-columnar), GPU shuffle exchanges of any " +
-        "partitioning and their post-shuffle coalesce, materialized shuffle stages and AQE " +
-        "custom shuffle readers over them, and asymmetric shuffled-hash LeftOuter joins " +
-        "whose required keys resolve from the left leg. This skips Python UDF execution " +
-        "while collecting boundaries when nothing above the island reads a UDF output; " +
-        "keys that depend on a UDF output still fall back to full-width collection. It " +
-        "extends sampleKeysOnly, which still does the project, filter, batch-coalesce, and " +
-        "scan pruning; disabling this leaves that behavior unchanged.")
+        "collection may also step through row-boundary islands (columnar-to-row, batch or " +
+        "arrow Python, row-to-columnar), GPU shuffle exchanges of any partitioning and their " +
+        "post-shuffle coalesce, materialized GPU shuffle stages and AQE custom shuffle " +
+        "readers over them, and asymmetric shuffled-hash LeftOuter joins whose required keys " +
+        "all resolve from the left leg. Stepping through an island skips Python UDF execution " +
+        "while collecting boundaries when nothing above it reads a UDF output; a key or " +
+        "filter that depends on one still falls back to full-width collection. This extends " +
+        "sampleKeysOnly, which still applies its project, filter, batch-coalesce, and scan " +
+        "pruning; disabling this leaves that behavior unchanged.")
       .internal()
       .booleanConf
       .createWithDefault(false)

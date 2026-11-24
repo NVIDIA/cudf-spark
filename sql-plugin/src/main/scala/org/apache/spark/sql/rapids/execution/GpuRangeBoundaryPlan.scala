@@ -78,8 +78,8 @@ private[rapids] object GpuRangeBoundaryPlan {
     }
   }
 
-  // Only a GPU shuffle stage may become a terminal leaf: a reused CPU exchange's columnar
-  // path is unsupported and would fail at boundary execution.
+  // Only a GPU shuffle stage is a valid terminal leaf: a reused CPU exchange has no columnar
+  // path, so sampling it would fail at boundary execution.
   private def isGpuShuffleStage(plan: SparkPlan): Boolean = plan match {
     case stage: ShuffleQueryStageExec =>
       stage.shuffle.isInstanceOf[GpuShuffleExchangeExecBase]
@@ -203,11 +203,11 @@ private[rapids] object GpuRangeBoundaryPlan {
         }
       }
 
-    // The pruneThroughOperators-gated cases below change which plan computes the sampled keys,
-    // which is why they sit behind spark.rapids.sql.rangePartitioning.pruneThroughOperators.
+    // The cases below change which plan computes the sampled keys, so they are opt-in through
+    // spark.rapids.sql.rangePartitioning.pruneThroughOperators.
 
     // A host-serialized shuffle read wraps the exchange in this coalesce, so stepping through
-    // it keeps the exchange and the map-side plan (islands included) reachable.
+    // it lets the prune continue into the exchange and the map-side plan (islands included).
     case shuffleCoalesce: GpuShuffleCoalesceExec if pruneThroughOperators =>
       prune(shuffleCoalesce.child, required, deterministicRequired, pruneThroughOperators,
         rapidsConf)
@@ -226,15 +226,14 @@ private[rapids] object GpuRangeBoundaryPlan {
     case stage: ShuffleQueryStageExec if pruneThroughOperators && isGpuShuffleStage(stage) =>
       Some(wrapPostShuffleCoalesce(stage, rapidsConf))
 
-    // A row-boundary island, R2C(BatchEvalPython(C2R(child))), arrives here as the CPU
+    // A row-boundary island, R2C(EvalPython(C2R(child))), arrives here as the CPU base
     // EvalPythonExec node, batch or arrow depending on the evaluator the fallback picked; the
-    // GPU arrow wrapper has its own arm below. Such an island is pass-through only when no
-    // range key depends on a Python UDF output. A project widens `required` to the expressions
-    // behind each required output and a filter adds its condition ids, so a UDF output that
-    // feeds a key or a filter is already in `required` and blocks the pass-through, while a
-    // UDF output nothing reads cannot change which rows are sampled. The boundary plan
-    // executes this subtree separately from the shuffle input, so both executions must agree
-    // on the keys.
+    // GPU arrow wrapper has its own arm below. It is pass-through only when no Python UDF
+    // output is in `required`: a project widens `required` to the expressions behind each
+    // required output and a filter adds its condition ids, so a UDF output that feeds a key
+    // or a filter blocks, while a UDF output nothing reads cannot change which rows are
+    // sampled. The boundary plan runs this subtree separately from the shuffle input, so both
+    // executions must agree on the keys.
     case python: EvalPythonExec if pruneThroughOperators &&
         required.intersect(python.resultAttrs.map(_.exprId).toSet).isEmpty =>
       prune(python.child, required, deterministicRequired, pruneThroughOperators, rapidsConf)
@@ -245,9 +244,9 @@ private[rapids] object GpuRangeBoundaryPlan {
         required.intersect(arrow.resultAttrs.map(_.exprId).toSet).isEmpty =>
       prune(arrow.child, required, deterministicRequired, pruneThroughOperators, rapidsConf)
 
-    // The island nodes are dropped rather than rewrapped: keeping R2C/C2R around the pruned
-    // child would add a pointless column→row→column round-trip to the sampling path, which
-    // must stay columnar.
+    // The island's conversion nodes are dropped, not rewrapped: the sampler takes columnar
+    // batches, so keeping them would only add a column-to-row-to-column round-trip, and a
+    // kept GpuColumnarToRowExec has no columnar output at all.
     case r2c: GpuRowToColumnarExec if pruneThroughOperators =>
       prune(r2c.child, required, deterministicRequired, pruneThroughOperators, rapidsConf)
 

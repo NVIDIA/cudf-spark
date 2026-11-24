@@ -121,8 +121,8 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
       TargetSize(1073741824))
   }
 
-  // The Arrow-batched fallback island: the same row boundaries as the batch island, so the
-  // widened EvalPythonExec arm must prune it too.
+  // The Arrow-batched fallback island has the same row boundaries as the batch island, so
+  // the EvalPythonExec arm must prune it too.
   private def cpuArrowIslandPlan(
       scan: GpuFileSourceScanExec,
       udf: PythonUDF,
@@ -208,7 +208,8 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
       case adaptive: AdaptiveSparkPlanExec => adaptive.executedPlan
       case other => other
     }
-    // Spark 4.0 wraps the final plan in a result stage; a shuffle stage can also be the root.
+    // Spark 4.0 wraps the final plan in a ResultQueryStageExec; a shuffle stage can also be
+    // the root.
     val finalPlan = executed match {
       case stage: ShuffleQueryStageExec => stage
       case stage: QueryStageExec => stage.plan
@@ -256,7 +257,8 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
         assert(built.isDefined)
         val boundary = built.get
         assert(!boundary.exists(_.isInstanceOf[BatchEvalPythonExec]))
-        // The coalesce reads host-serialized shuffle batches, so it cannot stay over device ones.
+        // The coalesce expects host-serialized shuffle batches, so it cannot stay over a
+        // pruned device-batch subtree.
         assert(!boundary.exists(_.isInstanceOf[GpuShuffleCoalesceExec]))
       }, conf(pruneThroughOperators = true))
     }
