@@ -200,17 +200,27 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
   val DOUBLE_NEGATIVE_NAN_LOWER_RANGE = java.lang.Double.longBitsToDouble(0xfff0000000000001L)
   val DOUBLE_NEGATIVE_NAN_UPPER_RANGE = java.lang.Double.longBitsToDouble(0xffffffffffffffffL)
 
-  def withGpuSparkSession[U](f: SparkSession => U, conf: SparkConf = new SparkConf()): U = {
+  /**
+   * Force a harness-owned setting under its legacy name, dropping a canonical alias the caller
+   * passed. In-test overrides then take effect under either name: a legacy write replaces this
+   * value and a canonical write takes precedence over it.
+   */
+  private def forceHarnessConf(conf: SparkConf, entry: ConfEntry[_], value: String): SparkConf =
+    conf.remove(entry.key).set(entry.legacyKey, value)
+
+  private def gpuHarnessConf(conf: SparkConf): SparkConf = {
     val c = conf.clone()
-      .set(RapidsConf.SQL_ENABLED.key, "true")
-      .set(RapidsConf.TEST_CONF.key, "true")
-      .set(RapidsConf.EXPLAIN.key, "ALL")
-    withSparkSession(c, f)
+    forceHarnessConf(c, RapidsConf.SQL_ENABLED, "true")
+    forceHarnessConf(c, RapidsConf.TEST_CONF, "true")
+    forceHarnessConf(c, RapidsConf.EXPLAIN, "ALL")
+  }
+
+  def withGpuSparkSession[U](f: SparkSession => U, conf: SparkConf = new SparkConf()): U = {
+    withSparkSession(gpuHarnessConf(conf), f)
   }
 
   def withCpuSparkSession[U](f: SparkSession => U, conf: SparkConf = new SparkConf()): U = {
-    val c = conf.clone()
-      .set(RapidsConf.SQL_ENABLED.key, "false") // Just to be sure
+    val c = forceHarnessConf(conf.clone(), RapidsConf.SQL_ENABLED, "false") // Just to be sure
     withSparkSession(c, f)
   }
 
@@ -219,10 +229,7 @@ trait SparkQueryCompareTestSuite extends AnyFunSuite with BeforeAndAfterAll {
     TrampolineUtil.cleanupAnyExistingSession()
     val spark = getBuilder()
       .master("local[1]")
-      .config(conf)
-      .config(RapidsConf.SQL_ENABLED.key, "true")
-      .config(RapidsConf.TEST_CONF.key, "true")
-      .config(RapidsConf.EXPLAIN.key, "ALL")
+      .config(gpuHarnessConf(conf))
       .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
       .config("spark.sql.catalogImplementation", "hive")
       .config("spark.sql.hive.convertMetastoreParquet", "false")
