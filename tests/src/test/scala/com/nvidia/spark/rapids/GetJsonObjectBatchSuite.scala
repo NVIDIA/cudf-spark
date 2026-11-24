@@ -23,13 +23,17 @@ import java.util.TimeZone
 
 import scala.util.{Failure, Success, Try}
 
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.jni.GpuRetryOOM
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
-import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types.{ArrayType, DataType, IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
@@ -41,9 +45,8 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * so assertions are order-independent in a shared JVM).
  *
  * Counter deltas assume the tiny table arrives as ONE GPU batch per task (6
- * rows, single part file, default 1GiB batch size); the split-retry case
- * asserts the batchedMembers/firedGroups invariant under a reduced batch size
- * instead of an absolute delta.
+ * rows, single part file, default 1GiB batch size); the reduced batch-size
+ * case checks members per fired group instead of an absolute delta.
  *
  * Self-contained session setup mirrors the tests-module
  * SparkQueryCompareTestSuite pattern (that module is not on this module's
@@ -183,8 +186,7 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     Row(j1b, j2b, "46", Seq(1, 2), malformed1),
     Row(j1, j2, "47", Seq.empty[Int], malformed1))
 
-  // Large enough that a 1024B GPU batch size forces many scan batches, i.e.
-  // repeated `GpuProjectExec.project` re-entry (split-retry statelessness).
+  // Large enough for the 1024-byte batch target to produce multiple scan batches.
   private val bigRows = (0 until 256).map { i =>
     if (i % 2 == 0) {
       Row(j1, j2, "42", Seq(i % 7), malformed1)
@@ -291,19 +293,65 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
       new BatchableStub(newChildren.head)
   }
 
-  test("(e) member whose batchInput is not a GpuColumnVector drops out, never null") {
-    val sentinel = GpuLiteral("sentinel", StringType)
+  test("a fully dropped group evaluates each projection output only once") {
+    val sentinel = GpuLiteral(null, StringType)
     val exprs = Seq(
       GpuAlias(new BatchableStub(sentinel), "o1")(),
       GpuAlias(new BatchableStub(sentinel), "o2")())
-    val raw = mock[ColumnVector]
+    val evaluatedOutputs = scala.collection.mutable.ArrayBuffer.empty[Expression]
     val cb = new ColumnarBatch(Array.empty[ColumnVector], 3)
     GpuBatchFusion.reset()
-    val out = GpuBatchFusion.project(cb, exprs, _ => raw)
-    assert(out.isEmpty,
-      "a fully-dropped group must leave the projection to the caller's per-column fallback")
+    def evalColumn(expr: Expression): ColumnVector = {
+      if (expr ne sentinel) {
+        evaluatedOutputs += expr
+      }
+      val column = new OnHeapColumnVector(3, StringType)
+      column.putNulls(0, 3)
+      column
+    }
+    val projected = GpuBatchFusion.project(cb, exprs, evalColumn).getOrElse {
+      new ColumnarBatch(exprs.map(evalColumn).toArray, cb.numRows())
+    }
+    withResource(projected) { out =>
+      assert(evaluatedOutputs.toSeq == exprs)
+      assert(out.numCols() == 2)
+      assert(out.column(0).numNulls() == 3)
+      assert(out.column(1).numNulls() == 3)
+    }
     assert(GpuBatchFusion.snapshot() == ((0L, 0L, 2L)),
       s"both members must count as dropped, got ${GpuBatchFusion.snapshot()}")
+  }
+
+  test("projection rollback preserves a retryable failure when closing an output throws") {
+    val sentinel = GpuLiteral(null, StringType)
+    val exprs = (0 until 3).map(i => GpuAlias(new BatchableStub(sentinel), s"o$i")())
+    val retry = new GpuRetryOOM("third output failed")
+    val closeFailure = new IllegalStateException("first output close failed")
+    val outputs = Seq("first", "second").safeMap(value => CudfColumnVector.fromStrings(value))
+    try {
+      // The callback throws after cuDF releases the reference, so the test does not leak it.
+      outputs.head.setEventHandler((_, _) => throw closeFailure)
+      withResource(new ColumnarBatch(Array.empty[ColumnVector], 1)) { cb =>
+        val thrown = intercept[GpuRetryOOM] {
+          GpuBatchFusion.project(cb, exprs, expr => {
+            if (expr eq sentinel) {
+              new OnHeapColumnVector(1, StringType)
+            } else if (expr eq exprs.last) {
+              throw retry
+            } else {
+              val column = if (expr eq exprs.head) outputs.head else outputs(1)
+              GpuColumnVector.from(column, StringType)
+            }
+          }).foreach(_.safeClose())
+        }
+        assert(thrown eq retry)
+        assert(thrown.getSuppressed.toSeq == Seq(closeFailure))
+        assert(outputs.forall(_.getRefCount == 0))
+      }
+    } finally {
+      outputs.head.setEventHandler(null)
+      outputs.filter(_.getRefCount > 0).safeClose()
+    }
   }
 
   // ---- (f) size-1 group -----------------------------------------------------
@@ -357,20 +405,17 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
       "get_json_object(jsonBad, '$.b') AS m2 FROM t")
   }
 
-  // ---- (l) split-retry re-entry: batchEval statelessness --------------------
+  // ---- (l) reduced batch-size target ----------------------------------------
 
-  test("(l) split-retry re-entry: parity and batchEval statelessness under a 1024B batch size") {
+  test("(l) get_json_object preserves results and full groups at a 1024-byte batch target") {
     val sql = s"SELECT ${extracts(60, "jsonA")} FROM tbig"
     val confs = Map("spark.rapids.sql.batchSizeBytes" -> "1024")
     assertCpuGpuParity(sql, confs)
-    // batchSizeBytes only sizes rows per ColumnarBatch — it does not split
-    // projection groups, and the retry contract is about retryable subsets,
-    // not size splits. batchEval must be STATELESS: however the run slices
-    // batches, the rows must equal the default-batch run.
+    // A lower batch-size target changes how rows are batched; it does not inject an OOM.
     val defaultBatch = withGpu()(s => rowsOf(s.sql(sql).collect()))
     val tinyBatch = withGpu(confs)(s => rowsOf(s.sql(sql).collect()))
     assert(tinyBatch == defaultBatch,
-      s"batchEval must be stateless across batch slicings\n" +
+      s"batchEval results must not depend on the batch-size target\n" +
         s"default: ${defaultBatch.mkString(", ")}\n1024B: ${tinyBatch.mkString(", ")}")
     val delta = withGpuDelta(sql, confs)
     assert(delta._1 > 0, s"the batch hook must fire at least once, got $delta")

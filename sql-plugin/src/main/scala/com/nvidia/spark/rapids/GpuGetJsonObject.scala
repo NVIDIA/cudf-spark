@@ -304,7 +304,7 @@ case class GpuGetJsonObject(
       }
       val validPaths = validPathsWithIndexes.map(_._1)
       val results = new Array[ColumnVector](members.length)
-      try {
+      closeOnExcept(results) { _ =>
         if (validPaths.nonEmpty) {
           val targetBatchSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(SQLConf.get)
           // Last argument -1 indicates to use automatically calculated parallelism
@@ -326,10 +326,6 @@ case class GpuGetJsonObject(
           }
         }
         results.toSeq
-      } catch {
-        case t: Throwable =>
-          results.foreach { c => if (c != null) c.close() }
-          throw t
       }
     }
   }

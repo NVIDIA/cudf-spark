@@ -18,9 +18,11 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.atomic.AtomicLong
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import ai.rapids.cudf.ColumnVector
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Expression
@@ -189,13 +191,13 @@ object GpuBatchFusion extends Logging {
             case raw =>
               // member drops out of its group (per-column path); the evaluated
               // column cannot be reused, so release it here
-              raw.close()
+              raw.safeClose()
               None
           }
         }
       }
+      var projectionError: Throwable = null
       try {
-        var anyGroup = false
         val grouped = mutable.BitSet()
         // INDEX-WALK execution: groups evaluate at their FIRST member's index —
         // never all-groups-first, which would hoist a later group across an
@@ -222,16 +224,11 @@ object GpuBatchFusion extends Logging {
                         unwrap(boundExprs(i)).dataType)
                     } catch {
                       case t: Throwable =>
-                        // `from` either moves the result into `outputs` or
-                        // throws without consuming it, so on failure this
-                        // result and every later one are unwrapped; earlier
-                        // ones are owned by `outputs` and closed by the
-                        // outer failure handler
-                        results.drop(ridx).foreach(_.close())
+                        // Earlier results already belong to outputs; from did not consume this one.
+                        results.drop(ridx).safeClose(t)
                         throw t
                     }
                 }
-                anyGroup = true
                 grouped ++= g.members.map(_._1)
                 // POSITIVE PROVENANCE (overhead contract): one INFO line per
                 // fired group; GetJsonObjectBatchSuite asserts counter deltas,
@@ -258,22 +255,22 @@ object GpuBatchFusion extends Logging {
             outputs(idx) = evalColumn(boundExprs(idx))
           }
         }
-        if (!anyGroup) {
-          // Nothing took ownership: every populated output came from evalColumn
-          // (the defensive drop path), so close them instead of leaking.
-          outputs.foreach { c => if (c != null) c.close() }
-          None
-        } else {
-          Some(new ColumnarBatch(outputs, cb.numRows()))
-        }
+        // Even if every group dropped out, the fallback columns are already evaluated.
+        Some(new ColumnarBatch(outputs, cb.numRows()))
       } catch {
         case t: Throwable =>
-          // Roll back partial outputs on failure (closeOnExcept pattern used
-          // across the plugin); on success each is owned by the result batch.
-          outputs.foreach { c => if (c != null) c.close() }
+          projectionError = t
+          outputs.safeClose(t)
           throw t
       } finally {
-        inputCache.values.forEach(_.close())
+        try {
+          inputCache.values().asScala.toSeq.safeClose(projectionError)
+        } catch {
+          case t: Throwable if projectionError == null =>
+            // If input cleanup fails, the caller never receives the completed batch.
+            outputs.safeClose(t)
+            throw t
+        }
       }
     }
   }
