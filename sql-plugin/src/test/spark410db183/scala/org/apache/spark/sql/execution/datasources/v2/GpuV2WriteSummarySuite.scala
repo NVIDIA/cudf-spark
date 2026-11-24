@@ -16,15 +16,17 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["410db183"],"carryForward":"none"}
-{"spark":["411"],"carryForward":"all"}
-{"spark":["420"],"carryForward":"sameMinor"}
+{"spark":["411","420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.nvidia.spark.rapids.{FQSuiteName, GpuRowToColumnarExec, RapidsConf, TargetSize}
+import com.nvidia.spark.rapids.{FQSuiteName, GpuRowToColumnarExec, RapidsConf, TargetSize,
+  VersionUtils}
 import com.nvidia.spark.rapids.shims.GpuMergeRowsKeepShims
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
+import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Copy, Delete, Insert, Keep, Update}
@@ -157,6 +159,128 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
       assert(recorder.plainCommitCount === 0)
       assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
     }
+  }
+
+  test("MERGE commit counts all GPU summary fields once when the shuffle map stage is retried") {
+    assume(VersionUtils.cmpSparkVersion(4, 2, 0) >= 0, "SPARK-56743 starts in Spark 4.2")
+    withSparkSession { spark =>
+      val child = spark.range(1).queryExecution.executedPlan
+      val merge = GpuMergeRowsExec(
+        Literal(true, BooleanType), Literal(true, BooleanType), Nil, Nil, Nil,
+        checkCardinality = false, child.output, child)
+      val mergeMetrics = gpuMergeMetrics(merge)
+      val trueLit = Literal(true, BooleanType)
+
+      runWithRetriedMapStage(spark) { () =>
+        val attempt = GpuMergeRowsExec.MergeRowMetrics.forAttempt()
+        // Split across two batches so every SQLLastAttemptMetric also receives += 0L via addAll.
+        attempt.reset()
+        attempt.record(GpuMergeRowsExec.GpuKeep(trueLit, Nil, GpuMergeRowsExec.ACTION_COPY),
+          1L, sourcePresent = true)
+        attempt.record(GpuMergeRowsExec.GpuKeep(trueLit, Nil, GpuMergeRowsExec.ACTION_INSERT),
+          2L, sourcePresent = true)
+        attempt.record(GpuMergeRowsExec.GpuDiscard(trueLit), 3L, sourcePresent = true)
+        attempt.record(GpuMergeRowsExec.GpuSplit(trueLit, Nil, Nil), 5L, sourcePresent = true)
+        mergeMetrics.addAll(attempt)
+
+        attempt.reset()
+        attempt.record(GpuMergeRowsExec.GpuDiscard(trueLit), 4L, sourcePresent = false)
+        attempt.record(GpuMergeRowsExec.GpuSplit(trueLit, Nil, Nil), 6L, sourcePresent = false)
+        mergeMetrics.addAll(attempt)
+      }
+
+      val expectedAttemptCounts = Seq(
+        GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED -> 1L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED -> 2L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED -> 7L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED -> 11L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED -> 5L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED -> 3L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED -> 6L,
+        GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED -> 4L)
+      expectedAttemptCounts.foreach { case (name, perAttempt) =>
+        assert(merge.metrics(name).value === perAttempt * 2L, s"cumulative value for $name")
+      }
+
+      val recorder = new RecordingBatchWrite
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, merge)
+      val summary = recorder.lastSummary.get.asInstanceOf[MergeSummary]
+      assert(summary.numTargetRowsCopied === 1L)
+      assert(summary.numTargetRowsInserted === 2L)
+      assert(summary.numTargetRowsDeleted === 7L)
+      assert(summary.numTargetRowsUpdated === 11L)
+      assert(summary.numTargetRowsMatchedUpdated === 5L)
+      assert(summary.numTargetRowsMatchedDeleted === 3L)
+      assert(summary.numTargetRowsNotMatchedBySourceUpdated === 6L)
+      assert(summary.numTargetRowsNotMatchedBySourceDeleted === 4L)
+    }
+  }
+
+  test("MERGE commit counts CPU fallback MergeRowsExec fields once after stage retry") {
+    assume(VersionUtils.cmpSparkVersion(4, 2, 0) >= 0, "SPARK-56743 starts in Spark 4.2")
+    withSparkSession { spark =>
+      val child = spark.range(1).queryExecution.executedPlan
+      val merge = MergeRowsExec(
+        Literal(true, BooleanType), Literal(true, BooleanType), Nil, Nil, Nil,
+        checkCardinality = false, child.output, child)
+      val cpuMetrics = merge.metrics
+
+      runWithRetriedMapStage(spark) { () =>
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED).add(1L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED).add(2L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED).add(3L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED).add(4L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED).add(5L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED).add(6L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED).add(7L)
+        cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED).add(8L)
+      }
+
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED).value === 2L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED).value === 4L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED).value === 6L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED).value === 8L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED).value === 10L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED).value === 12L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED).value ===
+        14L)
+      assert(cpuMetrics(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED).value ===
+        16L)
+
+      val root = GpuRowToColumnarExec(merge, TargetSize(1L << 20))
+      val recorder = new RecordingBatchWrite
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, root)
+      assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
+    }
+  }
+
+  private def gpuMergeMetrics(merge: GpuMergeRowsExec): GpuMergeRowsExec.MergeRowMetrics =
+    GpuMergeRowsExec.MergeRowMetrics(
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_COPIED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_DELETED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_UPDATED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_UPDATED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_MATCHED_DELETED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_UPDATED),
+      merge.gpuLongMetric(GpuMergeRowsExec.NUM_TARGET_ROWS_NOT_MATCHED_BY_SOURCE_DELETED))
+
+  private def runWithRetriedMapStage(spark: SparkSession)(recordAttempt: () => Unit): Unit = {
+    // Put the MERGE counters upstream of the shuffle so fetch failure repeats their updates.
+    val rows = spark.sparkContext.parallelize(1 to 4, 1).mapPartitions { iter =>
+      recordAttempt()
+      iter.map(i => (0, i))
+    }
+    val shuffled = rows.reduceByKey(_ + _, 1)
+    val shuffleId = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]].shuffleId
+    val result = shuffled.mapPartitions { iter =>
+      if (TaskContext.get().stageAttemptNumber() == 0) {
+        throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
+          shuffleId, 0L, 0, 0, "Retry the stage that counted the MERGE rows")
+      }
+      iter
+    }
+    assert(result.collect().toSeq === Seq(0 -> 10))
   }
 
   private def withSparkSession[T](f: SparkSession => T): T = {

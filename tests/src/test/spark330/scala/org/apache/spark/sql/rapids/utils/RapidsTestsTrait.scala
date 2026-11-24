@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["330"],"carryForward":"none"}
+{"spark":["330","420"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
@@ -29,13 +29,17 @@ import org.scalactic.TripleEqualsSupport.Spread
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.{Column, Row}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.catalyst.analysis.ResolveTimeZone
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.optimizer.{ConstantFolding, ConvertToLocalRelation}
 import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData, MapData, TypeUtils}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.nvidia.DFUDFShims
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.{DataFrame, SparkSession}
 import org.apache.spark.sql.rapids.utils.RapidsQueryTestUtil.isNaNOrInf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
@@ -76,8 +80,8 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
           }
         }
       } finally {
-        SparkSession.clearActiveSession()
-        SparkSession.clearDefaultSession()
+        org.apache.spark.sql.SparkSession.clearActiveSession()
+        org.apache.spark.sql.SparkSession.clearDefaultSession()
       }
     }
     logInfo(
@@ -90,8 +94,7 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
 
   protected def initializeSession(): Unit = {
     if (_spark == null) {
-      val sparkBuilder = SparkSession
-        .builder()
+      val sparkBuilder = TrampolineConnectShims.getBuilder()
         .master(s"local[2]")
         // Avoid static evaluation for literal input by spark catalyst.
         .config(
@@ -131,19 +134,11 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
         .config("spark.rapids.sql.exec.FlatMapCoGroupsInPandasExec", "true")
         .config("spark.rapids.sql.exec.WindowInPandasExec", "true")
         .config("spark.rapids.sql.hasExtendedYearValues", "false")
-        .config("spark.rapids.memory.gpu.allocFraction",
-          System.getProperty(
-            "rapids.test.gpu.allocFraction", "1"))
-        .config("spark.rapids.memory.gpu.maxAllocFraction",
-          System.getProperty(
-            "rapids.test.gpu.maxAllocFraction", "1"))
-        .config("spark.rapids.memory.gpu.minAllocFraction",
-          System.getProperty(
-            "rapids.test.gpu.minAllocFraction", "0.25"))
         .appName("rapids spark plugin running Vanilla Spark UT")
 
       _spark = sparkBuilder
         .config("spark.unsafe.exceptionOnMemoryLeak", "true")
+        .config(RapidsTestConf(new SparkConf(false)))
         .getOrCreate()
     }
   }
@@ -325,7 +320,7 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
         case BoundReference(ordinal, dataType, _) =>
           Literal(inputRow.asInstanceOf[GenericInternalRow].get(ordinal, dataType), dataType)
       }
-      resultDF = _spark.range(0, 1).select(Column(expression))
+      resultDF = _spark.range(0, 1).select(DFUDFShims.exprToColumn(expression))
       try {
         result = resultDF.collect()
       } catch {
@@ -350,7 +345,7 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
         val empData = Seq(Row(1))
         _spark.createDataFrame(_spark.sparkContext.parallelize(empData), schema)
       }
-      resultDF = df.select(Column(expression))
+      resultDF = df.select(DFUDFShims.exprToColumn(expression))
       try {
         result = resultDF.collect()
       } catch {
@@ -502,7 +497,7 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
       }
     }
     }
-    val fields = structFileSeq.toSeq
+    val fields = structFileSeq.toArray
     _spark.internalCreateDataFrame(
       _spark.sparkContext.parallelize(Seq(inputRow)),
       StructType(fields))
