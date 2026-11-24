@@ -1,0 +1,95 @@
+{
+  "ci-toolchains": {
+    "spark-build": {
+      "dockerfile": "jenkins/Dockerfile-blossom.ubuntu",
+      "context": ".",
+      "build-args": {
+        "CUDA_VER": "12.0.1"
+      },
+      "variants": [
+        {"UBUNTU_VER": "22.04"}
+      ],
+      "platform-args": {
+        "amd64": {"TARGETPLATFORM": "linux/amd64", "ARCH": "amd64", "UCX_ARCH": "x86_64"},
+        "arm64": {"TARGETPLATFORM": "linux/arm64", "ARCH": "arm64", "UCX_ARCH": "aarch64"}
+      },
+      "recipe-inputs": [
+        "integration_tests/requirements.txt"
+      ],
+      "smoke": "spark-build"
+    },
+    "skills-build": {
+      "dockerfile": "skills/ci/Dockerfile.pre-merge",
+      "smoke": "skills-build"
+    },
+    "integration-ubuntu": {
+      "dockerfile": "jenkins/Dockerfile-blossom.integration.ubuntu",
+      "context": ".",
+      "build-args": {
+        "CUDA_VER": "12.8.0"
+      },
+      "variants": [
+        {"UBUNTU_VER": "22.04"},
+        {"UBUNTU_VER": "24.04"}
+      ],
+      "platform-args": {"amd64": {}, "arm64": {}},
+      "recipe-inputs": [
+        "integration_tests/requirements.txt"
+      ],
+      "smoke": "integration"
+    },
+    "integration-rocky": {
+      "dockerfile": "jenkins/Dockerfile-blossom.integration.rocky",
+      "context": ".",
+      "build-args": {
+        "CUDA_VER": "12.8.0",
+        "ART_URL": "https://maven-central.storage-download.googleapis.com/maven2"
+      },
+      "variants": [
+        {"ROCKY_VER": "8"},
+        {"ROCKY_VER": "9"}
+      ],
+      "platform-args": {"amd64": {}, "arm64": {}},
+      "recipe-inputs": [
+        "integration_tests/requirements.txt"
+      ],
+      "smoke": "integration"
+    }
+  },
+  "shuffle-examples": {
+    "shuffle-rocky-no-rdma": {
+      "dockerfile": "docs/additional-functionality/shuffle-docker-examples/Dockerfile.rocky_no_rdma",
+      "smoke": "shuffle",
+      "smoke-args": [
+        "no-rdma"
+      ]
+    },
+    "shuffle-rocky-rdma": {
+      "dockerfile": "docs/additional-functionality/shuffle-docker-examples/Dockerfile.rocky_rdma",
+      "smoke": "shuffle",
+      "smoke-args": [
+        "rdma"
+      ]
+    },
+    "shuffle-ubuntu-no-rdma": {
+      "dockerfile": "docs/additional-functionality/shuffle-docker-examples/Dockerfile.ubuntu_no_rdma",
+      "smoke": "shuffle",
+      "smoke-args": [
+        "no-rdma"
+      ]
+    },
+    "shuffle-ubuntu-rdma": {
+      "dockerfile": "docs/additional-functionality/shuffle-docker-examples/Dockerfile.ubuntu_rdma",
+      "smoke": "shuffle",
+      "smoke-args": [
+        "rdma"
+      ]
+    }
+  },
+  "udf-template": {
+    "udf-cuda-template": {
+      "dockerfile": "skills/udf-convert-to-cuda/templates/cuda/Dockerfile",
+      "smoke": "udf-template"
+    }
+  }
+}
