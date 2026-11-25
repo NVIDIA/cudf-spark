@@ -22,8 +22,8 @@ from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_co
     assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, \
-    deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, delta_reorg_xfail, \
-    is_oss_delta_lake_42
+    deletion_vector_values, deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, \
+    delta_reorg_xfail, is_oss_delta_lake_42
 from marks import allow_non_gpu, allow_non_gpu_conditional, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
@@ -1186,8 +1186,7 @@ def test_delta_column_mapping_predicate_pushdown_with_deletion_vector(spark_tmp_
     reason="Delta Lake 4.1.0 incompatible with Spark 4.1.2+ - ParquetToSparkSchemaConverter API changed")
 @pytest.mark.skipif(not (is_databricks_runtime() or is_spark_340_or_later()), \
                     reason="ParquetToSparkSchemaConverter changes not compatible with Delta Lake")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_name_column_mapping_no_field_ids(spark_tmp_path, enable_deletion_vectors):
     data_path = spark_tmp_path + "/DELTA_DATA"
     def setup_parquet_table(spark):
