@@ -50,6 +50,10 @@ if [[ -n $release_ref ]]; then
 fi
 
 image="ghcr.io/$(printf '%s' "${GITHUB_REPOSITORY:?}" | tr '[:upper:]' '[:lower:]')/$package"
+if [[ -n ${PLATFORM_RECORDS:-} && ${GITHUB_RUN_ATTEMPT:?} != 1 ]]; then
+  # The recipe can still be current even if a newer rebuild moved this particular tag.
+  python3 -I .github/workflows/ci-images/tag-baseline.py check "$image" "$tag" "$digest" "$PLATFORM_RECORDS"
+fi
 # Use the verified digest directly. A lone manifest must remain a lone manifest.
 docker buildx imagetools create --prefer-index=false --metadata-file "$scratch/tag.json" \
   --tag "$image:$tag" "$image@$digest"
