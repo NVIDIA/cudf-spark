@@ -25,16 +25,21 @@ import org.scalatest.funsuite.AnyFunSuite
 // Scala 2.12's Seq parameter accepts mutable collections; Scala 2.13's does not.
 class GpuMetricMutableInputSuite extends AnyFunSuite {
   private val nvtxId = NvtxId("mutable metrics", NvtxColor.BLUE, "Test timer ownership")
+  private val expectedTracks = Seq(false, false, true, false, true)
   private val entryPoints: Seq[(String, (Seq[GpuMetric], () => Unit) => Unit)] = Seq(
     "GpuMetric.ns" -> ((metrics, body) => GpuMetric.ns(metrics, Seq.empty)(body())),
     "MetricRange" -> ((metrics, body) =>
       withResource(new MetricRange(metrics)) { range =>
-        assert(range.needTracks == Seq(false, false, true, false, true))
+        assert(range.needTracks == expectedTracks)
         body()
-        assert(range.needTracks == Seq(false, false, true, false, true))
+        assert(range.needTracks == expectedTracks)
       }),
     "NvtxWithMetrics" -> ((metrics, body) =>
-      withResource(new NvtxWithMetrics("mutable metrics", NvtxColor.BLUE, metrics))(_ => body())),
+      withResource(new NvtxWithMetrics("mutable metrics", NvtxColor.BLUE, metrics)) { range =>
+        assert(range.needTracks == expectedTracks)
+        body()
+        assert(range.needTracks == expectedTracks)
+      }),
     "NvtxIdWithMetrics" -> ((metrics, body) => NvtxIdWithMetrics(nvtxId, metrics: _*)(body())))
 
   for ((name, run) <- entryPoints; replace <- Seq(false, true)) {
