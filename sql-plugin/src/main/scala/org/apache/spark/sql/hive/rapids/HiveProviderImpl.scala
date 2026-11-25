@@ -37,19 +37,11 @@ import org.apache.spark.sql.types._
 
 class HiveProviderImpl extends HiveProviderCmdShims {
 
-  /**
-   * Builds the expression rules that are specific to spark-hive Catalyst nodes.
-   */
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    Seq(
-      GpuOverrides.expr[HiveSimpleUDF](
-        "Hive UDF, the UDF can choose to implement a RAPIDS accelerated interface to" +
-            " get better performance",
-        ExprChecks.projectOnly(
-          udfTypeSig,
-          TypeSig.all,
-          repeatingParamCheck = Some(RepeatingParamCheck("param", udfTypeSig, TypeSig.all))),
-        (a, conf, p, r) => new ExprMeta[HiveSimpleUDF](a, conf, p, r) {
+  private class HiveSimpleUdfMetaImpl(
+      a: HiveSimpleUDF,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends ExprMeta[HiveSimpleUDF](a, conf, p, r) {
 
           val function = createFunction(a)
           private val opRapidsFunc = function match {
@@ -84,15 +76,19 @@ class HiveProviderImpl extends HiveProviderCmdShims {
                 childExprs.map(_.convertToGpu()))
             }
           }
-        }),
-      GpuOverrides.expr[HiveGenericUDF](
-        "Hive Generic UDF, the UDF can choose to implement a RAPIDS accelerated interface to" +
-            " get better performance",
-        ExprChecks.projectOnly(
-          udfTypeSig,
-          TypeSig.all,
-          repeatingParamCheck = Some(RepeatingParamCheck("param", udfTypeSig, TypeSig.all))),
-        (a, conf, p, r) => new ExprMeta[HiveGenericUDF](a, conf, p, r) {
+        }
+
+  private def createHiveSimpleUdfMeta(
+      a: HiveSimpleUDF,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new HiveSimpleUdfMetaImpl(a, conf, p, r)
+
+  private class HiveGenericUdfMetaImpl(
+      a: HiveGenericUDF,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends ExprMeta[HiveGenericUDF](a, conf, p, r) {
           val function = createFunction(a)
           private val opRapidsFunc = function match {
             case rapidsUDF: RapidsUDF => Some(rapidsUDF)
@@ -127,18 +123,19 @@ class HiveProviderImpl extends HiveProviderCmdShims {
                 childExprs.map(_.convertToGpu()))
             }
           }
-        })
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-  }
+        }
 
-  override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
-    Seq(
-      GpuOverrides.exec[HiveTableScanExec](
-        desc = "Scan Exec to read Hive delimited text tables",
-        ExecChecks(
-          TypeSig.commonCudfTypes + TypeSig.DECIMAL_128,
-          TypeSig.all),
-        (p, conf, parent, r) => new SparkPlanMeta[HiveTableScanExec](p, conf, parent, r) {
+  private def createHiveGenericUdfMeta(
+      a: HiveGenericUDF,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new HiveGenericUdfMetaImpl(a, conf, p, r)
+
+  private class HiveTableScanExecMetaImpl(
+      p: HiveTableScanExec,
+      conf: RapidsConf,
+      parent: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends SparkPlanMeta[HiveTableScanExec](p, conf, parent, r) {
 
           private def flagIfUnsupportedStorageFormat(storage: CatalogStorageFormat): Unit = {
             if (storage.inputFormat.getOrElse("") != textInputFormat) {
@@ -307,6 +304,45 @@ class HiveProviderImpl extends HiveProviderCmdShims {
               wrapped.relation,
               wrapped.partitionPruningPred)
           }
-        })
+        }
+
+  private def createHiveTableScanExecMeta(
+      p: HiveTableScanExec,
+      conf: RapidsConf,
+      parent: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new HiveTableScanExecMetaImpl(p, conf, parent, r)
+
+  /**
+   * Builds the expression rules that are specific to spark-hive Catalyst nodes.
+   */
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    Seq(
+      GpuOverrides.expr[HiveSimpleUDF](
+        "Hive UDF, the UDF can choose to implement a RAPIDS accelerated interface to" +
+            " get better performance",
+        ExprChecks.projectOnly(
+          udfTypeSig,
+          TypeSig.all,
+          repeatingParamCheck = Some(RepeatingParamCheck("param", udfTypeSig, TypeSig.all))),
+        createHiveSimpleUdfMeta),
+      GpuOverrides.expr[HiveGenericUDF](
+        "Hive Generic UDF, the UDF can choose to implement a RAPIDS accelerated interface to" +
+            " get better performance",
+        ExprChecks.projectOnly(
+          udfTypeSig,
+          TypeSig.all,
+          repeatingParamCheck = Some(RepeatingParamCheck("param", udfTypeSig, TypeSig.all))),
+        createHiveGenericUdfMeta)
+    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
+  }
+
+  override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
+    Seq(
+      GpuOverrides.exec[HiveTableScanExec](
+        desc = "Scan Exec to read Hive delimited text tables",
+        ExecChecks(
+          TypeSig.commonCudfTypes + TypeSig.DECIMAL_128,
+          TypeSig.all),
+        createHiveTableScanExecMeta)
     ).collect { case r if r != null => (r.getClassFor.asSubclass(classOf[SparkPlan]), r) }.toMap
 }

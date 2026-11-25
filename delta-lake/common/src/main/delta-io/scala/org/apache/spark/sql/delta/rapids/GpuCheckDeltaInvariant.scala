@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from CheckDeltaInvariant.scala in the
  * Delta Lake project at https://github.com/delta-io/delta.
@@ -127,6 +127,13 @@ case class GpuCheckDeltaInvariant(
 }
 
 object GpuCheckDeltaInvariant extends Logging {
+  private def createGpuCheckDeltaInvariantMeta(
+    c: CheckDeltaInvariant,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuCheckDeltaInvariantMeta(c, conf, p, r)
+
   private val exprRule = GpuOverrides.expr[CheckDeltaInvariant](
     "checks a Delta Lake invariant expression",
     ExprChecks.projectOnly(
@@ -135,7 +142,7 @@ object GpuCheckDeltaInvariant extends Logging {
       paramCheck = Seq(ParamCheck("input", TypeSig.all, TypeSig.all)),
       repeatingParamCheck = Some(RepeatingParamCheck("extra", TypeSig.all, TypeSig.all))
     ),
-    (c, conf, p, r) => new GpuCheckDeltaInvariantMeta(c, conf, p, r))
+    createGpuCheckDeltaInvariantMeta)
 
   def maybeConvertToGpu(
       invariants: Seq[CheckDeltaInvariant],

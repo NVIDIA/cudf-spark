@@ -183,5 +183,5 @@ object GpuChecksumExpression {
       ExprChecks.projectOnly(TypeSig.BOOLEAN, TypeSig.BOOLEAN,
         repeatingParamCheck = Some(RepeatingParamCheck(
           "input", XxHash64Shims.supportedTypes, TypeSig.all))),
-      (c, conf, parent, rule) => GpuChecksumExpressionMeta(c, conf, parent, rule))
+      GpuChecksumExpressionMeta)
 }

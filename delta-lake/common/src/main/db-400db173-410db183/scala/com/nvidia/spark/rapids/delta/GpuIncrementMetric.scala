@@ -93,7 +93,7 @@ object GpuIncrementMetric {
     GpuOverrides.expr[IncrementMetric](
       "Increments a Delta command metric by the number of rows evaluated",
       ExprChecks.unaryProject(TypeSig.all, TypeSig.all, TypeSig.all, TypeSig.all),
-      (inc, conf, parent, rule) => GpuIncrementMetricMeta(inc, conf, parent, rule))
+      GpuIncrementMetricMeta)
 }
 
 /**
@@ -178,5 +178,5 @@ object GpuConditionalIncrementMetric {
       ExprChecks.projectOnly(TypeSig.all, TypeSig.all,
         Seq(ParamCheck("child", TypeSig.all, TypeSig.all),
           ParamCheck("condition", TypeSig.BOOLEAN, TypeSig.BOOLEAN))),
-      (inc, conf, parent, rule) => GpuConditionalIncrementMetricMeta(inc, conf, parent, rule))
+      GpuConditionalIncrementMetricMeta)
 }

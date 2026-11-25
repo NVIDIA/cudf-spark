@@ -31,6 +31,36 @@ import org.apache.spark.sql.rapids.execution.python.GpuWindowInPandasExecMetaBas
  * Exec rules for ArrowWindowPythonExec (Spark 4.1+ - renamed from WindowInPandasExec).
  */
 object WindowInPandasExecShims {
+  private class WindowInPandasExecMetaImpl(
+      winPy: ArrowWindowPythonExec,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule)
+    extends GpuWindowInPandasExecMetaBase(winPy, conf, p, r) {
+    override val windowExpressions: Seq[BaseExprMeta[NamedExpression]] =
+      SparkShimImpl.getWindowExpressions(winPy).map(
+        GpuOverrides.wrapExpr(_, this.conf, Some(this)))
+
+    override def convertToGpu(): GpuExec = {
+      val windowExprGpu = windowExpressions.map(_.convertToGpu())
+      val partitionGpu = partitionSpec.map(_.convertToGpu())
+      GpuWindowInPandasExec(
+        windowExprGpu,
+        partitionGpu,
+        // leave ordering expression on the CPU, it's not used for GPU computation
+        winPy.orderSpec,
+        childPlans.head.convertIfNeeded()
+      )(winPy.partitionSpec)
+    }
+  }
+
+  private def createWindowInPandasExecMeta(
+      winPy: ArrowWindowPythonExec,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) =
+    new WindowInPandasExecMetaImpl(winPy, conf, p, r)
+
   val execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
     Seq(
       GpuOverrides.exec[ArrowWindowPythonExec](
@@ -40,23 +70,7 @@ object WindowInPandasExecShims {
         ExecChecks(
           (TypeSig.commonCudfTypes + TypeSig.ARRAY).nested(TypeSig.commonCudfTypes),
           TypeSig.all),
-        (winPy, conf, p, r) => new GpuWindowInPandasExecMetaBase(winPy, conf, p, r) {
-          override val windowExpressions: Seq[BaseExprMeta[NamedExpression]] =
-            SparkShimImpl.getWindowExpressions(winPy).map(
-              GpuOverrides.wrapExpr(_, this.conf, Some(this)))
-
-          override def convertToGpu(): GpuExec = {
-            val windowExprGpu = windowExpressions.map(_.convertToGpu())
-            val partitionGpu = partitionSpec.map(_.convertToGpu())
-            GpuWindowInPandasExec(
-              windowExprGpu,
-              partitionGpu,
-              // leave ordering expression on the CPU, it's not used for GPU computation
-              winPy.orderSpec,
-              childPlans.head.convertIfNeeded()
-            )(winPy.partitionSpec)
-          }
-        }).disabledByDefault("it only supports row based frame for now")
+        createWindowInPandasExecMeta).disabledByDefault("it only supports row based frame for now")
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
   }
 }
