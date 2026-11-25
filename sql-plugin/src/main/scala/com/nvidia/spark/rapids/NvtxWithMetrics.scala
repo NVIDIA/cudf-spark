@@ -134,13 +134,26 @@ class MetricRange(val metrics: Seq[GpuMetric], val excludeMetric: Seq[GpuMetric]
       if (singleActive) {
         singleMetric.deactivateTimer(time, excludeMetric)
       } else {
+        var firstFailure: Throwable = null
         var index = 0
         while (index < activatedMetrics.length) {
           val metric = activatedMetrics(index)
           if (metric != null) {
-            metric.deactivateTimer(time, excludeMetric)
+            try {
+              metric.deactivateTimer(time, excludeMetric)
+            } catch {
+              case t: Throwable =>
+                if (firstFailure == null) {
+                  firstFailure = t
+                } else if (firstFailure ne t) {
+                  firstFailure.addSuppressed(t)
+                }
+            }
           }
           index += 1
+        }
+        if (firstFailure != null) {
+          throw firstFailure
         }
       }
     }

@@ -59,6 +59,27 @@ class GpuMetricNvtxSuite extends AnyFunSuite {
     assert(nvtxCloses == 1)
   }
 
+  test("metric ranges finish cleanup and preserve failures in deactivation order") {
+    def failingMetric(failure: Throwable): GpuMetric = {
+      val metric = mock(classOf[GpuMetric])
+      when(metric.tryActivateTimer(Seq.empty)).thenReturn(true)
+      doThrow(failure).when(metric).deactivateTimer(anyLong(), any[Seq[GpuMetric]]())
+      metric
+    }
+
+    val first = new IllegalStateException("first")
+    val second = new IllegalStateException("second")
+    val third = new IllegalStateException("third")
+    val lastMetric = new LocalGpuMetric
+    val range = new MetricRange(Seq(failingMetric(first), failingMetric(first),
+      failingMetric(second), failingMetric(third), lastMetric))
+    assert(!lastMetric.tryActivateTimer(Seq.empty))
+    assert(intercept[IllegalStateException](range.close()) eq first)
+    assert(first.getSuppressed.toSeq == Seq(second, third))
+    assert(lastMetric.tryActivateTimer(Seq.empty))
+    lastMetric.deactivateTimer(0L, Seq.empty)
+  }
+
   test("NVTX remains active when every metric is disabled or already active") {
     withDebugNvtx { id =>
       val stack = RangeDebugger.threadLocalStack.get()
