@@ -91,8 +91,8 @@ final case class ScanHistoryKey(key: PlanKey, size: Long) {
     ScanExpansionRatio.sizeDimension -> DimValue.of(size))
 
   /**
-   * The tiers of the search list, most specific first, for one lookup: the store tries them in
-   * order and uses the first that has a reading.
+   * The tiers of the search list, most specific first, for one lookup: the store returns every
+   * tier's readings, each reading in the first tier that matches it, and the aggregate picks.
    *  1. the same plan and literals, the same size bucket;
    *  2. the same plan and literals, a neighbouring size bucket;
    *  3. the same plan, any literals, the same or a neighbouring size bucket.
@@ -226,18 +226,18 @@ class ScanSplitHeuristic(store: () => MetricStore) extends Logging {
   private[perf] def historyOf: MetricHistory = history
 
   /**
-   * The ratio of the first tier of the search list (see `ScanHistoryKey.searchList`) that has a
-   * reading, and the number of that tier (from 1). The store tries the tiers in order, so this is
-   * one request and one response. None if no tier has a reading, or the lookup failed.
+   * The ratio the aggregate chooses from the readings of every tier of the search list (see
+   * `ScanHistoryKey.searchList`), and the number of its tier (from 1). One request and one
+   * response. None if no tier gives a ratio, or the lookup failed.
    */
   private def lookup(
       key: ScanHistoryKey,
       nowMs: Long,
       policy: HistoryPolicy,
       limits: ScanSplitLimits): Option[(Double, Int)] =
-    history.lookup(key.searchList, nowMs, policy, Some(limits.maxAge), limits.aggregate.limit)
-      .flatMap(_.map { case (tier, summary) => (limits.aggregate.value(summary), tier + 1) })
-      .filter { case (ratio, _) => MetricHistory.isUsable(ratio) }
+    history.lookup(key.searchList, nowMs, policy, Some(limits.maxAge))
+      .flatMap(limits.aggregate.choose)
+      .collect { case (ratio, tier) if MetricHistory.isUsable(ratio) => (ratio, tier + 1) }
 
   /**
    * History-based or static, never a blend: the static split is `ctx.maxSplitBytes`, which is

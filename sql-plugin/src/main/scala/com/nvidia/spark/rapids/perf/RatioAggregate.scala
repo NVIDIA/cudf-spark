@@ -16,55 +16,64 @@
 
 package com.nvidia.spark.rapids.perf
 
-import com.nvidia.spark.history.Summary
-
 /**
- * Which readings of the winning tier size a scan, and how they become one ratio. The history store
- * answers a lookup with one summary of the winning tier's newest `limit` readings (count, mean,
- * minimum and maximum), so those are what can be offered.
+ * Which readings size a scan, and how they become one ratio. The history store answers a lookup
+ * with every tier's readings in the window, newest first, each reading in its closest tier; the
+ * aggregate picks a tier and combines its readings.
  *
  * @param name the name in the configuration
- * @param limit how many of the newest readings of the winning tier the store summarizes; 0 for
- *              all of them in the lookup window
  */
-sealed abstract class RatioAggregate(val name: String, val limit: Int) {
+sealed abstract class RatioAggregate(val name: String) {
 
-  /** The ratio of `summary`, the store's summary of the winning tier's readings. */
-  def value(summary: Summary): Double
+  /**
+   * The ratio and the index of the tier it comes from, or None for no ratio (the scan keeps
+   * Spark's split). By default the closest tier that has readings.
+   *
+   * @param tiers the readings of each tier, closest tier first, each tier newest first
+   */
+  final def choose(tiers: Seq[Seq[Double]]): Option[(Double, Int)] = {
+    val index = tiers.indexWhere(r => r.nonEmpty && accepts(r))
+    if (index < 0) None else Some((value(tiers(index)), index))
+  }
+
+  /** Whether one tier's readings, never empty, may give the ratio; by default any. */
+  protected def accepts(readings: Seq[Double]): Boolean = true
+
+  /** The ratio of one tier's readings, newest first; never empty. */
+  protected def value(readings: Seq[Double]): Double
 }
 
 object RatioAggregate {
 
-  /**
-   * The newest reading of the winning tier. The store reads only that one observation, so the
-   * lookup stays a bounded read.
-   */
-  case object Latest extends RatioAggregate("latest", 1) {
-    override def value(summary: Summary): Double = summary.mean()
+  /** The newest reading of the closest tier. */
+  case object Latest extends RatioAggregate("latest") {
+    override protected def value(readings: Seq[Double]): Double = readings.head
   }
 
-  /** The mean of every reading of the winning tier in the window. */
-  case object Mean extends RatioAggregate("mean", 0) {
-    override def value(summary: Summary): Double = summary.mean()
+  /** The mean of the closest tier's readings. */
+  case object Mean extends RatioAggregate("mean") {
+    override protected def value(readings: Seq[Double]): Double = mean(readings)
   }
 
   /** The smallest reading, which gives the largest split. */
-  case object Min extends RatioAggregate("min", 0) {
-    override def value(summary: Summary): Double = summary.min()
+  case object Min extends RatioAggregate("min") {
+    override protected def value(readings: Seq[Double]): Double = readings.min
   }
 
   /** The largest reading, which gives the smallest split, the cautious choice. */
-  case object Max extends RatioAggregate("max", 0) {
-    override def value(summary: Summary): Double = summary.max()
+  case object Max extends RatioAggregate("max") {
+    override protected def value(readings: Seq[Double]): Double = readings.max
   }
 
   /**
-   * The mean when the readings agree, every one within `MaxSpread` times the others; otherwise
-   * NaN, which the lookup drops, so a scan whose history disagrees keeps Spark's own split.
+   * The mean of the closest tier whose readings agree, every one within `MaxSpread` times the
+   * others; a single reading agrees. None when no tier agrees, so the scan keeps Spark's split.
    */
-  case object Consistent extends RatioAggregate("consistent", 0) {
-    override def value(summary: Summary): Double =
-      if (summary.max() <= MaxSpread * summary.min()) summary.mean() else Double.NaN
+  case object Consistent extends RatioAggregate("consistent") {
+    override protected def accepts(readings: Seq[Double]): Boolean =
+      readings.max <= MaxSpread * readings.min
+
+    override protected def value(readings: Seq[Double]): Double = mean(readings)
   }
 
   /** How far apart, as a factor, the readings `Consistent` averages may be. */
@@ -74,4 +83,6 @@ object RatioAggregate {
 
   /** Each aggregate by its name in the configuration, which only admits these names. */
   val byName: Map[String, RatioAggregate] = all.map(a => a.name -> a).toMap
+
+  private def mean(readings: Seq[Double]): Double = readings.sum / readings.size
 }

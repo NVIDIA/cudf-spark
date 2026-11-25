@@ -26,8 +26,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 /**
  * The scan split lookup against the real local provider and a real SQLite database, wired as the
- * driver plugin wires them: the tiers are one request, the store tries them in order, and a scan
- * finds the reading of an earlier scan.
+ * driver plugin wires them: the tiers are one request, the store returns every tier's readings,
+ * and a scan finds the reading of an earlier scan.
  */
 class ScanSplitLookupEndToEndSuite extends AnyFunSuite {
 
@@ -48,12 +48,14 @@ class ScanSplitLookupEndToEndSuite extends AnyFunSuite {
     /** The lookup as `fileSourceSplit` makes it: the tier number from 1 and the ratio, if any. */
     def find(key: PlanKey, size: Long,
         aggregate: RatioAggregate = RatioAggregate.Latest): Option[(Int, Double)] = {
-      val found = heuristic.historyOf.lookup(ScanHistoryKey(key, size).searchList,
-        System.currentTimeMillis(), Policy, Some(Duration.ofDays(7)), aggregate.limit) match {
-        case Some(Some((tier, summary))) => Some((tier + 1, aggregate.value(summary)))
-        case _ => None
-      }
-      found.filter { case (_, ratio) => MetricHistory.isUsable(ratio) }
+      readings(key, size).flatMap(aggregate.choose)
+        .collect { case (ratio, tier) if MetricHistory.isUsable(ratio) => (tier + 1, ratio) }
+    }
+
+    /** The readings of every tier of the search list, as the store returns them. */
+    def readings(key: PlanKey, size: Long): Option[IndexedSeq[IndexedSeq[Double]]] = {
+      heuristic.historyOf.lookup(ScanHistoryKey(key, size).searchList,
+        System.currentTimeMillis(), Policy, Some(Duration.ofDays(7)))
     }
 
     /** Records `ratio` (asynchronous in the store) and waits until its own key finds it. */
@@ -136,6 +138,21 @@ class ScanSplitLookupEndToEndSuite extends AnyFunSuite {
     }
   }
 
+  test("the store returns every tier's readings, each once, in its closest tier") {
+    withHistory { env =>
+      env.record(day1, Size, 4.0)
+      env.record(day1, Size + 1, 5.0)
+      env.record(day2, Size, 6.0)
+      env.record(day1, Size, 3.0)
+      // Tier 3 (any literals) also matches day 1's readings; each is returned in its closest tier.
+      assert(env.readings(day1, Size).contains(Vector(Vector(3.0, 4.0), Vector(5.0), Vector(6.0))))
+      assert(env.readings(PlanKey(plan, 21L), Size)
+        .contains(Vector(Vector(), Vector(), Vector(3.0, 6.0, 5.0, 4.0))))
+      assert(env.readings(PlanKey(plan ^ 1L, 21L), Size).contains(Vector(Vector(), Vector(),
+        Vector())))
+    }
+  }
+
   test("extreme hashes work in every tier: negative, minimum, maximum, NONE") {
     val keys = Seq(PlanKey(Long.MinValue, 19L), PlanKey(Long.MaxValue, -1L),
       PlanKey(-12345L, Long.MinValue), PlanKey(1L, PlanKey.NONE))
@@ -179,11 +196,21 @@ class ScanSplitLookupEndToEndSuite extends AnyFunSuite {
     }
   }
 
-  test("consistent: one reading is used as is, and only the winning tier counts") {
+  test("consistent: a farther tier that agrees is used when a closer one disagrees") {
+    withHistory { env =>
+      env.record(newDay, Size, 1.0)
+      env.record(newDay, Size, 4.0)
+      days(env, 2.0, 2.5)
+      assert(env.find(newDay, Size) == Some((1, 4.0)))
+      assert(env.find(newDay, Size, RatioAggregate.Consistent) == Some((3, 2.25)))
+    }
+  }
+
+  test("consistent: one reading is used as is, ahead of farther tiers") {
     withHistory { env =>
       days(env, 1.0, 8.0)
       env.record(newDay, Size, 2.0)
-      // Tier 1 has one reading; the disagreeing tier 3 readings are not looked at.
+      // Tier 1 has one reading, which agrees with itself; tier 3 disagrees.
       assert(env.find(newDay, Size, RatioAggregate.Consistent) == Some((1, 2.0)))
       assert(env.find(PlanKey(plan, 1000L), Size, RatioAggregate.Consistent).isEmpty)
     }

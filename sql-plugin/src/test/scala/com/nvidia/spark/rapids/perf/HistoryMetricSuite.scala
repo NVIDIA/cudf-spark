@@ -85,32 +85,44 @@ class HistoryMetricSuite extends AnyFunSuite {
     (store, history)
   }
 
-  test("one lookup tries the tiers in order and answers with the first that has a reading") {
+  test("one lookup returns every tier's readings, each in the first tier that matches it") {
     val now = System.currentTimeMillis()
     val (store, history) = withTwoReadings(now)
     val tiers = Seq(
       Map("table" -> is(DimValue.of("t")), "columns" -> is(DimValue.of(4L))),
       Map("table" -> is(DimValue.of("t")), "columns" -> oneOf(3L, 4L, 5L)),
       Map("table" -> is(DimValue.of("t"))))
-    val found = history.lookup(tiers, now, policy).get.get
-    assert(found._1 == 1, "the first tier matches nothing, the second matches both readings")
-    assert(found._2.count() == 2 && found._2.mean() == 3.0)
+    // The first tier matches nothing, the second both readings (newest first), so the third,
+    // which would match both too, gets none.
+    assert(history.lookup(tiers, now, policy).contains(Vector(Vector(), Vector(2.0, 4.0),
+      Vector())))
     assert(store.lookupCalls.size == 1 && store.summarizeCalls.isEmpty, "one request")
     // A tier that names every dimension finds only its own reading.
-    val exact = Seq(Map("table" -> is(DimValue.of("t")), "columns" -> is(DimValue.of(3L))))
-    assert(history.lookup(exact, now, policy).get.get._2.mean() == 4.0)
-    // A tier may leave a dimension out, and a limit keeps the newest readings.
-    val byTable = Seq(Map("table" -> is(DimValue.of("t"))))
-    val newest = history.lookup(byTable, now, policy, limit = 1).get.get._2
-    assert(newest.count() == 1 && newest.mean() == 2.0 && newest.lastObservedMs() == now - 1000)
-    assert(store.lookupCalls.last._1.limit() == 1)
+    val exact = Map("table" -> is(DimValue.of("t")), "columns" -> is(DimValue.of(3L)))
+    assert(history.lookup(Seq(exact), now, policy).contains(Vector(Vector(4.0))))
+    // A tier may leave a dimension out; a reading it takes is not repeated in a later tier.
+    val byTable = Map("table" -> is(DimValue.of("t")))
+    assert(history.lookup(Seq(byTable, exact), now, policy)
+      .contains(Vector(Vector(2.0, 4.0), Vector())))
     // No tier with a reading is an answer, not a failure.
-    assert(history.lookup(Seq(Map("table" -> is(DimValue.of("u")))), now, policy).contains(None))
+    assert(history.lookup(Seq(Map("table" -> is(DimValue.of("u")))), now, policy)
+      .contains(Vector(Vector())))
     assert(history.reportedReasons.isEmpty)
   }
 
+  test("a reading that is not a usable ratio is dropped from its tier") {
+    import com.nvidia.spark.history.{LookupResponse, Reading}
+    val now = System.currentTimeMillis()
+    val (store, history) = withTwoReadings(now)
+    store.lookupRaw = Some(java.util.Collections.singletonList(LookupResponse.ok(
+      java.util.Collections.singletonList(java.util.Arrays.asList(
+        Reading.of(-1.0, now), Reading.of(0.0, now), Reading.of(3.0, now - 1))))))
+    assert(history.lookup(Seq(Map("table" -> is(DimValue.of("t")))), now, policy)
+      .contains(Vector(Vector(3.0))))
+  }
+
   test("an error status, a malformed response or a store without lookup gives no answer") {
-    import com.nvidia.spark.history.{LookupResponse, Status}
+    import com.nvidia.spark.history.{LookupResponse, Reading, Status}
     val now = System.currentTimeMillis()
     val byTable = Seq(Map("table" -> is(DimValue.of("t"))))
     val unavailable = Status.of(Status.Code.UNAVAILABLE, "lookup is not supported")
@@ -121,7 +133,12 @@ class HistoryMetricSuite extends AnyFunSuite {
         s.lookupRaw =
           Some(java.util.Collections.singletonList(LookupResponse.error(unavailable))) },
       "lookup-malformed" -> { s: FakeMetricStore =>
-        s.lookupRaw = Some(java.util.Collections.emptyList[LookupResponse]()) })
+        s.lookupRaw = Some(java.util.Collections.emptyList[LookupResponse]()) },
+      // One list for each of two tiers, for a request of one tier.
+      "lookup-malformed" -> { s: FakeMetricStore =>
+        s.lookupRaw = Some(java.util.Collections.singletonList(LookupResponse.ok(
+          java.util.Arrays.asList(java.util.Collections.emptyList[Reading](),
+            java.util.Collections.emptyList[Reading]())))) })
     cases.foreach { case (reason, breakStore) =>
       val (store, history) = withTwoReadings(now)
       breakStore(store)

@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.history.{DimMatch, DimValue, LookupRequest, LookupResponse, MetricStore,
-  Observation, SchemaStatus, Status, Summary}
+  Observation, SchemaStatus, Status}
 import com.nvidia.spark.rapids.HistoryMetricsManager
 
 import org.apache.spark.internal.Logging
@@ -57,17 +57,16 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
 
   /**
    * One call to the store for several `tiers`, from the most specific to the most general (each
-   * names the dimensions that must match; one it leaves out matches any value): the first tier
-   * with a reading within `maxAge` answers, with a summary of its newest `limit` readings (all
-   * for 0). None if the lookup could not be made (untrackable tier, not declared, error);
-   * Some(None) if no tier had a reading; else Some(Some((tier index, summary))).
+   * names the dimensions that must match; one it leaves out matches any value): the readings of
+   * every tier within `maxAge`, newest first, each reading in the first tier that matches it.
+   * None if the lookup could not be made (untrackable tier, not declared, error); else one
+   * sequence per tier, empty when the tier has no usable reading.
    */
   def lookup(
       tiers: => Seq[Map[String, DimMatch]],
       nowMs: Long,
       policy: HistoryPolicy,
-      maxAge: Option[Duration] = None,
-      limit: Int = 0): Option[Option[(Int, Summary)]] = {
+      maxAge: Option[Duration] = None): Option[IndexedSeq[IndexedSeq[Double]]] = {
     checkedTiers(tiers).flatMap { all =>
       val current = store()
       if (!declaredIn(current, policy)) {
@@ -79,10 +78,9 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
             family.retention.storageRetention().toMillis)
           val builder = LookupRequest.builder(family.metric)
             .window(nowMs - ageMs, nowMs + 1)
-            .limit(limit)
           all.foreach(tier => builder.tier(tier.asJava))
           looked(current.lookup(Collections.singletonList(builder.build()),
-            policy.planningTimeout))
+            policy.planningTimeout), all.size)
         } catch {
           case t: Throwable if MetricHistory.isContained(t) =>
             abstain(s"lookup-${t.getClass.getName}", s"lookup failed (${t.getClass.getName})")
@@ -116,8 +114,10 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
   /** For tests. */
   private[perf] def reportedReasons: Set[String] = reported.asScala.toSet
 
-  /** The tier index and summary of a lookup's response; Some(None) if no tier had a reading. */
-  private def looked(responses: JList[LookupResponse]): Option[Option[(Int, Summary)]] = {
+  /** The usable readings of each of the `tierCount` tiers of a lookup's response. */
+  private def looked(
+      responses: JList[LookupResponse],
+      tierCount: Int): Option[IndexedSeq[IndexedSeq[Double]]] = {
     if (responses == null || responses.size() != 1 || responses.get(0) == null ||
         responses.get(0).status() == null) {
       abstain("lookup-malformed", "lookup returned a malformed response")
@@ -129,11 +129,15 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
         abstain(s"lookup-${status.code()}", s"lookup returned ${status.code()}")
         None
       } else {
-        // OK with no tier means no evidence, not an error.
-        Some(Option(response.summary()).filter(_ => response.tier() >= 0)
-          .filter(s => s.count() > 0 && MetricHistory.isUsable(s.mean()) &&
-            MetricHistory.isUsable(s.min()) && MetricHistory.isUsable(s.max()))
-          .map(s => (response.tier(), s)))
+        val read = response.tiers()
+        if (read.size() != tierCount) {
+          abstain("lookup-malformed", "lookup returned a malformed response")
+          None
+        } else {
+          // Empty tiers are no evidence, not an error.
+          Some(read.asScala.map(_.asScala.map(_.value())
+            .filter(MetricHistory.isUsable).toIndexedSeq).toIndexedSeq)
+        }
       }
     }
   }

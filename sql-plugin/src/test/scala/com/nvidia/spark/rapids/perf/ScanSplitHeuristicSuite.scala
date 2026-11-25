@@ -22,7 +22,7 @@ import java.util.Collections
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.history.{DimMatch, DimValue, LookupResponse, MetricStore, MetricStores,
-  Observation, SchemaStatus, Status}
+  Observation, Reading, SchemaStatus, Status}
 import com.nvidia.spark.rapids.LocalGpuMetric
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.scalatest.funsuite.AnyFunSuite
@@ -156,9 +156,6 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     // The window is the configured maximum age, 7 days by default.
     assert(request.fromMs() == now - Duration.ofDays(7).toMillis)
     assert(request.toMs() == now + 1)
-    // The default reads only the newest observation of the winning tier, also where the
-    // literals are left out.
-    assert(request.limit() == 1)
     assert(request.tiers().asScala == sized(scan).searchList.map(_.asJava))
   }
 
@@ -211,7 +208,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(decide(heuristic(new FakeMetricStore)) == Static)
   }
 
-  test("the aggregate combines the readings of the first tier that has any") {
+  test("the aggregate combines the readings of the closest tier that has any") {
     // Tier 3 holds three readings in three size buckets: 2, 4 and 6, the newest being 4.
     val store = new FakeMetricStore
     store.declare(Collections.singletonList(ScanExpansionRatio.schema), Duration.ofSeconds(1))
@@ -238,6 +235,48 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     val disagree = storeHolding(sized(scan) -> 1.0)
     disagree.record(observation(sized(scan), 4.0, now - 500))
     assert(decide(heuristic(disagree), limits = consistent) == Static)
+    // Exactly 3x apart still agrees: the mean of 1 and 3.
+    val boundary = storeHolding(sized(scan) -> 1.0)
+    boundary.record(observation(sized(scan), 3.0, now - 500))
+    assert(decide(heuristic(boundary), limits = consistent) == 512 * MiB)
+  }
+
+  test("every aggregate uses only the closest tier with readings, not the farther ones") {
+    // Tier 1 holds 2 and 4; tier 3 (another day) holds 8, which no aggregate may use.
+    val store = storeHolding(sized(scan) -> 2.0)
+    store.record(observation(sized(scan), 4.0, now - 500))
+    store.record(observation(sized(nextDay), 8.0, now - 100))
+    Seq(RatioAggregate.Latest -> 256 * MiB, RatioAggregate.Mean -> (GiB / 3.0).toLong,
+        RatioAggregate.Min -> 512 * MiB, RatioAggregate.Max -> 256 * MiB,
+        RatioAggregate.Consistent -> (GiB / 3.0).toLong).foreach {
+      case (aggregate, expected) =>
+        assert(decide(heuristic(store), limits = Limits.copy(aggregate = aggregate)) == expected,
+          aggregate.name)
+    }
+  }
+
+  test("a closer tier whose readings are all unusable falls through to the next with readings") {
+    val store = storeWith(4.0 -> (now - 1000))
+    store.lookupRaw = Some(Collections.singletonList(LookupResponse.ok(java.util.Arrays.asList(
+      java.util.Arrays.asList(Reading.of(-1.0, now - 10), Reading.of(0.0, now - 20)),
+      Collections.emptyList[Reading](),
+      Collections.singletonList(Reading.of(2.0, now - 30))))))
+    Seq(RatioAggregate.Latest, RatioAggregate.Consistent).foreach { aggregate =>
+      assert(decide(heuristic(store), limits = Limits.copy(aggregate = aggregate)) == 512 * MiB,
+        aggregate.name)
+    }
+  }
+
+  test("consistent passes over a closer tier that disagrees for a farther one that agrees") {
+    // Tier 1 holds 1 and 4, more than 3x apart; tier 3 (another day) holds 2 and 2.5.
+    val store = storeHolding(sized(scan) -> 1.0)
+    store.record(observation(sized(scan), 4.0, now - 500))
+    store.record(observation(sized(nextDay), 2.0, now - 300))
+    store.record(observation(sized(nextDay), 2.5, now - 200))
+    assert(decide(heuristic(store), limits = Limits.copy(aggregate = RatioAggregate.Consistent)) ==
+      (GiB / 2.25).toLong)
+    // latest keeps the closest tier: its newest reading, 4.
+    assert(decide(heuristic(store)) == 256 * MiB)
   }
 
   test("disabled heuristic never touches the store") {
@@ -292,9 +331,14 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
   }
 
   test("malformed or failing lookup: no decision") {
+    def okWith(tiers: Int): LookupResponse =
+      LookupResponse.ok(Seq.fill(tiers)(Collections.emptyList[Reading]()).asJava)
     val malformed: Seq[java.util.List[LookupResponse]] = Seq(
       Collections.emptyList[LookupResponse](),
-      java.util.Arrays.asList(LookupResponse.none(), LookupResponse.none()),
+      // Two responses to one request.
+      java.util.Arrays.asList(okWith(3), okWith(3)),
+      // One list for a request of three tiers.
+      Collections.singletonList(okWith(1)),
       null)
     malformed.foreach { responses =>
       val store = storeWith(4.0 -> (now - 1000))

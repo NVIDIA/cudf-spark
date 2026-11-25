@@ -39,11 +39,16 @@ the history metrics API (`MetricStores.current()`) only; the driver plugin's
     two histories.
 - **Decide**: one lookup in the store with three tiers (the same plan and literals and size; the
   same plan and literals and a neighbouring size; the same plan, any literals, a neighbouring or
-  the same size). The first tier with a reading (at most `maxAgeDays`, default 7, old) is combined
-  by `aggregate` (default: the latest) and sets
+  the same size). The store returns every tier's readings (at most `maxAgeDays`, default 7, old),
+  each in its closest tier. `aggregate` (default: the latest) picks: `latest`, `mean`, `min` and
+  `max` the closest tier with readings, `consistent` the closest tier whose readings are within 3x
+  of each other (else the scan keeps Spark's split). The ratio sets
   `split = targetBatchBytes / ratio`, clamped to `[minBytes, min(maxBytes, listedBytes / minPartitionNum)]`
   (defaults 64 MiB and 4 GiB). If `listedBytes / minPartitionNum` is below `minBytes`, the scan
-  keeps Spark's split.
+  keeps Spark's split. Known limitation: each lookup reads every reading of the plan in the
+  window, with no cap. A query planned very often (for example a micro-batch every few seconds)
+  builds up many readings; a lookup that runs past `planningTimeoutMillis` gives no ratio, and the
+  scan keeps Spark's split.
 - **minPartitionNum**: resolved as Spark does for file scans: `spark.sql.files.minPartitionNum`,
   else `spark.sql.leafNodeDefaultParallelism`, else the SparkContext's default parallelism (the
   cores registered when the query plans, if nothing is configured).

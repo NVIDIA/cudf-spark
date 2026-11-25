@@ -470,12 +470,11 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .doc("How the recorded decode-expansion ratios that a scan finds are combined into the one " +
       "that sizes its splits: latest, mean, min, max or consistent. A scan looks for earlier " +
       "scans that read the same columns and filters, with the same literals and about the same " +
-      "listed size, then with any literals, and uses the readings of the first search step " +
-      "that has any. latest uses the newest reading and reads only that from the store; mean, " +
-      "min, max and consistent read every reading within the maximum age. A larger ratio gives " +
-      "a smaller split, so max is the most cautious choice. consistent uses the mean when the " +
-      "readings are within a factor of three of each other; otherwise the scan keeps its " +
-      "static split.")
+      "listed size, then with any literals. latest, mean, min and max use the closest of these " +
+      "search steps that has readings: latest its newest reading, the others every reading " +
+      "within the maximum age. consistent uses the mean of the closest step whose readings are " +
+      "within a factor of three of each other; if none is, the scan keeps its static split. A " +
+      "larger ratio gives a smaller split, so max is the most cautious choice.")
     .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
     .stringConf
     .transform(_.toLowerCase(java.util.Locale.ROOT))
