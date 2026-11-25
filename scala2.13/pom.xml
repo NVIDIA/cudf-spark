@@ -1231,7 +1231,7 @@
         <delta42x.version>4.2.0</delta42x.version>
         <delta43x.version>4.3.0</delta43x.version>
         <!-- start dyn.shim properties -->
-        <dyn.shim.excluded.releases/>
+        <dyn.shim.excluded.releases>350db143</dyn.shim.excluded.releases>
         <!-- end dyn.shim properties -->
 
         <rapids.module>.</rapids.module>
@@ -1421,7 +1421,8 @@
         </premergeUTF8.buildvers>
         <premergeScala213.buildvers>
             350,
-            401
+            401,
+            420
         </premergeScala213.buildvers>
         <jdk11.buildvers>
             331,
