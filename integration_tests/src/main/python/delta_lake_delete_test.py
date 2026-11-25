@@ -555,7 +555,7 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
         # One reduce task builds and persists all the deletion vectors.
         "spark.sql.shuffle.partitions": "1",
         # AQE is on: with it off the plan fails on Delta's own file lookup join, with or without
-        # the concurrent DV writer.
+        # the concurrent DV writer. See https://github.com/NVIDIA/cudf-spark/issues/17147.
         "spark.sql.adaptive.enabled": "true"})
     partition_expr = "IF(id % 2 = 0, 'x y', 'p%q')"
     def setup(spark):
