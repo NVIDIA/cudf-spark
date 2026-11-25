@@ -1879,10 +1879,7 @@ def test_delta_overwrite_dynamic_missing_clauses(spark_tmp_table_factory, spark_
 # tracked by issue #11169. Older shims resolve the same SQL through V2
 # OverwriteByExpressionExecV1 and can be intercepted by GpuOverwriteByExpressionExecV1.
 @pytest.mark.xfail(is_databricks173_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
-@pytest.mark.parametrize("mode", [
-    "STATIC",
-    pytest.param("DYNAMIC", marks=pytest.mark.xfail(condition=is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/9543"))
-], ids=idfn)
+@pytest.mark.parametrize("mode", ["STATIC", "DYNAMIC"], ids=idfn)
 @pytest.mark.parametrize("clause", ["PARTITION (id, p = 2)", "PARTITION (p = 2, id)", "PARTITION (p = 2)"])
 def test_delta_overwrite_mixed_clause(spark_tmp_table_factory, spark_tmp_path, mode, clause):
     data_path = spark_tmp_path + "/DELTA_DATA"

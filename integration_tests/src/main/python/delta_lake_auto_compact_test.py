@@ -24,11 +24,6 @@ from spark_session import is_spark_353_or_later, is_databricks_runtime, \
 _conf = {'spark.rapids.sql.explain': 'ALL',
          'spark.databricks.delta.autoCompact.minNumFiles': 3}  # Num files before compaction.
 
-_auto_compact_min_files_deletion_vector_values = deletion_vector_values \
-    if is_databricks173_or_later() else deletion_vector_values_with_xfail_reasons(
-        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12042")
-
-
 def write_to_delta(enable_deletion_vectors, num_rows=30, is_partitioned=False, num_writes=3):
     """
     Returns bound function that writes to a delta table.
@@ -258,9 +253,7 @@ def test_auto_compact_disabled(spark_tmp_path, auto_compact_conf, enable_deletio
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Apache Spark 3.5.3+")
-@pytest.mark.parametrize("enable_deletion_vectors",
-                         _auto_compact_min_files_deletion_vector_values,
-                         ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_auto_compact_min_num_files(spark_tmp_path, enable_deletion_vectors):
     """
     This test verifies that auto-compaction honours the minNumFiles setting.
