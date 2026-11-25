@@ -148,6 +148,17 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     }
   }
 
+  test("only decimal needs a ROW_NULL status field of the status type") {
+    // The decimal decoder reads ROW_NULL; no other target does.
+    Seq(classOf[MissingRowNullStatus], classOf[WrongRowNullStatus]).foreach { status =>
+      withClue(status.getSimpleName) {
+        assert(fixtureApis())
+        assert(!fixtureApis(status = status))
+        assert(fixtureApis(status = status, check = GpuVariantExtraction.hasRequiredApis))
+      }
+    }
+  }
+
   test("status extraction capability rejects missing, legacy, and incomplete APIs") {
     assert(GpuVariantExtraction.hasRequiredApis(loadClass))
     assert(!GpuVariantExtraction.hasRequiredApis(_ => throw new ClassNotFoundException))

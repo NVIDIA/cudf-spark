@@ -56,6 +56,9 @@ private[rapids] object GpuVariantExtraction {
       } else {
         Seq.empty
       }
+      // Status constants read by the coverage check; the decimal decoder also reads ROW_NULL.
+      val statusFields = Seq("VARIANT_NULL", "MALFORMED_VARIANT") ++
+        (if (statusCastRequired) Seq("ROW_NULL") else Seq.empty)
       extract.getReturnType == result &&
         cast.getReturnType == classOf[ColumnVector] &&
         statusCast.forall(_.getReturnType == result) &&
@@ -65,8 +68,7 @@ private[rapids] object GpuVariantExtraction {
         result.getMethod("getStatus").getReturnType == classOf[ColumnVector] &&
         result.getMethod("close").getReturnType == java.lang.Void.TYPE &&
         status.getMethod("getNativeId").getReturnType == java.lang.Integer.TYPE &&
-        status.getField("VARIANT_NULL").getType == status &&
-        status.getField("MALFORMED_VARIANT").getType == status
+        statusFields.forall(status.getField(_).getType == status)
     } catch {
       case _: ClassNotFoundException | _: NoSuchMethodException | _: NoSuchFieldException |
           _: LinkageError => false

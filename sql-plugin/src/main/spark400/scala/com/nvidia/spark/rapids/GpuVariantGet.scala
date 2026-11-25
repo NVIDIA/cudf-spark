@@ -75,8 +75,8 @@ case class GpuVariantGetMeta(
         "(VariantUtils.getVariantFieldValueWithStatus and castVariantValue)")
     } else if (expr.targetType.isInstanceOf[DecimalType] &&
         !GpuVariantGet.isVariantDecimalCudfAvailable) {
-      willNotWorkOnGpu("decimal targets need VariantUtils.castVariantValueWithStatus, " +
-        "which this cuDF Java lacks")
+      willNotWorkOnGpu("decimal targets need VariantUtils.castVariantValueWithStatus and " +
+        "VariantOperationStatus.ROW_NULL, which this cuDF Java lacks")
     }
 
     if (!conf.isCpuBridgeEnabled) {
