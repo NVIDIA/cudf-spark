@@ -34,35 +34,48 @@ def snapshot_candidates(url, artifact, version):
     return candidates
 
 
-def tracked_coordinates(pom):
+def tracked_groups(pom):
     props = pom.find("{*}properties")
-    coordinates = [(props.findtext(f"{{*}}{name}.artifactId"), props.findtext(f"{{*}}{name}.version"))
-                   for name in ("cudf-spark-jni", "cudf-spark-private")]
+    groups = []
+    for name in ("cudf-spark-jni", "cudf-spark-private"):
+        artifact = props.findtext(f"{{*}}{name}.artifactId")
+        version = props.findtext(f"{{*}}{name}.version")
+        groups.append(([artifact], version))
     history_version = props.findtext("{*}history-metrics.version")
     if history_version:
-        coordinates.append(("cudf-spark-history-metrics-local", history_version))
-    for artifact, version in coordinates:
-        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", part or "") for part in (artifact, version)):
-            raise ValueError(f"Invalid upstream coordinates in effective POM: {artifact}:{version}")
-    return coordinates
+        included = pom.findtext(
+            "{*}build/{*}plugins/{*}plugin[{*}artifactId='maven-dependency-plugin']/"
+            "{*}executions/{*}execution[{*}id='unpack-history-metrics-at-root']/"
+            "{*}configuration/{*}includeArtifactIds", default="")
+        artifacts = sorted({name for name in map(str.strip, included.split(","))
+                            if name.startswith("cudf-spark-history-metrics-")})
+        if not artifacts:
+            raise ValueError("No history-metrics artifacts listed in dist's unpack-history-metrics-at-root execution")
+        groups.append((artifacts, history_version))
+    for artifacts, version in groups:
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", part or "") for part in [*artifacts, version]):
+            raise ValueError(f"Invalid upstream coordinates in effective POM: {artifacts}:{version}")
+    return groups
 
 
 def discard_restored_snapshots(pom, home, current="", prefix="", restored=""):
-    # Only keys in our verified format carry provenance. The digest covers the
-    # coordinate as well as the publication, so it cannot match a different GAV.
+    # Each digest identifies the coordinates and publications of an entire group.
     fingerprint = r"s1(?:\.[0-9a-f]{64}){2,3}"
     previous = re.fullmatch(re.escape(prefix) + f"({fingerprint})-" +
                             r"[0-9a-f]{64}-(?:verify|premerge-[A-Za-z0-9._+-]+-[0-9a-f]{64})", restored)
     proven = set(previous[1].split(".")[1:]) if prefix and previous else set()
-    coordinates = tracked_coordinates(pom)
+    groups = tracked_groups(pom)
     current_ids = current.split(".")[1:] if re.fullmatch(fingerprint, current) else []
-    group = home.resolve() / ".m2/repository/com/nvidia"
-    for index, (artifact, version) in enumerate(coordinates):
-        if version.endswith("-SNAPSHOT"):
-            directory = group / artifact / version
+    group_dir = home.resolve() / ".m2/repository/com/nvidia"
+    for index, (artifacts, version) in enumerate(groups):
+        if not version.endswith("-SNAPSHOT"):
+            continue
+        keep = len(current_ids) == len(groups) and current_ids[index] in proven
+        for artifact in artifacts:
+            directory = group_dir / artifact / version
             if directory.resolve() != directory:
                 raise ValueError(f"Refusing to clean a symlinked Maven path: {directory}")
-            if len(current_ids) == len(coordinates) and current_ids[index] in proven:
+            if keep:
                 continue
             if directory.exists():
                 if os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
@@ -73,16 +86,18 @@ def discard_restored_snapshots(pom, home, current="", prefix="", restored=""):
 def dependency_key(pom, resolve=snapshot_candidates):
     snapshots = next((repo.findtext("{*}url") for repo in pom.findall("{*}repositories/{*}repository")
                       if repo.findtext("{*}id") == "snapshots-repo"), None)
-    # The slots are JNI, private, and optional history-metrics, in tracked_coordinates order.
+    # Keep one digest per group so the cache key stays bounded and unchanged groups can be reused.
     identities = ["s1"]
-    for artifact, version in tracked_coordinates(pom):
-        candidates = []
-        if version.endswith("-SNAPSHOT"):
-            if not snapshots:
-                raise ValueError(f"No snapshots-repo configured for {artifact}:{version}")
-            candidates = resolve(snapshots, artifact, version)
-        publication = [artifact, version, snapshots if candidates else None, candidates]
-        identities.append(hashlib.sha256(json.dumps(publication).encode()).hexdigest())
+    for artifacts, version in tracked_groups(pom):
+        is_snapshot = version.endswith("-SNAPSHOT")
+        if is_snapshot and not snapshots:
+            raise ValueError(f"No snapshots-repo configured for {artifacts}:{version}")
+        digest = hashlib.sha256()
+        for artifact in artifacts:
+            candidates = resolve(snapshots, artifact, version) if is_snapshot else []
+            publication = [artifact, version, snapshots if candidates else None, candidates]
+            digest.update(json.dumps(publication).encode())
+        identities.append(digest.hexdigest())
     return ".".join(identities)
 
 
@@ -108,7 +123,8 @@ if __name__ == "__main__":
         if actual != expected:
             sys.exit(f"Upstream SNAPSHOTs changed during warm-up ({expected} -> {actual}); not saving Maven cache")
         sys.exit(0)
-    pom_file = "pom.xml" if args.scala == "2.12" else "scala2.13/pom.xml"
+    # dist inherits the upstream versions and declares which history-metrics artifacts are packaged.
+    pom_file = "dist/pom.xml" if args.scala == "2.12" else "scala2.13/dist/pom.xml"
     with tempfile.TemporaryDirectory() as temp:
         effective = args.keep_model or Path(temp) / "effective.xml"
         subprocess.run(["mvn", "-B", "-q", "-N", "-f", pom_file,

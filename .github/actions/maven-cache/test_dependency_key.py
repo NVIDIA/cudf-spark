@@ -1,6 +1,8 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
+import json
 import os
 from pathlib import Path
 import runpy
@@ -17,6 +19,16 @@ SNAPSHOT_VERSION = "2.0.0-SNAPSHOT"
 helper = runpy.run_path(str(Path(__file__).with_name("dependency-key.py")))
 
 
+def packaged_history_modules(pom_path="dist/pom.xml"):
+    pom = ET.parse(Path(__file__).resolve().parents[3] / pom_path)
+    query = ".//execution[id='unpack-history-metrics-at-root']/configuration/includeArtifactIds"
+    artifacts = pom.findtext(query, namespaces={"": "http://maven.apache.org/POM/4.0.0"})
+    if not artifacts:
+        raise ValueError(f"Missing includeArtifactIds for unpack-history-metrics-at-root in {pom_path}")
+    names = (name.strip() for name in artifacts.split(","))
+    return [name for name in names if name.startswith("cudf-spark-history-metrics-")]
+
+
 def model(jni=SNAPSHOT_VERSION, private="1.0.0", scala="2.13"):
     return ET.fromstring(f"""<project xmlns="http://maven.apache.org/POM/4.0.0"><properties>
         <cudf-spark-jni.artifactId>jni</cudf-spark-jni.artifactId>
@@ -25,6 +37,15 @@ def model(jni=SNAPSHOT_VERSION, private="1.0.0", scala="2.13"):
         <cudf-spark-private.version>{private}</cudf-spark-private.version>
         </properties><repositories><repository><id>snapshots-repo</id>
         <url>https://example.org/snapshots</url></repository></repositories></project>""")
+
+
+def add_history(pom, version, modules):
+    ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = version
+    pom.append(ET.fromstring(f"""<build xmlns="http://maven.apache.org/POM/4.0.0"><plugins><plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-dependency-plugin</artifactId>
+        <executions><execution><id>unpack-history-metrics-at-root</id>
+        <configuration><includeArtifactIds>{",".join(modules)}</includeArtifactIds></configuration>
+        </execution></executions></plugin></plugins></build>"""))
 
 
 def metadata(entries):
@@ -55,7 +76,7 @@ class DependencyKeyTest(unittest.TestCase):
 
     def test_cleanup_from_fingerprinted_model_only_removes_tracked_snapshots(self):
         pom = model()
-        ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "1-SNAPSHOT"
+        add_history(pom, "1-SNAPSHOT", packaged_history_modules())
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             group = home / ".m2/repository/com/nvidia"
@@ -104,7 +125,7 @@ class DependencyKeyTest(unittest.TestCase):
 
     def test_restore_keeps_only_individually_verified_snapshots(self):
         pom = model(private=SNAPSHOT_VERSION)
-        ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "2.0.0"
+        add_history(pom, "2.0.0", packaged_history_modules())
         publications = {"jni": "jni-1", "private_2.13": "private-1"}
         def key():
             return helper["dependency_key"](pom, lambda repo, artifact, version: publications[artifact])
@@ -189,15 +210,77 @@ class DependencyKeyTest(unittest.TestCase):
         candidates["jni"] = "build-2"
         self.assertNotEqual(after_private, key(both, resolve))
 
-    def test_optional_history_metrics_snapshot(self):
-        pom = model(jni="2.0.0")
-        prop = ET.SubElement(pom.find("{*}properties"), "history-metrics.version")
-        prop.text = SNAPSHOT_VERSION
-        resolver = Mock(side_effect=["history-1", "history-2"])
+    def test_each_history_module_changes_only_the_history_slot(self):
+        history_modules = packaged_history_modules()
+        self.assertCountEqual(history_modules, packaged_history_modules("scala2.13/dist/pom.xml"))
+        pom = model(private=SNAPSHOT_VERSION)
         key = helper["dependency_key"]
-        self.assertNotEqual(key(pom, resolver), key(pom, resolver))
-        resolver.assert_called_with("https://example.org/snapshots", "cudf-spark-history-metrics-local",
-                                    SNAPSHOT_VERSION)
+        no_history = key(pom, lambda *_: "build-1")
+        packaged = model(private=SNAPSHOT_VERSION)
+        add_history(packaged, SNAPSHOT_VERSION, history_modules)
+        original = key(packaged, lambda *_: "build-1")
+        # A new module in the packaging input must be tracked without editing the cache helper.
+        history_modules.append("cudf-spark-history-metrics-new-module")
+        add_history(pom, SNAPSHOT_VERSION, [*history_modules, "sqlite-jdbc"])
+        publications = dict.fromkeys(("jni", "private_2.13", *history_modules), "build-1")
+        resolve = Mock(side_effect=lambda repo, artifact, version: publications[artifact])
+        baseline = key(pom, resolve).split(".")
+        self.assertEqual(baseline[:-1], no_history.split("."))
+        self.assertRegex(baseline[-1], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(baseline[-1], original.split(".")[-1])
+        initial_requests = [call.args for call in resolve.call_args_list]
+        for module in history_modules:
+            with self.subTest(module=module), patch.dict(publications, {module: "build-2"}):
+                changed = key(pom, resolve).split(".")
+                self.assertEqual(changed[:-1], baseline[:-1])
+                self.assertNotEqual(changed[-1], baseline[-1])
+        self.assertCountEqual(initial_requests, [("https://example.org/snapshots", name, SNAPSHOT_VERSION)
+                                                for name in publications])
+
+    def test_history_version_requires_packaged_history_artifacts(self):
+        for missing_execution, artifacts in [(True, []), (False, []), (False, ["sqlite-jdbc"])]:
+            with self.subTest(missing_execution=missing_execution, artifacts=artifacts):
+                pom = model(jni="2.0.0")
+                add_history(pom, SNAPSHOT_VERSION, artifacts)
+                if missing_execution:
+                    pom.remove(pom.find("{*}build"))
+                with self.assertRaises(ValueError):
+                    helper["dependency_key"](pom, Mock(side_effect=AssertionError("unexpected fetch")))
+
+    def test_restore_refreshes_the_history_group_and_keeps_other_snapshots(self):
+        history_modules = packaged_history_modules()
+        pom = model(private=SNAPSHOT_VERSION)
+        add_history(pom, SNAPSHOT_VERSION, history_modules)
+        key = helper["dependency_key"]
+        before = key(pom, lambda *_: "build-1")
+        updated = {"cudf-spark-history-metrics-provider-runtime": "build-2"}
+        after = key(pom, lambda repo, artifact, version: updated.get(artifact, "build-1"))
+        # Previous s1 keys stored one coordinate per slot, with only local identifying history.
+        legacy_slots = ["s1"]
+        for name in ("jni", "private_2.13", "cudf-spark-history-metrics-local"):
+            publication = [name, SNAPSHOT_VERSION, "https://example.org/snapshots", "build-1"]
+            legacy_slots.append(hashlib.sha256(json.dumps(publication).encode()).hexdigest())
+        legacy = ".".join(legacy_slots)
+        prefix = "spark-maven-Linux-X64-2.13-main-"
+        cases = [(before, before, True), (before, after, False), (legacy, before, False)]
+        for restored, current, keep_history in cases:
+            with self.subTest(restored=restored, current=current), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                group = home / ".m2/repository/com/nvidia"
+                jars = {}
+                for name in ("jni", "private_2.13", *history_modules):
+                    jar = group / name / SNAPSHOT_VERSION / "artifact.jar"
+                    jar.parent.mkdir(parents=True)
+                    jar.write_bytes(b"cached JAR")
+                    jars[name] = jar
+                restored_key = f"{prefix}{restored}-{'a' * 64}-verify"
+                with patch.dict(os.environ, RUNNER_ENVIRONMENT="github-hosted"):
+                    helper["discard_restored_snapshots"](pom, home, current, prefix, restored_key)
+                for name, jar in jars.items():
+                    if name in history_modules and not keep_history:
+                        self.assertFalse(jar.parent.exists(), name)
+                    else:
+                        self.assertEqual(jar.read_bytes(), b"cached JAR", name)
 
     def test_classifier_publication_not_xml_order_changes_the_key(self):
         entries = [("cuda12", "build-1"), ("cuda13", "build-1")]
