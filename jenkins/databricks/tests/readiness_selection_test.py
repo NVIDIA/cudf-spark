@@ -48,6 +48,8 @@ class ReadinessSelectionTest(unittest.TestCase):
             'exit 2\n')
         submit.chmod(0o755)
         (spark / "bin/python").symlink_to(sys.executable)
+        # The launcher checks for zip even though this fixture has no archives to edit.
+        (spark / "bin/zip").symlink_to("/bin/false")
         (jar_dir / "rapids-4-spark_2.12-test.jar").touch()
         (jar_dir / "rapids-4-spark-integration-tests_2.12-test-spark350db143.jar").touch()
         env.update(SPARK_HOME=str(spark), SPARK_SHIM_VER="spark350db143", TEST_PARALLEL="1",
