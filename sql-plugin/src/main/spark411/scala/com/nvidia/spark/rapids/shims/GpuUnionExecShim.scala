@@ -27,7 +27,7 @@ import com.nvidia.spark.rapids.GpuMetric
 
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap, Expression}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioningLike, Partitioning, SinglePartition, UnknownPartitioning}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.internal.SQLConf
@@ -67,9 +67,7 @@ object GpuUnionExecShim {
   private def prepareOutputPartitioning(children: Seq[SparkPlan]): Seq[Partitioning] = {
     val firstAttrs = children.head.output
     val attributesMap = children.tail.map(_.output).map { otherAttrs =>
-      otherAttrs.zip(firstAttrs).map { case (attr, firstAttr) =>
-        attr -> firstAttr
-      }.toMap
+      AttributeMap(otherAttrs.zip(firstAttrs))
     }
 
     val partitionings = children.map(_.outputPartitioning)
