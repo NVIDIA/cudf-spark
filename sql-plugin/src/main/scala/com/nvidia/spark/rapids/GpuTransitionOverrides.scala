@@ -830,10 +830,22 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
    * match any other previously seen GPU broadcasts with the same CPU plan.
    */
   private def fixupAdaptiveExchangeReuse(p: SparkPlan): SparkPlan = {
+    // The cache is shared by every plan in the JVM. A reused exchange must point at an exchange
+    // in this plan, because rules that rewrite a plan on its own, such as Databricks'
+    // ReuseExchangeAndSubquery, look the original up in that same plan and fail with
+    // "key not found" when it is somewhere else.
+    lazy val exchangesInPlan = {
+      val found = java.util.Collections.newSetFromMap(
+        new java.util.IdentityHashMap[SparkPlan, java.lang.Boolean]())
+      p.foreach(found.add)
+      found
+    }
+
     def doFixup(plan: SparkPlan): SparkPlan = {
       plan.transformUp {
         case g: GpuBroadcastExchangeExec =>
-          ExchangeMappingCache.findGpuExchangeReplacement(g.cpuCanonical).map { other =>
+          ExchangeMappingCache.findGpuExchangeReplacement(g.cpuCanonical)
+              .filter(other => exchangesInPlan.contains(other)).map { other =>
             if (other eq g) {
               g
             } else {
