@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids
 
-import java.io.{ByteArrayInputStream, InputStream}
+import java.io.{ByteArrayInputStream, InputStream, IOException}
 import java.util.concurrent.{BlockingQueue, CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -35,7 +35,7 @@ import org.apache.spark.serializer.{DeserializationStream, SerializerInstance}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.storage.{BlockId, RapidsShuffleBlockFetcherIterator, ShuffleBlockId}
 
-/** Exercise admission independently of network delivery and native serialization. */
+/** Exercise lazy initialization independently of network delivery and native serialization. */
 class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
   private def field(obj: AnyRef, name: String): java.lang.reflect.Field = {
     val fields = Iterator.iterate[Class[_]](obj.getClass)(_.getSuperclass)
@@ -56,8 +56,9 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     try RapidsShuffleInternalManagerBase.stopThreadPool() finally super.afterEach()
   }
 
-  private class Fixture(counts: Seq[Int], cap: Int, limit: Long = 1024,
-      gate: Option[CountDownLatch] = None, entered: Option[CountDownLatch] = None)
+  private class Fixture(counts: Seq[Int], limit: Long = 1024,
+      gate: Option[CountDownLatch] = None, entered: Option[CountDownLatch] = None,
+      fetchFailure: Option[IOException] = None, headerFailure: Option[IOException] = None)
       extends AutoCloseable {
     val context = TaskContext.empty()
     // Constructor dependencies are irrelevant to the nested iterator. Keep its real methods.
@@ -73,20 +74,30 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     val created = new AtomicInteger
     val closed = new AtomicInteger
     val workerFinished = new CountDownLatch(1)
-    val streams = counts.map(_ => new ByteArrayInputStream(Array.emptyByteArray))
-    private var fetched = 0
+    val openStreams = new AtomicInteger
+    val streams = counts.map(_ => new ByteArrayInputStream(Array.emptyByteArray) {
+      private var closed = false
+      override def close(): Unit = synchronized {
+        if (!closed) { closed = true; openStreams.decrementAndGet() }
+      }
+    })
+    @volatile private var fetched = 0
+    def fetchedCount: Int = fetched
     private val fetcher = mock(classOf[RapidsShuffleBlockFetcherIterator])
     when(fetcher.hasNext).thenAnswer(_ => Boolean.box(fetched < counts.size))
     when(fetcher.resultCount).thenAnswer(_ => Int.box(counts.size - fetched))
     when(fetcher.next()).thenAnswer { _ =>
+      fetchFailure.foreach(throw _)
       val index = fetched
       fetched += 1
+      openStreams.incrementAndGet()
       (ShuffleBlockId(1, index, 0): BlockId, streams(index): InputStream)
     }
     private val serializer = mock(classOf[GpuColumnarBatchSerializer])
     private val instance = mock(classOf[SerializerInstance])
     when(serializer.newInstance()).thenReturn(instance)
     when(instance.deserializeStream(any(classOf[InputStream]))).thenAnswer { invocation =>
+      assert(TaskContext.get() eq context)
       val stream = invocation.getArgument[InputStream](0)
       val index = streams.indexOf(stream)
       // Both real serialized iterators register stream closure at task completion.
@@ -94,7 +105,10 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
       var consumed = 0
       val batches = new BaseSerializedTableIterator {
         override def hasNext: Boolean = consumed < counts(index)
-        override def peekNextBatchSize(): Option[Long] = if (hasNext) Some(128L) else None
+        override def peekNextBatchSize(): Option[Long] = {
+          headerFailure.foreach(throw _)
+          if (hasNext) Some(128L) else None
+        }
         override def next(): (Int, ColumnarBatch) = {
           entered.foreach(_.countDown())
           gate.foreach { latch =>
@@ -125,7 +139,7 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
       when(ds.asKeyValueIterator).thenReturn(batches.asInstanceOf[Iterator[(Any, Any)]])
       ds
     }
-    val iterator = new reader.RapidsShuffleThreadedBlockIterator(fetcher, serializer, cap)
+    val iterator = new reader.RapidsShuffleThreadedBlockIterator(fetcher, serializer)
 
     def prime(): Unit = {
       val method = iterator.getClass.getDeclaredMethods
@@ -143,8 +157,7 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
       result.toSeq
     }
 
-    def open: Int = field(iterator, "openStreams").get(iterator)
-      .asInstanceOf[AtomicInteger].get()
+    def open: Int = openStreams.get()
     def queued: Int = field(iterator, "queued").get(iterator)
       .asInstanceOf[BlockingQueue[_]].size()
     def reserved: Long = field(iterator, "limiter").get(iterator)
@@ -152,10 +165,10 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     override def close(): Unit = context.markTaskCompleted(None)
   }
 
-  for (cap <- Seq(1, 2, 64); limit <- Seq(1L, 128L, 1024L)) {
-    test(s"preserve all batches across admission and byte limits: cap=$cap bytes=$limit") {
+  for (limit <- Seq(1L, 128L, 1024L)) {
+    test(s"preserve all batches across byte limits: bytes=$limit") {
       val counts = (0 until 80).map(i => i % 5)
-      withResource(new Fixture(counts, cap, limit)) { f =>
+      withResource(new Fixture(counts, limit)) { f =>
         val expected = counts.indices.flatMap(i => (0 until counts(i)).map(i * 100 + _))
         assert(f.drain().sorted == expected)
         assert(f.open == 0)
@@ -165,9 +178,9 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  for (cap <- Seq(1, 64)) {
-    test(s"empty streams make progress to exhaustion: cap=$cap") {
-      withResource(new Fixture(Seq.fill(65)(0), cap)) { f =>
+  {
+    test("empty streams make progress to exhaustion") {
+      withResource(new Fixture(Seq.fill(65)(0))) { f =>
         assert(!f.iterator.hasNext)
         assert(!f.iterator.hasNext)
         intercept[NoSuchElementException] { f.iterator.next() }
@@ -176,14 +189,16 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("admission does not initialize streams beyond the cap") {
+  test("streams initialize only on available workers") {
     val gate = new CountDownLatch(1)
     val entered = new CountDownLatch(1)
-    withResource(new Fixture(Seq.fill(10)(1), 2, gate = Some(gate),
+    withResource(new Fixture(Seq.fill(10)(1), gate = Some(gate),
         entered = Some(entered))) { f =>
       try {
         f.prime()
         assert(entered.await(5, TimeUnit.SECONDS))
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (f.open < 2 && System.nanoTime() < deadline) Thread.`yield`()
         assert(f.open == 2)
       } finally {
         gate.countDown()
@@ -192,10 +207,78 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
+  test("worker fetch errors reach the task without an ExecutionException wrapper") {
+    val error = new IOException("fetch failure")
+    withResource(new Fixture(Seq(1), fetchFailure = Some(error))) { f =>
+      assert(intercept[IOException](f.iterator.hasNext) eq error)
+      assert(f.open == 0)
+    }
+  }
+
+  test("first header failure closes the initialized stream") {
+    val error = new IOException("header failure")
+    withResource(new Fixture(Seq(1), headerFailure = Some(error))) { f =>
+      assert(intercept[IOException](f.iterator.hasNext) eq error)
+      assert(f.open == 0)
+      assert(f.reserved == 0)
+    }
+  }
+
+  test("queued work does not fetch or initialize streams until a worker starts") {
+    val gate = new CountDownLatch(1)
+    val entered = new CountDownLatch(2)
+    val blockers = (0 until 2).map { _ =>
+      RapidsShuffleInternalManagerBase.queueReadTask(() => {
+        entered.countDown()
+        gate.await()
+      })
+    }
+    try {
+      assert(entered.await(5, TimeUnit.SECONDS))
+      withResource(new Fixture(Seq.fill(10)(1))) { f =>
+        f.prime()
+        assert(f.open == 0)
+        assert(f.created.get() == 0)
+        assert(f.fetchedCount == 0)
+        gate.countDown()
+        assert(f.drain().size == 10)
+        assert(f.open == 0)
+      }
+    } finally {
+      gate.countDown()
+      blockers.foreach(_.get(5, TimeUnit.SECONDS))
+    }
+  }
+
+  test("completion cancels unopened tickets without fetching any stream") {
+    val gate = new CountDownLatch(1)
+    val entered = new CountDownLatch(2)
+    val blockers = (0 until 2).map { _ =>
+      RapidsShuffleInternalManagerBase.queueReadTask(() => {
+        entered.countDown()
+        gate.await()
+      })
+    }
+    try {
+      assert(entered.await(5, TimeUnit.SECONDS))
+      val f = new Fixture(Seq.fill(10)(1))
+      f.prime()
+      f.close()
+      gate.countDown()
+      blockers.foreach(_.get(5, TimeUnit.SECONDS))
+      // Drain a sentinel behind the cancelled tickets to establish that the queue advanced.
+      RapidsShuffleInternalManagerBase.queueReadTask(() => ()).get(5, TimeUnit.SECONDS)
+      assert(f.fetchedCount == 0)
+      assert(f.open == 0)
+    } finally {
+      gate.countDown()
+    }
+  }
+
   test("a worker finishing after task completion closes its batch instead of publishing") {
     val gate = new CountDownLatch(1)
     val entered = new CountDownLatch(1)
-    val f = new Fixture(Seq(1), 1, gate = Some(gate), entered = Some(entered))
+    val f = new Fixture(Seq(1), gate = Some(gate), entered = Some(entered))
     try {
       f.prime()
       assert(entered.await(5, TimeUnit.SECONDS))
