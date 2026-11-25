@@ -44,9 +44,14 @@ object FieldReads {
   case class Fields(children: Map[String, FieldReads]) extends FieldReads {
     override def merge(other: FieldReads): FieldReads = other match {
       case All => All
-      case Fields(others) => Fields((children.keySet ++ others.keySet).map { name =>
-        name -> (children.get(name) ++ others.get(name)).reduce(_ merge _)
-      }.toMap)
+      case Fields(others) if others.isEmpty => this
+      case Fields(_) if children.isEmpty => other
+      case Fields(others) =>
+        val (base, incoming) =
+          if (children.size >= others.size) (children, others) else (others, children)
+        Fields(incoming.foldLeft(base) { case (acc, (name, reads)) =>
+          acc.updated(name, acc.get(name).map(_.merge(reads)).getOrElse(reads))
+        })
     }
     override def child(name: String): Option[FieldReads] = children.get(name)
   }
