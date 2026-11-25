@@ -424,7 +424,8 @@ def assert_delta_add_file_stats_present(spark, path):
         assert {"minValues", "maxValues", "nullCount"}.issubset(stats), \
             f"Incomplete AddFile statistics in {path}: {stats}"
 
-def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
+def assert_gpu_and_cpu_latest_delta_log_equivalent(
+        spark, data_path, ignore_random_add_file_prefix=False):
     cpu_logs = read_delta_logs(spark, data_path + "/CPU/_delta_log/*.json")
     gpu_logs = read_delta_logs(spark, data_path + "/GPU/_delta_log/*.json")
     assert len(cpu_logs) == len(gpu_logs), "Different number of Delta log JSON files:\nCPU: {}\nGPU: {}".format(
@@ -439,6 +440,11 @@ def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
         latest_file, cpu_jsons, gpu_jsons)
     liquid_metadata_id_maps = ({}, {})
     for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
+        if ignore_random_add_file_prefix:
+            for action in (cpu_json, gpu_json):
+                if "add" in action:
+                    assert not action["add"]["partitionValues"]
+                    action["add"]["path"] = os.path.basename(action["add"]["path"])
         assert_delta_log_json_equivalent(
             latest_file, cpu_json, gpu_json, liquid_metadata_id_maps)
 

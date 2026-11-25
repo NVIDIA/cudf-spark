@@ -952,8 +952,10 @@ def test_delta_delete_persistent_dv_row_tracking_fallback(
 def test_delta_delete_persistent_dv_row_tracking_disabled(spark_tmp_path, column_mapping):
     conf = copy_and_update(_tracked_persistent_dv_delete_conf(), {
         "spark.databricks.delta.delete.deletionVectors.persistent": "false"})
+    # Name mapping generates a random directory for each newly written file.
     _assert_tracked_delete_log_parity(
-        spark_tmp_path, column_mapping, conf, " WHERE id = 1", [1])
+        spark_tmp_path, column_mapping, conf, " WHERE id = 1", [1],
+        ignore_random_add_file_prefix=column_mapping == "name")
 
 
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
@@ -975,7 +977,8 @@ def test_delta_delete_persistent_dv_row_tracking_metadata_only(
 
 
 def _assert_tracked_delete_log_parity(
-        spark_tmp_path, column_mapping, conf, predicate, deleted_ids, partitioned=False):
+        spark_tmp_path, column_mapping, conf, predicate, deleted_ids, partitioned=False,
+        ignore_random_add_file_prefix=False):
     data_path = spark_tmp_path + "/tracked"
 
     def delete(spark, table):
@@ -1012,7 +1015,9 @@ def _assert_tracked_delete_log_parity(
         assert new_version == version + 1
 
     with_cpu_session(
-        lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path), conf=conf)
+        lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(
+            spark, data_path, ignore_random_add_file_prefix=ignore_random_add_file_prefix),
+        conf=conf)
 
 
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)

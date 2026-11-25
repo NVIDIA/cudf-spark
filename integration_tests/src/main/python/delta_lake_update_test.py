@@ -413,7 +413,7 @@ def test_delta_update_persistent_dv_row_tracking_fallback(spark_tmp_path, partit
     with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
         spark, data_path, row_tracking_dml_test_df, enable_deletion_vectors=True,
         partition_columns=["b"] if partitioned else None), conf=conf)
-    predicate = "b IN ('b', 'c') AND a IN (1, 2, 3)" if partitioned else "a IN (2, 3)"
+    predicate = "b IN ('b', 'c', 'd') AND a IN (1, 2, 3)" if partitioned else "a IN (2, 3)"
 
     def update(spark, path):
         result = spark.sql(f"UPDATE delta.`{path}` SET c = b WHERE {predicate}").collect()
