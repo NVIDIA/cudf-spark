@@ -14,8 +14,11 @@
 
 """Exercise Databricks CI test selection without installing or starting Spark."""
 
+from contextlib import ExitStack
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,13 +26,50 @@ import unittest
 
 
 class ReadinessSelectionTest(unittest.TestCase):
+    def stub_spark(self, root, jar_dir, env):
+        spark = root / "spark"
+        (spark / "bin").mkdir(parents=True)
+        (spark / "python").mkdir()
+        (spark / "python/pyspark.py").write_text('__version__ = "3.5.0"\n')
+        pyspark = spark / "bin/pyspark"
+        pyspark.write_text('#!/bin/bash\necho "Using Scala version 2.12.18"\n')
+        pyspark.chmod(0o755)
+        submit = spark / "bin/spark-submit"
+        # Simulate pytest writing its relative --junitxml argument from the launcher's cwd.
+        submit.write_text(
+            '#!/bin/bash\n'
+            'for arg; do\n'
+            '    case "$arg" in\n'
+            '        --junitxml=*)\n'
+            '            printf "<testsuite>%s</testsuite>\\n" "$DELTA_REPORT" > "${arg#*=}"\n'
+            '            exit $? ;;\n'
+            '    esac\n'
+            'done\n'
+            'exit 2\n')
+        submit.chmod(0o755)
+        (spark / "bin/python").symlink_to(sys.executable)
+        (jar_dir / "rapids-4-spark_2.12-test.jar").touch()
+        (jar_dir / "rapids-4-spark-integration-tests_2.12-test-spark350db143.jar").touch()
+        env.update(SPARK_HOME=str(spark), SPARK_SHIM_VER="spark350db143", TEST_PARALLEL="1",
+                   PYSP_TEST_spark_master="local[2]",
+                   PATH=str(spark / "bin") + os.pathsep + env["PATH"])
+
     def run_script(self, version="18.3.", mode="CI_PART1", hook=True,
                    override=None, extra_envs="", upstream="1", hook_exit=0, delta_exit=0,
                    jar_path="", delta_report="<testcase name='test_delta_scan_read'/>",
-                   unsafe_delta_directory=False):
+                   unsafe_delta_directory=False, integration_runner=None):
         script = Path(__file__).resolve().parents[1] / "test.sh"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        with ExitStack() as workspaces:
+            for _ in range(10):
+                directory = workspaces.enter_context(
+                    tempfile.TemporaryDirectory(dir="/tmp" if integration_runner else None))
+                root = Path(directory)
+                # The real runner retries if the full path can trigger SPARK-44242.
+                if integration_runner is None or not re.search(r"[xX][mM][xXsS]",
+                                                               str(root.resolve())):
+                    break
+            else:
+                self.fail("Could not create a Spark-safe fixture directory")
             run_root = root / jar_path if jar_path else root
             db_dir = run_root / "jenkins/databricks"
             db_dir.mkdir(parents=True)
@@ -73,6 +113,9 @@ class ReadinessSelectionTest(unittest.TestCase):
                        EXTRA_ENVS=extra_envs, WITH_DEFAULT_UPSTREAM_SHIM=upstream,
                        TEST_TYPE="nightly", PYSPARK_PYTHON=sys.executable,
                        PYSP_TEST_spark_databricks_clusterUsageTags_sparkVersion=version)
+            if integration_runner is not None:
+                shutil.copyfile(integration_runner, integration_dir / "run_pyspark_from_build.sh")
+                self.stub_spark(root, run_root, env)
             if unsafe_delta_directory:
                 mock_bin = root / "bin"
                 mock_bin.mkdir()
@@ -93,8 +136,15 @@ class ReadinessSelectionTest(unittest.TestCase):
                 env["SPARK_STARTUP_CHECK"] = str(startup)
             if override is not None:
                 env["SPARK_READINESS_ONLY"] = override
-            return subprocess.run(["bash", str(root / "test.sh")], env=env,
-                                  cwd=root, text=True, capture_output=True, check=False)
+            result = subprocess.run(["bash", str(root / "test.sh")], env=env,
+                                    cwd=root, text=True, capture_output=True,
+                                    check=False, timeout=30)
+            if integration_runner is not None:
+                reports = list(integration_dir.glob("target/run_dir-delta-*/TEST-pytest-*.xml"))
+                self.assertEqual(len(reports), 1, result.stderr)
+                self.assertEqual(reports[0].read_text(),
+                                 f"<testsuite>{delta_report}</testsuite>\n")
+            return result
 
     def test_ci_runs_integration_tests_for_dbr_183(self):
         for mode in ("DEFAULT", "CI_PART1", "CI_PART2"):
@@ -225,6 +275,19 @@ class ReadinessSelectionTest(unittest.TestCase):
     def test_prebuilt_delta_failure_preserves_pytest_exit_status(self):
         result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars", delta_exit=7)
         self.assertEqual(result.returncode, 7, result.stderr)
+
+    @unittest.skipUnless(sys.platform == "linux", "The integration runner uses Linux utilities")
+    def test_prebuilt_delta_report_from_integration_runner(self):
+        runner = (Path(__file__).resolve().parents[3] /
+                  "integration_tests/run_pyspark_from_build.sh")
+        for skipped, outcome in ((False, ""), (True, "<skipped/>")):
+            with self.subTest(skipped=skipped):
+                result = self.run_script(
+                    mode="DELTA_LAKE_ONLY", jar_path="./jars", integration_runner=runner,
+                    delta_report=f"<testcase name='test_delta_scan_read'>{outcome}</testcase>")
+                self.assertEqual(result.returncode, int(skipped), result.stderr)
+                if skipped:
+                    self.assertIn("No passing Delta Lake tests found", result.stderr)
 
     def test_prebuilt_relative_path_from_extra_envs_stays_absolute(self):
         result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./jars",
