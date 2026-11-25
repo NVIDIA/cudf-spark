@@ -70,8 +70,10 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("Delta 4.2 runtime shim selection rejects unsupported combinations") {
     val unsupported = Seq(
       ("4.2.0", "4.0.0"),
+      ("4.2.0", "4.0.5"),
       ("4.2.0", "4.1.0"),
       ("4.2.0", "4.1.2"),
+      ("4.2.0", "4.1.4"),
       ("4.2.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
@@ -93,8 +95,10 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("Delta 4.3 runtime shim selection rejects unsupported combinations") {
     val unsupported = Seq(
       ("4.3.0", "4.0.0"),
+      ("4.3.0", "4.0.5"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
+      ("4.3.0", "4.1.4"),
       ("4.3.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
