@@ -19,7 +19,7 @@ import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_spark_exception
-from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, spark_jvm
+from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import copy_and_update, DecimalGen, IntegerGen, LongGen, StringGen, \
     StructGen, TimestampGen, UniqueLongGen, gen_scalar_value, \
     disable_parquet_field_id_write, gen_df
@@ -467,11 +467,9 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
             "timestamp_added",
             types.TimestampType.withZone(),
             "2024-01-02T03:04:05Z")
-        # Lakekeeper 0.13.1 throws an error for fixed and binary initial defaults. See https://github.com/NVIDIA/cudf-spark/issues/17078
-        if not is_iceberg_rest_catalog():
-            add_default(
-                "binary_added", types.BinaryType.get(),
-                jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2, 3])))
+        add_default(
+            "binary_added", types.BinaryType.get(),
+            jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2, 3])))
         add_default(
             "decimal_added", types.DecimalType.of(9, 2),
             jvm.java.math.BigDecimal("12345.67"))
@@ -499,17 +497,18 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                    reason="Remote catalogs can fail on binary/fixed initial defaults. "
+                           "See https://github.com/NVIDIA/cudf-spark/issues/17078.")
 def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
     _setup_iceberg_v3_defaults_table(table_name)
     v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true",
                "spark.rapids.sql.format.parquet.reader.type": reader_type}
-    # Lakekeeper 0.13.1 throws an error for fixed and binary initial defaults. See https://github.com/NVIDIA/cudf-spark/issues/17078
-    binary_column = "" if is_iceberg_rest_catalog() else "binary_added, "
     query = (
         f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
         "boolean_added, long_added, float_added, double_added, date_added, "
-        f"timestamp_added, {binary_column}decimal_added "
+        "timestamp_added, binary_added, decimal_added "
         f"FROM {table_name} ORDER BY id")
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(query),
@@ -611,11 +610,11 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 @pytest.mark.parametrize("project_default", [False, True], ids=["unprojected", "projected"])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                    reason="Remote catalogs can fail on binary/fixed initial defaults. "
+                           "See https://github.com/NVIDIA/cudf-spark/issues/17078.")
 def test_iceberg_v3_unsupported_initial_defaults_fallback(
         spark_tmp_table_factory, unsupported_column, project_default, reader_type):
-    if is_iceberg_rest_catalog() and unsupported_column == "fixed_added":
-        pytest.skip("Lakekeeper 0.13.1 can return HTTP 500 on fixed initial defaults. "
-                    "See https://github.com/NVIDIA/cudf-spark/issues/17078.")
     table_name = get_full_table_name(spark_tmp_table_factory)
     _setup_iceberg_v3_defaults_table(table_name, unsupported_column)
     columns = f"id, {unsupported_column}" if project_default else "id"
