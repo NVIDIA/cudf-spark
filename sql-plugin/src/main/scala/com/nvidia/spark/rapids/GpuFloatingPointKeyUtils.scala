@@ -25,16 +25,43 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** Floating-point key identities distinguish signed zeros and canonicalize NaNs. */
 object GpuFloatingPointKeyUtils {
-  def encode(batch: ColumnarBatch): ColumnarBatch = {
+  def encode(batch: ColumnarBatch, orderPreserving: Boolean = false): ColumnarBatch = {
     val columns = (0 until batch.numCols()).safeMap { i =>
       val col = batch.column(i).asInstanceOf[GpuColumnVector]
       col.dataType() match {
-        case FloatType => GpuColumnVector.from(encodeFloat(col), IntegerType)
-        case DoubleType => GpuColumnVector.from(encodeFloat(col), LongType)
+        case FloatType => GpuColumnVector.from(encodeKey(col, orderPreserving), IntegerType)
+        case DoubleType => GpuColumnVector.from(encodeKey(col, orderPreserving), LongType)
         case _ => col.incRefCount()
       }
     }
     closeOnExcept(columns) { _ => new ColumnarBatch(columns.toArray, batch.numRows()) }
+  }
+
+  private def encodeKey(col: GpuColumnVector, orderPreserving: Boolean): CudfColumnVector = {
+    val bits = encodeFloat(col)
+    if (orderPreserving) {
+      withResource(bits)(flipNegativeBits)
+    } else {
+      bits
+    }
+  }
+
+  // This involution preserves numeric order as signed integers, with -0.0 before +0.0.
+  private def flipNegativeBits(bits: ai.rapids.cudf.ColumnView): CudfColumnVector = {
+    val mask = if (bits.getType == DType.INT32) {
+      Scalar.fromInt(Int.MaxValue)
+    } else {
+      Scalar.fromLong(Long.MaxValue)
+    }
+    withResource(mask) { positiveBits =>
+      withResource(Scalar.fromInt(0)) { zero =>
+        withResource(bits.lessThan(zero)) { negative =>
+          withResource(bits.bitXor(positiveBits)) { flipped =>
+            negative.ifElse(flipped, bits)
+          }
+        }
+      }
+    }
   }
 
   def encodeFloat(col: GpuColumnVector): CudfColumnVector = {
@@ -52,13 +79,21 @@ object GpuFloatingPointKeyUtils {
     }
   }
 
-  def decode(table: Table, types: Array[DataType]): ColumnarBatch = {
+  def decode(table: Table, types: Array[DataType],
+      orderPreserving: Boolean = false): ColumnarBatch = {
     val columns = types.indices.safeMap { i =>
-      val col = table.getColumn(i)
-      val restored: CudfColumnVector = types(i) match {
-        case FloatType => withResource(col.bitCastTo(DType.FLOAT32))(_.copyToColumnVector())
-        case DoubleType => withResource(col.bitCastTo(DType.FLOAT64))(_.copyToColumnVector())
-        case _ => col.incRefCount()
+      val input = table.getColumn(i)
+      val col = if (orderPreserving && (types(i) == FloatType || types(i) == DoubleType)) {
+        flipNegativeBits(input)
+      } else {
+        input.incRefCount()
+      }
+      val restored: CudfColumnVector = withResource(col) { _ =>
+        types(i) match {
+          case FloatType => withResource(col.bitCastTo(DType.FLOAT32))(_.copyToColumnVector())
+          case DoubleType => withResource(col.bitCastTo(DType.FLOAT64))(_.copyToColumnVector())
+          case _ => col.incRefCount()
+        }
       }
       GpuColumnVector.from(restored, types(i))
     }

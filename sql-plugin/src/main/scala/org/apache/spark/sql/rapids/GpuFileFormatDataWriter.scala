@@ -20,7 +20,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.hashing.{MurmurHash3 => ScalaMurmur3Hash}
 
-import ai.rapids.cudf.{OrderByArg, Table}
+import ai.rapids.cudf.{OrderByArg, Scalar, Table}
 import com.nvidia.spark.TimingUtils
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -584,48 +584,77 @@ class GpuDynamicPartitionDataSingleWriter(
       (if (isBucketed) Array[DataType](IntegerType) else Array.empty[DataType])
     val combined = withResource(batch) { _ =>
       withResource(getKeysBatch(batch)) { keys =>
-        withResource(GpuFloatingPointKeyUtils.encode(keys)) { encoded =>
+        withResource(GpuFloatingPointKeyUtils.encode(keys, orderPreserving = true)) { encoded =>
           withResource(getDataColumnsAsBatch(batch)) { data =>
             GpuColumnVector.combineColumns(encoded, data)
           }
         }
       }
     }
-    val groups = withResource(combined) { _ =>
+    withResource(combined) { _ =>
       withResource(GpuColumnVector.from(combined)) { table =>
-        val dataIndices = if (dataTypes.isEmpty) {
-          Array(0)
+        // Spark considers signed zeros equal, including before secondary partition/bucket keys.
+        // Only batches containing negative zero need their input ordering refined.
+        val needsSort = keyTypes.indices.exists { i =>
+          keyTypes(i) match {
+            case FloatType => withResource(Scalar.fromInt(-1))(table.getColumn(i).contains)
+            case DoubleType => withResource(Scalar.fromLong(-1L))(table.getColumn(i).contains)
+            case _ => false
+          }
+        }
+        val ordered = if (needsSort) {
+          table.orderBy(keyTypes.indices.map(OrderByArg.asc(_, nullsSmallest)): _*)
         } else {
-          (keyTypes.length until combined.numCols()).toArray
+          new Table((0 until table.getNumberOfColumns).map(table.getColumn): _*)
         }
-        table.groupBy(keyTypes.indices: _*).contiguousSplitGroupsAndGenUniqKeys(dataIndices)
-      }
-    }
-    withResource(groups) { _ =>
-      val hostBatch = withResource(
-          GpuFloatingPointKeyUtils.decode(groups.getUniqKeyTable, keyTypes)) { decoded =>
-        withResource(GpuColumnVector.from(decoded)) { table =>
-          copyToHostAsBatch(table, keyTypes)
-        }
-      }
-      withResource(hostBatch) { host =>
-        val getPart = genGetPartValuesFunc(host)
-        val getBucket = genGetBucketIdFunc(host)
-        val splits = groups.getGroups
-        (0 until host.numRows()).safeMap { i =>
-          val part = getPart(i)
-          val bucket = getBucket(i)
-          val data = if (dataTypes.isEmpty) {
-            new ColumnarBatch(Array.empty[org.apache.spark.sql.vectorized.ColumnVector],
-              splits(i).getRowCount.toInt)
-          } else {
-            withResource(splits(i).getTable) { table =>
-              GpuColumnVector.from(table, dataTypes)
+        withResource(ordered) { sorted =>
+          withResource(new Table(keyTypes.indices.map(sorted.getColumn): _*)) { keys =>
+            withResource(distinctAndSort(keys)) { distinct =>
+              val splitIds = splitIndexes(keys, distinct)
+              val hostBatch = withResource(
+                  GpuFloatingPointKeyUtils.decode(distinct, keyTypes, orderPreserving = true)) {
+                decoded =>
+                  withResource(GpuColumnVector.from(decoded)) { decodedTable =>
+                    copyToHostAsBatch(decodedTable, keyTypes)
+                  }
+              }
+              withResource(hostBatch) { host =>
+                val getPart = genGetPartValuesFunc(host)
+                val getBucket = genGetBucketIdFunc(host)
+                if (dataTypes.isEmpty) {
+                  (0 until host.numRows()).safeMap { i =>
+                    val part = getPart(i)
+                    val bucket = getBucket(i)
+                    val rows = splitIds(i) - (if (i == 0) 0 else splitIds(i - 1))
+                    val data = new ColumnarBatch(
+                      Array.empty[org.apache.spark.sql.vectorized.ColumnVector], rows)
+                    closeOnExcept(data) { _ =>
+                      SplitPack(SpillableColumnarBatch(data,
+                        SpillPriorities.ACTIVE_BATCHING_PRIORITY), part, bucket)
+                    }
+                  }.toArray
+                } else {
+                  val dataColumns = (keyTypes.length until sorted.getNumberOfColumns)
+                    .map(sorted.getColumn)
+                  withResource(new Table(dataColumns: _*)) { data =>
+                    withResource(data.contiguousSplit(splitIds: _*)) { splits =>
+                      (0 until host.numRows()).safeMap { i =>
+                        val split = splits(i)
+                        splits(i) = null
+                        closeOnExcept(split) { _ =>
+                          val part = getPart(i)
+                          val bucket = getBucket(i)
+                          SplitPack(SpillableColumnarBatch(split, dataTypes,
+                            SpillPriorities.ACTIVE_BATCHING_PRIORITY), part, bucket)
+                        }
+                      }.toArray
+                    }
+                  }
+                }
+              }
             }
           }
-          SplitPack(SpillableColumnarBatch(data,
-            SpillPriorities.ACTIVE_ON_DECK_PRIORITY), part, bucket)
-        }.toArray
+        }
       }
     }
   }
