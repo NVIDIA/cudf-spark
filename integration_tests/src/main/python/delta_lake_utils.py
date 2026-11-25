@@ -424,7 +424,8 @@ def assert_delta_add_file_stats_present(spark, path):
         assert {"minValues", "maxValues", "nullCount"}.issubset(stats), \
             f"Incomplete AddFile statistics in {path}: {stats}"
 
-def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
+def assert_gpu_and_cpu_latest_delta_log_equivalent(
+        spark, data_path, ignore_random_add_file_prefix=False):
     cpu_logs = read_delta_logs(spark, data_path + "/CPU/_delta_log/*.json")
     gpu_logs = read_delta_logs(spark, data_path + "/GPU/_delta_log/*.json")
     assert len(cpu_logs) == len(gpu_logs), "Different number of Delta log JSON files:\nCPU: {}\nGPU: {}".format(
@@ -439,6 +440,11 @@ def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
         latest_file, cpu_jsons, gpu_jsons)
     liquid_metadata_id_maps = ({}, {})
     for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
+        if ignore_random_add_file_prefix:
+            for action in (cpu_json, gpu_json):
+                if "add" in action:
+                    assert not action["add"]["partitionValues"]
+                    action["add"]["path"] = os.path.basename(action["add"]["path"])
         assert_delta_log_json_equivalent(
             latest_file, cpu_json, gpu_json, liquid_metadata_id_maps)
 
@@ -511,21 +517,21 @@ def setup_delta_dest_tables(spark, data_path, dest_table_func, use_cdf, enable_d
         setup_delta_dest_table(spark, path, dest_table_func, use_cdf, partition_columns, enable_deletion_vectors)
 
 def setup_delta_row_tracking_dest_table(spark, path, dest_table_func,
-                                        enable_deletion_vectors=False):
+                                        enable_deletion_vectors=False, partition_columns=None):
     dest_df = dest_table_func(spark)
     ddl = schema_to_ddl(spark, dest_df.schema)
-    spark.sql("CREATE TABLE delta.`{}` ({}) USING DELTA "
+    partitioning = f"PARTITIONED BY ({', '.join(partition_columns)}) " if partition_columns else ""
+    spark.sql(f"CREATE TABLE delta.`{path}` ({ddl}) USING DELTA {partitioning}"
               "TBLPROPERTIES (delta.enableRowTracking = true, "
-              "delta.enableDeletionVectors = {})".format(
-                  path, ddl, str(enable_deletion_vectors).lower()))
+              f"delta.enableDeletionVectors = {str(enable_deletion_vectors).lower()})")
     dest_df.write.format("delta").mode("append").save(path)
 
 def setup_delta_row_tracking_dest_tables(spark, data_path, dest_table_func,
-                                         enable_deletion_vectors=False):
+                                         enable_deletion_vectors=False, partition_columns=None):
     for name in ["CPU", "GPU"]:
         path = "{}/{}".format(data_path, name)
         setup_delta_row_tracking_dest_table(
-            spark, path, dest_table_func, enable_deletion_vectors)
+            spark, path, dest_table_func, enable_deletion_vectors, partition_columns)
 
 def row_tracking_dml_test_df(spark):
     return spark.createDataFrame(

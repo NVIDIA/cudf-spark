@@ -16,25 +16,48 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
+import com.databricks.sql.transaction.tahoe.{RowTracking, Snapshot}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
+import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.{DeleteCommandEdgeMeta, DeleteCommandMeta}
 
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.StructType
+
+/**
+ * Both command variants share the same guard. The Delta DELETE integration runs on DBR 17.3
+ * and 18.3 observed DeleteCommandEdge for the tested SQL; DeleteCommand also routes here when
+ * the runtime emits it.
+ */
 object DeleteCommandMetaShim {
   def tagForGpu(meta: DeleteCommandMeta): Unit = {
-    PersistentDeletionVectorMetaShim.tagForGpu(
-      meta,
-      meta.deleteCmd.conf,
-      meta.deleteCmd.deltaLog.unsafeVolatileSnapshot,
-      DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS,
-      meta.deleteCmd.target.schema)
+    val cmd = meta.deleteCmd
+    tagForGpuCommon(meta, cmd.conf, cmd.deltaLog.unsafeVolatileSnapshot,
+      cmd.target.schema, cmd.condition)
   }
 
   def tagForGpu(meta: DeleteCommandEdgeMeta): Unit = {
-    PersistentDeletionVectorMetaShim.tagForGpu(
-      meta,
-      meta.deleteCmd.conf,
-      meta.deleteCmd.deltaLog.unsafeVolatileSnapshot,
-      DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS,
-      meta.deleteCmd.target.schema)
+    val cmd = meta.deleteCmd
+    tagForGpuCommon(meta, cmd.conf, cmd.deltaLog.unsafeVolatileSnapshot,
+      cmd.target.schema, cmd.condition)
+  }
+
+  private def tagForGpuCommon(
+      meta: RapidsMeta[_, _, _],
+      sqlConf: SQLConf,
+      snapshot: Snapshot,
+      targetSchema: StructType,
+      condition: Option[Expression]): Unit = {
+    val persistentDvEnabled = PersistentDeletionVectorMetaShim.tagForGpu(
+      meta, sqlConf, snapshot, DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS, targetSchema)
+    // Whole-table and metadata-only deletes do not need physical indexes from a data scan.
+    if (persistentDvEnabled && RowTracking.isEnabled(snapshot.protocol, snapshot.metadata) &&
+        PersistentDeletionVectorMetaShim.hasDataPredicate(
+          condition, snapshot.metadata.partitionColumns, SparkSession.active)) {
+      meta.willNotWorkOnGpu(
+        "Persistent deletion vector DELETE with row tracking is not supported on GPU")
+    }
   }
 }
