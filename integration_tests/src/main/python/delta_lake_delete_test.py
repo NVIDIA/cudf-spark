@@ -612,6 +612,7 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
     for step, condition in enumerate(["a < 5", "b = 3", "b = 5"]):
         with_cpu_session(lambda spark: spark.sql(
             statement(data_path + "/CPU", condition)).collect(), conf=conf)
+        markers_before = set(dv_file_names(data_path + "/GPU")) if is_local else set()
         assert_rapids_delta_write(
             lambda spark: spark.sql(statement(data_path + "/GPU", condition)).collect(),
             conf=gpu_conf, expected_command=expected_command)
@@ -621,8 +622,9 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
             assert cpu_dvs > 5, "Expected the CPU statement to persist many DV files"
         assert dv_file_count(data_path + "/GPU") == cpu_dvs
         if is_local and step > 0:
-            # Many files in one task are written by the concurrent writer's threads.
-            writers = [n for n in dv_file_names(data_path + "/GPU")
+            # Many files in one task are written by the concurrent writer's threads. Only the
+            # markers this statement added count, as earlier statements leave theirs behind.
+            writers = [n for n in set(dv_file_names(data_path + "/GPU")) - markers_before
                        if n.startswith("_dv_writer_gpu-delta-dv-writer")]
             assert writers, "No DV file was written by the concurrent DV writer"
         assert_equal(read_table(data_path + "/CPU"), read_table(data_path + "/GPU"))

@@ -432,6 +432,35 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("the writer reports the files it wrote and their write time as metrics") {
+    Seq("1", "8").foreach { limit =>
+      val table = Files.createTempDirectory("gpu-dv-writer-metrics").toFile
+      try {
+        withCpuSparkSession { spark =>
+          spark.conf.set(DeltaSQLConf.DELETION_VECTOR_PACKING_TARGET_SIZE.key, "1")
+          spark.conf.set(RapidsConf.DELTA_DV_WRITE_MAX_FILES_IN_FLIGHT_PER_TASK.key, limit)
+          val metrics = GpuDeletionVectorWriter.WriteMetrics.create(spark)
+          val numFiles = 6
+          val rows = (0 until numFiles).map { i =>
+            val (bytes, cardinality) = newBitmap(i)
+            DeletionVectorData(s"file-$i.parquet", bytes, cardinality)
+          }
+          val mapper = GpuDeletionVectorWriter.createMapper(spark,
+            spark.sessionState.newHadoopConf(), new Path(table.getAbsolutePath),
+            prefixLength = 0, metrics = Some(metrics))
+          val results = mapper(rows.iterator)
+          // Nothing is reported before the results are consumed.
+          assert(metrics.files.value == 0)
+          assert(results.toSeq.length == numFiles)
+          assert(metrics.files.value == numFiles, s"limit $limit")
+          assert(metrics.writeTimeMs.value >= 0)
+        }
+      } finally {
+        org.apache.commons.io.FileUtils.deleteQuietly(table)
+      }
+    }
+  }
+
   test("a store failure fails the task and leaves no deletion vector files") {
     val dir = Files.createTempDirectory("gpu-dv-writer-fail").toFile
     try {

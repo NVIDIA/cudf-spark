@@ -18,7 +18,7 @@ package org.apache.spark.sql.delta.rapids
 
 import java.security.PrivilegedExceptionAction
 import java.util.concurrent.{Callable, ExecutionException, ExecutorService, Future, Semaphore}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -34,7 +34,8 @@ import org.apache.spark.sql.delta.commands.{DeletionVectorData, DeletionVectorRe
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.delta.storage.dv.DeletionVectorStore
 import org.apache.spark.sql.delta.util.{BinPackingIterator, Utils => DeltaUtils}
-import org.apache.spark.util.{SerializableConfiguration, ThreadUtils, Utils => SparkUtils}
+import org.apache.spark.util.{LongAccumulator, SerializableConfiguration, ThreadUtils,
+  Utils => SparkUtils}
 
 /**
  * Persists deletion vectors like Delta's `DeletionVectorWriter.createMapperToStoreDeletionVectors`,
@@ -52,6 +53,18 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
    */
   private val MaxWriterThreads = 64
 
+  /**
+   * Task metrics of the writer, shown in the stage page of the Spark UI. The write time sums the
+   * time of each file, so it exceeds the elapsed time when files overlap.
+   */
+  private[rapids] case class WriteMetrics(files: LongAccumulator, writeTimeMs: LongAccumulator)
+
+  private[rapids] object WriteMetrics {
+    def create(spark: SparkSession): WriteMetrics = WriteMetrics(
+      spark.sparkContext.longAccumulator("gpu deletion vector files written"),
+      spark.sparkContext.longAccumulator("gpu deletion vector file write time total (ms)"))
+  }
+
   private lazy val writerPool: ExecutorService =
     ThreadUtils.newDaemonCachedThreadPool("gpu-delta-dv-writer", MaxWriterThreads)
 
@@ -59,7 +72,10 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
       spark: SparkSession,
       hadoopConf: Configuration,
       table: Path,
-      prefixLength: Int): Iterator[DeletionVectorData] => Iterator[DeletionVectorResult] = {
+      prefixLength: Int,
+      metrics: Option[WriteMetrics] = None)
+      : Iterator[DeletionVectorData] => Iterator[DeletionVectorResult] = {
+    val taskMetrics = metrics.getOrElse(WriteMetrics.create(spark))
     val broadcastHadoopConf =
       spark.sparkContext.broadcast(new SerializableConfiguration(hadoopConf))
     // hadoop.fs.Path is not Serializable, so close over its string representation.
@@ -78,10 +94,14 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
       val tablePathWithFS = dvStore.pathWithFileSystem(tablePath)
       // Writer threads must write as the user of the task, not as the thread that made the pool.
       val ugi = UserGroupInformation.getCurrentUser
+      // Written by the writer threads, so the accumulators are only updated from the task thread.
+      val filesWritten = new AtomicLong(0)
+      val writeNanos = new AtomicLong(0)
 
       def writeBin(bin: Seq[DeletionVectorData]): Seq[DeletionVectorResult] = {
         val prefix = DeltaUtils.getRandomPrefix(prefixLength)
-        ugi.doAs(new PrivilegedExceptionAction[Seq[DeletionVectorResult]] {
+        val start = System.nanoTime()
+        val written = ugi.doAs(new PrivilegedExceptionAction[Seq[DeletionVectorResult]] {
           override def run(): Seq[DeletionVectorResult] = {
             val (writer, fileId) =
               DeletionVectorWriter.createWriter(dvStore, tablePathWithFS, prefix)
@@ -97,10 +117,27 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
             }
           }
         })
+        filesWritten.incrementAndGet()
+        writeNanos.addAndGet(System.nanoTime() - start)
+        written
       }
 
-      writeBins(new BinPackingIterator(rows, packingTargetSize), writeBin,
+      val results = writeBins(new BinPackingIterator(rows, packingTargetSize), writeBin,
         maxInFlight = maxFilesInFlight)
+      // The task thread reports the metrics once all the results have been consumed.
+      new Iterator[DeletionVectorResult] {
+        private var reported = false
+        override def hasNext: Boolean = {
+          val more = results.hasNext
+          if (!more && !reported) {
+            reported = true
+            taskMetrics.files.add(filesWritten.get)
+            taskMetrics.writeTimeMs.add(writeNanos.get / 1000000)
+          }
+          more
+        }
+        override def next(): DeletionVectorResult = results.next()
+      }
     }
   }
 
@@ -168,8 +205,9 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
       }
       // Collecting in submission order keeps the results in Delta's order.
       val results = futures.map(_.get())
-      // Without this, a saturated writer pool is invisible: its threads are not task threads.
-      logInfo(s"Wrote ${futures.size} deletion vector files, at most ${peakInFlight.get} " +
+      // Debug level, as a task with many files would otherwise log on every write. It shows
+      // whether the writer pool is saturated, as its threads are not task threads.
+      logDebug(s"Wrote ${futures.size} deletion vector files, at most ${peakInFlight.get} " +
         s"at a time, in ${(System.nanoTime() - startNs) / 1000000} ms")
       results.iterator.flatten
     } catch {

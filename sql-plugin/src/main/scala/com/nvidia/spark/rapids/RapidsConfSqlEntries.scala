@@ -880,6 +880,19 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .booleanConf
       .createWithDefault(true)
 
+  val DELTA_DV_WRITE_MAX_FILES_IN_FLIGHT_PER_TASK =
+    conf("spark.rapids.sql.delta.deletionVector.write.maxFilesInFlightPerTask")
+      .doc("Maximum number of packed deletion vector files a task writes concurrently. Each " +
+        "file is buffered up to spark.databricks.delta.deletionVectors.packing.targetSize, so a " +
+        "task buffers up to this many times that. A value of 1 writes the files one at a time on " +
+        "the task thread, as Delta does. The files of all tasks in an executor share a pool of " +
+        "at most 64 writer threads, however high this is set, so with many tasks writing at " +
+        "once the files queue for a thread.")
+      .internal()
+      .integerConf
+      .checkValue(v => v > 0, "The number of files in flight must be greater than 0.")
+      .createWithDefault(8)
+
   val ENABLE_ICEBERG = conf("spark.rapids.sql.format.iceberg.enabled")
     .doc("When set to false disables all Iceberg acceleration")
     .booleanConf
