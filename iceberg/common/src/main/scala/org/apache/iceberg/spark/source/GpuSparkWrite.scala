@@ -610,6 +610,8 @@ class GpuPartitionedDataWriter(
     } else if (hasFloatingPartition) {
       // Spark's sort treats signed zeros as equal, so batch-local grouping can revisit
       // Iceberg partitions. Close completed writers but allow a new file on each revisit.
+      // This float-specific workaround does not fix arbitrary group ordering for other
+      // partition types in large batches; that general issue is tracked in #17034.
       new GpuRevisitableDataWriter(writerFactory, fileFactory, io,
         targetFileSize)
     } else {

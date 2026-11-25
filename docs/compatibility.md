@@ -132,6 +132,15 @@ Partition keys for GPU writes distinguish `0.0` from `-0.0`. Iceberg equality-de
 distinguish the two zeros while treating all NaN values as equal. These key-specific semantics do
 not change the plugin's behavior for general floating-point comparisons or sorting.
 
+GPU partitioned writes can revisit a signed-zero partition across batches and create an
+additional file for that partition. GPU Iceberg appends tolerate these revisits with one
+partition writer open at a time, even for inputs rejected by CPU Spark or Iceberg's clustered
+writer. Ordered Iceberg merge-on-read UPDATE/MERGE still use clustered data and position-delete
+writers: interleaved signed zeros spanning batches can fail with
+`Incoming records violate the writer assumption`. The append workaround does not apply to
+these operations. Independently, arbitrary group ordering in large Iceberg batches can affect
+other partition types; see [#17034](https://github.com/NVIDIA/cudf-spark/issues/17034).
+
 We do not disable operations that produce different results due to `-0.0` in the data because it is
 considered to be a rare occurrence.
 
