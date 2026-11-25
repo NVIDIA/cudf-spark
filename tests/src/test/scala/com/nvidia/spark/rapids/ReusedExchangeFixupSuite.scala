@@ -107,14 +107,26 @@ class ReusedExchangeFixupSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  /** Two equal broadcasts in one plan still end up as one exchange and a reuse of it. */
-  private def reuseInsideOnePlanTest(spark: SparkSession): Unit = {
-    val range = RangeExec(Range(1, 2, 1, Some(1)))
-    val plan = toGpuPlan(UnionExec(Seq(broadcastJoin(range), broadcastJoin(range))))
+  private def assertOneReuseInside(plan: SparkPlan): Unit = {
     assert(plan.collect { case r: ReusedExchangeExec => r }.size == 1,
       s"expected one reused exchange:\n$plan")
     assert(reusedFromElsewhere(plan).isEmpty,
       s"the reused exchange's original is not in the plan:\n$plan")
+  }
+
+  /** Two equal broadcasts in one plan still end up as one exchange and a reuse of it. */
+  private def reuseInsideOnePlanTest(spark: SparkSession): Unit = {
+    val range = RangeExec(Range(1, 2, 1, Some(1)))
+    assertOneReuseInside(toGpuPlan(UnionExec(Seq(broadcastJoin(range), broadcastJoin(range)))))
+  }
+
+  /** An equal plan that is still alive does not stop the reuse inside a later plan. */
+  private def reuseInsideLaterPlanTest(spark: SparkSession): Unit = {
+    val range = RangeExec(Range(1, 2, 1, Some(1)))
+    val earlier = toGpuPlan(broadcastJoin(range))
+    assertOneReuseInside(toGpuPlan(UnionExec(Seq(broadcastJoin(range), broadcastJoin(range)))))
+    // The earlier plan, and with it the exchange cached for it, is alive up to here.
+    assert(earlier.find(_.isInstanceOf[GpuBroadcastExchangeExec]).isDefined)
   }
 
   private val reuseConf = new SparkConf()
@@ -128,5 +140,9 @@ class ReusedExchangeFixupSuite extends SparkQueryCompareTestSuite {
 
   test("fixupExchangeReuse still reuses an exchange inside one plan") {
     withGpuSparkSession(reuseInsideOnePlanTest, reuseConf)
+  }
+
+  test("fixupExchangeReuse reuses inside a plan after an equal plan") {
+    withGpuSparkSession(reuseInsideLaterPlanTest, reuseConf)
   }
 }

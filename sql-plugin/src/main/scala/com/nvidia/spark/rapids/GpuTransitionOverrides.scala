@@ -40,7 +40,7 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_RE
   Exchange, ReusedExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
-import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
+import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
 import org.apache.spark.sql.rapids.execution.GpuDriverlessBroadcastHashJoinExec
 import org.apache.spark.sql.rapids.execution.PCBSNullSafeRowToColumnarExec
 import org.apache.spark.sql.types.StructType
@@ -827,31 +827,24 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   /**
    * On some Spark platforms, AQE planning ends up not reusing as many GPU exchanges as possible.
    * This searches the plan for any GPU broadcast exchanges and checks if their original CPU plans
-   * match any other previously seen GPU broadcasts with the same CPU plan.
+   * match any other previously seen GPU broadcasts with the same CPU plan in this plan.
    */
   private def fixupAdaptiveExchangeReuse(p: SparkPlan): SparkPlan = {
-    // The cache is shared by every plan in the JVM. A reused exchange must point at an exchange
-    // in this plan, because rules that rewrite a plan on its own, such as Databricks'
-    // ReuseExchangeAndSubquery, look the original up in that same plan and fail with
-    // "key not found" when it is somewhere else.
-    lazy val exchangesInPlan = {
-      val found = java.util.Collections.newSetFromMap(
-        new java.util.IdentityHashMap[SparkPlan, java.lang.Boolean]())
-      p.foreach(found.add)
-      found
-    }
+    // Only an exchange in this plan is reused. A match from ExchangeMappingCache can belong to
+    // another plan, and rules that rewrite a plan on its own, such as Databricks'
+    // ReuseExchangeAndSubquery, look the original of a reused exchange up in that same plan and
+    // fail with "key not found" when it is somewhere else.
+    val firstByCpuPlan = mutable.HashMap.empty[Exchange, GpuBroadcastExchangeExec]
 
     def doFixup(plan: SparkPlan): SparkPlan = {
       plan.transformUp {
         case g: GpuBroadcastExchangeExec =>
-          ExchangeMappingCache.findGpuExchangeReplacement(g.cpuCanonical)
-              .filter(other => exchangesInPlan.contains(other)).map { other =>
-            if (other eq g) {
+          firstByCpuPlan.get(g.cpuCanonical) match {
+            case Some(first) => ReusedExchangeExec(g.output, first)
+            case None =>
+              firstByCpuPlan.put(g.cpuCanonical, g)
               g
-            } else {
-              ReusedExchangeExec(g.output, other)
-            }
-          }.getOrElse(g)
+          }
       }
     }
 
