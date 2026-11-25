@@ -224,8 +224,9 @@ final class RapidsShuffleBlockFetcherIterator(
     synchronized {
       isZombie = true
     }
-    // Release buffers in the results queue
-    val iter = results.iterator()
+    // Remove each result before releasing it: a reader worker may still be in next()
+    // while task completion runs, and must not consume the same buffer as cleanup.
+    val iter = Iterator.continually(results.poll()).takeWhile(_ != null)
     while (iter.hasNext) {
       val result = iter.next()
       result match {
@@ -1285,13 +1286,14 @@ private class RapidsBufferReleasingInputStream(
     private val isNetworkReqDone: Boolean,
     private val checkedInOpt: Option[CheckedInputStream])
   extends InputStream {
-  private[this] var closed = false
+  // Worker error cleanup can race with serializer task-completion cleanup.
+  private[this] val closed = new AtomicBoolean(false)
 
   override def read(): Int =
     tryOrFetchFailedException(delegate.read())
 
   override def close(): Unit = {
-    if (!closed) {
+    if (closed.compareAndSet(false, true)) {
       try {
         delegate.close()
         currentResult.buf.release()
@@ -1301,7 +1303,6 @@ private class RapidsBufferReleasingInputStream(
           RapidsShuffleBlockFetcherIterator.
               resetNettyOOMFlagIfPossible(iterator.maxReqSizeShuffleToMem)
         }
-        closed = true
       }
     }
   }

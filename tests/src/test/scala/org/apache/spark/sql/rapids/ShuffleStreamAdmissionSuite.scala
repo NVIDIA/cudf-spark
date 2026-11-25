@@ -17,7 +17,7 @@
 package org.apache.spark.sql.rapids
 
 import java.io.{ByteArrayInputStream, InputStream, IOException}
-import java.util.concurrent.{BlockingQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.{BlockingQueue, CountDownLatch, ExecutionException, Future, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
@@ -59,7 +59,7 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
   private class Fixture(counts: Seq[Int], limit: Long = 1024,
       gate: Option[CountDownLatch] = None, entered: Option[CountDownLatch] = None,
       fetchFailure: Option[IOException] = None, headerFailure: Option[IOException] = None,
-      beforeFetch: Int => Unit = _ => ())
+      beforeFetch: Int => Unit = _ => (), beforeHeader: Int => Unit = _ => ())
       extends AutoCloseable {
     val context = TaskContext.empty()
     // Constructor dependencies are irrelevant to the nested iterator. Keep its real methods.
@@ -108,6 +108,7 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
       val batches = new BaseSerializedTableIterator {
         override def hasNext: Boolean = consumed < counts(index)
         override def peekNextBatchSize(): Option[Long] = {
+          beforeHeader(index)
           headerFailure.foreach(throw _)
           if (hasNext) Some(128L) else None
         }
@@ -148,6 +149,15 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
         .find(_.getName.endsWith("popFetchedIfAvailable")).get
       method.setAccessible(true)
       method.invoke(iterator)
+    }
+
+    def awaitWorkers(): Unit = {
+      field(iterator, "futures").get(iterator)
+        .asInstanceOf[scala.collection.mutable.Queue[Future[_]]].foreach { future =>
+          try future.get(5, TimeUnit.SECONDS) catch {
+            case _: ExecutionException => // Keep failed futures queued for reader/cleanup handling.
+          }
+        }
     }
 
     def drain(): Seq[Int] = {
@@ -223,6 +233,46 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(intercept[IOException](f.iterator.hasNext) eq error)
       assert(f.open == 0)
       assert(f.reserved == 0)
+    }
+  }
+
+  for (sharedError <- Seq(false, true)) {
+    test(s"completion preserves the read error with multiple failed workers: shared=$sharedError") {
+      val first = new IOException("first header failure")
+      val second = if (sharedError) first else new IOException("second header failure")
+      val errors = Seq(first, second)
+      val f = new Fixture(Seq(1, 1), beforeHeader = index => throw errors(index))
+      try {
+        f.prime()
+        f.awaitWorkers()
+        val observed = intercept[IOException](f.iterator.hasNext)
+        assert(errors.exists(_ eq observed))
+        f.close()
+        if (sharedError) {
+          assert(observed.getSuppressed.isEmpty)
+        } else {
+          assert(observed.getSuppressed.toSeq == errors.filterNot(_ eq observed))
+        }
+        assert(f.open == 0)
+        assert(f.reserved == 0)
+      } finally {
+        f.close()
+      }
+    }
+  }
+
+  test("completion still reports a worker failure that the reader has not observed") {
+    val error = new IOException("unobserved header failure")
+    val f = new Fixture(Seq(1), headerFailure = Some(error))
+    try {
+      f.prime()
+      f.awaitWorkers()
+      val failure = intercept[org.apache.spark.util.TaskCompletionListenerException](f.close())
+      assert(failure.getMessage.contains(error.getMessage))
+      assert(f.open == 0)
+      assert(f.reserved == 0)
+    } finally {
+      f.close()
     }
   }
 

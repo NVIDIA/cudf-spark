@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, At
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -1273,6 +1274,8 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     private val publicationLock = new Object
     @volatile private var stopped = false
     private val futures = new mutable.Queue[Future[Option[BlockState]]]()
+    // Accessed by the task thread, including its completion listener.
+    private var readFailure: Option[Throwable] = None
     private val serializerInstance = serializer.newInstance()
     private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
     private val fetchLock = new Object
@@ -1343,7 +1346,19 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
             // this could either be a successful future, or it finished with exception
             // the case when it will fail with exception is when the underlying stream is closed
             // as part of the shutdown process of the task.
-            future.get(10, TimeUnit.MILLISECONDS).foreach(_.close())
+            val pending = try {
+              future.get(10, TimeUnit.MILLISECONDS)
+            } catch {
+              case e: ExecutionException
+                  if readFailure.isDefined && e.getCause != null && NonFatal(e.getCause) =>
+                // Another worker may have failed before cancellation. Preserve the read
+                // failure instead of replacing it with a task-completion exception.
+                val original = readFailure.get
+                if (e.getCause ne original) original.addSuppressed(e.getCause)
+                None
+            }
+            // Keep close failures separate from exceptions returned by a failed worker.
+            pending.foreach(_.close())
           } catch {
             case t: Throwable =>
               // this is going to capture the first exception and not worry about others
@@ -1510,10 +1525,13 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
             val future = futures.head
             val pending = try future.get catch {
               case e: InterruptedException =>
+                readFailure = Some(e)
                 future.cancel(true)
                 throw e
               // Spark must see FetchFailedException itself to retry the upstream stage.
-              case e: ExecutionException if e.getCause != null => throw e.getCause
+              case e: ExecutionException if e.getCause != null =>
+                readFailure = Some(e.getCause)
+                throw e.getCause
             } finally {
               // The wait has finished or worker cancellation has been requested.
               // Do not replay an already-observed failure during completion cleanup.
