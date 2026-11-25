@@ -19,7 +19,7 @@ import shlex
 import shutil
 import subprocess
 import zipfile
-
+import xml.etree.ElementTree as ET
 
 def shell_exec(shell_cmd, cwd=None):
     ret_code = subprocess.call(shell_cmd, cwd=cwd)
@@ -210,6 +210,7 @@ if system_iceberg_runtime and len(buildver_list) != 1:
     raise Exception("%s is supported only for single-shim builds" %
                     iceberg_runtime["SYSTEM_RUNTIME_PROPERTY"])
 runtime_manifest = os.path.join(project_build_dir, 'iceberg-audit-runtimes.txt')
+spark_runtime_manifest = os.path.join(project_build_dir, 'spark-audit-runtimes.txt')
 with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r') as f:
     from_single_shim = f.read().splitlines()
 with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f:
@@ -277,3 +278,81 @@ with open(runtime_manifest, 'w') as manifest:
                 manifest.write("%s\t%s\n" % (buildver, runtime_path))
         else:
             manifest.write("%s\t-\n" % buildver)
+
+
+def databricks_spark_runtime_paths(buildver, spark_version):
+    # Databricks builds on this branch install the runtime jars into Maven using the
+    # dependency list in this BOM. Audit the same Spark artifacts used for compilation.
+    pom_root = source_basedir if scala_version == '2.12' else os.path.join(
+        source_basedir, 'scala2.13')
+    bom_path = os.path.join(pom_root, 'shim-deps', 'databricks', 'pom.xml')
+    namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
+    root = ET.parse(bom_path).getroot()
+    artifacts = set()
+    for dependency in root.findall('./m:dependencies/m:dependency', namespace):
+        if dependency.findtext('m:groupId', namespaces=namespace) != 'org.apache.spark':
+            continue
+        artifact_id = dependency.findtext('m:artifactId', namespaces=namespace)
+        if artifact_id:
+            artifacts.add(artifact_id.replace('${scala.binary.version}', scala_version))
+    if tuple(int(part) for part in spark_version.split('.')[:2]) >= (3, 4):
+        artifacts.update([
+            'spark-common-utils_%s' % scala_version,
+            'spark-sql-api_%s' % scala_version,
+        ])
+    if tuple(int(part) for part in spark_version.split('.')[:2]) >= (4, 0):
+        artifacts.update([
+            'spark-common-config_%s' % scala_version,
+            'spark-common-utils-other_%s' % scala_version,
+        ])
+    required = {
+        'spark-core_%s' % scala_version,
+        'spark-catalyst_%s' % scala_version,
+        'spark-sql_%s' % scala_version,
+    }
+    missing = required - artifacts
+    if missing:
+        raise Exception('Databricks BOM is missing Spark audit artifacts for spark%s: %s' %
+                        (buildver, ', '.join(sorted(missing))))
+    return [ensure_external_artifact('org.apache.spark', artifact_id, spark_version)
+            for artifact_id in sorted(artifacts)]
+
+
+# Each classifier was compiled against a distinct Spark version. Resolve the
+# same fixed set of Spark modules for every build, independent of local cache contents.
+spark_audit_modules = [
+    'spark-core', 'spark-catalyst', 'spark-sql', 'spark-hive', 'spark-avro',
+    'spark-unsafe', 'spark-network-common', 'spark-network-shuffle',
+]
+skip_spark_buildvers = set(filter(None, re.split(
+    r'[,\s]+', project.getProperty('rapids.spark.audit.skip.buildvers') or '')))
+if 'databricks' in skip_spark_buildvers:
+    skip_spark_buildvers.remove('databricks')
+    skip_spark_buildvers.update(buildver for buildver in buildver_list if 'db' in buildver)
+unknown_skips = skip_spark_buildvers - set(buildver_list)
+if unknown_skips:
+    raise Exception('Spark audit skip build versions are not included: %s' %
+                    ', '.join(sorted(unknown_skips)))
+with open(spark_runtime_manifest, 'w') as manifest:
+    for buildver in sorted(buildver_list):
+        if buildver in skip_spark_buildvers:
+            print('Skipping Spark package-private audit for spark%s by explicit request' %
+                  buildver)
+            manifest.write('%s\t-\n' % buildver)
+            continue
+        spark_version = project.getProperty('spark%s.version' % buildver)
+        if not spark_version:
+            raise Exception('Spark version is missing for build version %s' % buildver)
+        if 'db' in buildver:
+            runtime_paths = databricks_spark_runtime_paths(buildver, spark_version)
+        else:
+            modules = list(spark_audit_modules)
+            if tuple(int(part) for part in spark_version.split('.')[:2]) >= (3, 4):
+                modules.append('spark-protobuf')
+            if tuple(int(part) for part in spark_version.split('.')[:2]) >= (3, 5):
+                modules.extend(['spark-sql-api', 'spark-common-utils'])
+            runtime_paths = [ensure_external_artifact(
+                'org.apache.spark', '%s_%s' % (module, scala_version), spark_version)
+                for module in modules]
+        for path in runtime_paths:
+            manifest.write('%s\t%s\n' % (buildver, path))
