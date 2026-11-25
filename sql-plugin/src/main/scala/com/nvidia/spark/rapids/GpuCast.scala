@@ -21,7 +21,7 @@ import java.util.Optional
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{BinaryOp, CaptureGroups, ColumnVector, ColumnView, DType, RegexProgram, Scalar}
+import ai.rapids.cudf.{ast, BinaryOp, CaptureGroups, ColumnVector, ColumnView, DType, RegexProgram, Scalar}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DecimalUtils, GpuTimeZoneDB, RoundMode}
@@ -87,6 +87,81 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
   val fromType: DataType = cast.child.dataType
   val toType: DataType = cast.dataType
 
+  private def isGpuDecimalScaleSupported(decimalType: DecimalType): Boolean = {
+    val cudfScale = -decimalType.scale.toLong
+    val wholeNumberPrecision = decimalType.precision.toLong - decimalType.scale.toLong
+    cudfScale.isValidInt && wholeNumberPrecision.isValidInt
+  }
+
+  private def isGpuDecimalScaleChangeSupported(
+      fromType: DecimalType,
+      toType: DecimalType): Boolean = {
+    val scaleChange = math.abs(fromType.scale.toLong - toType.scale.toLong)
+    scaleChange <= DecimalType.MAX_PRECISION
+  }
+
+  private def areGpuDecimalScalesSupported(dataType: DataType): Boolean = dataType match {
+    case decimalType: DecimalType => isGpuDecimalScaleSupported(decimalType)
+    case ArrayType(elementType, _) => areGpuDecimalScalesSupported(elementType)
+    case MapType(keyType, valueType, _) =>
+      areGpuDecimalScalesSupported(keyType) && areGpuDecimalScalesSupported(valueType)
+    case structType: StructType =>
+      structType.forall(field => areGpuDecimalScalesSupported(field.dataType))
+    case _ => true
+  }
+
+  private def areGpuDecimalScaleChangesSupported(
+      fromType: DataType,
+      toType: DataType): Boolean = (fromType, toType) match {
+    case (from: DecimalType, to: DecimalType) =>
+      isGpuDecimalScaleChangeSupported(from, to)
+    case (ArrayType(from, _), ArrayType(to, _)) =>
+      areGpuDecimalScaleChangesSupported(from, to)
+    case (MapType(fromKey, fromValue, _), MapType(toKey, toValue, _)) =>
+      areGpuDecimalScaleChangesSupported(fromKey, toKey) &&
+          areGpuDecimalScaleChangesSupported(fromValue, toValue)
+    case (from: StructType, to: StructType) =>
+      from.zip(to).forall { case (fromField, toField) =>
+        areGpuDecimalScaleChangesSupported(fromField.dataType, toField.dataType)
+      }
+    case _ => true
+  }
+
+  private def areGpuStringToDecimalScalesSupported(
+      fromType: DataType,
+      toType: DataType): Boolean = (fromType, toType) match {
+    case (StringType, to: DecimalType) =>
+      // CastStrings performs Int arithmetic between the parsed exponent and the cuDF scale.
+      // Limit the scale to Spark's decimal precision range so extreme, but otherwise valid,
+      // DecimalTypes cannot overflow that arithmetic.
+      math.abs(to.scale.toLong) <= DecimalType.MAX_PRECISION
+    case (ArrayType(from, _), ArrayType(to, _)) =>
+      areGpuStringToDecimalScalesSupported(from, to)
+    case (MapType(fromKey, fromValue, _), MapType(toKey, toValue, _)) =>
+      areGpuStringToDecimalScalesSupported(fromKey, toKey) &&
+          areGpuStringToDecimalScalesSupported(fromValue, toValue)
+    case (from: StructType, to: StructType) =>
+      from.zip(to).forall { case (fromField, toField) =>
+        areGpuStringToDecimalScalesSupported(fromField.dataType, toField.dataType)
+      }
+    case _ => true
+  }
+
+  private def isGpuDecimalCastSupported(
+      fromType: DataType,
+      toType: DataType): Boolean = {
+    areGpuDecimalScalesSupported(fromType) &&
+        areGpuDecimalScalesSupported(toType) &&
+        areGpuDecimalScaleChangesSupported(fromType, toType) &&
+        areGpuStringToDecimalScalesSupported(fromType, toType)
+  }
+
+  override def isBridgeCompatible: Boolean = {
+    super.isBridgeCompatible &&
+        areGpuDecimalScalesSupported(fromType) &&
+        areGpuDecimalScalesSupported(toType)
+  }
+
   override def isTimeZoneSupported: Boolean = {
     (fromType, toType) match {
       case (TimestampType, DateType) => true // this is for to_date(...)
@@ -108,6 +183,10 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
     if (depth > 0 &&
         !checks.gpuCanCast(fromDataType, toDataType)) {
       willNotWorkOnGpu(s"Casting child type $fromDataType to $toDataType is not supported")
+    }
+    if (depth == 0 && !isGpuDecimalCastSupported(fromDataType, toDataType)) {
+      willNotWorkOnGpu(s"Casting $fromDataType to $toDataType requires decimal scale arithmetic " +
+          "that is not supported on the GPU")
     }
 
     (fromDataType, toDataType) match {
@@ -493,26 +572,25 @@ object GpuCast {
           AnsiUtil.castFloatToTimestampAnsi(input, toDataType)
         } else {
           // non-Ansi mode, convert nan/inf to null
-          withResource(Scalar.fromInt(1000000)) { microsPerSec =>
+          val inputWithoutNanAndInfinity =
             withResource(input.nansToNulls()) { inputWithNansToNull =>
-              withResource(FloatUtils.infinityToNulls(inputWithNansToNull)) {
-                inputWithoutNanAndInfinity =>
-                  if (fromDataType == FloatType &&
-                      SparkShimImpl.hasCastFloatTimestampUpcast) {
-                    withResource(inputWithoutNanAndInfinity.castTo(DType.FLOAT64)) { doubles =>
-                      withResource(doubles.mul(microsPerSec, DType.INT64)) {
-                        inputTimesMicrosCv =>
-                          inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
-                      }
-                    }
-                  } else {
-                    withResource(inputWithoutNanAndInfinity.mul(microsPerSec, DType.INT64)) {
-                      inputTimesMicrosCv =>
-                        inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
-                    }
-                  }
-              }
+              FloatUtils.infinityToNulls(inputWithNansToNull)
             }
+          val operand = if (fromDataType == FloatType &&
+              SparkShimImpl.hasCastFloatTimestampUpcast) {
+            withResource(inputWithoutNanAndInfinity) { _ =>
+              inputWithoutNanAndInfinity.castTo(DType.FLOAT64)
+            }
+          } else {
+            inputWithoutNanAndInfinity
+          }
+          val inputTimesMicrosCv = withResource(operand) { _ =>
+            withResource(Scalar.fromInt(1000000)) { microsPerSec =>
+              operand.mul(microsPerSec, DType.INT64)
+            }
+          }
+          withResource(inputTimesMicrosCv) { _ =>
+            inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
           }
         }
       case (FloatType | DoubleType, dt: DecimalType) =>
@@ -947,6 +1025,8 @@ object GpuCast {
           withResource(kvStructColumn.getChildColumnView(1)) { valueColumn =>
             withResource(castToString(valueColumn, from.valueType, options)) { valueStr =>
               withResource(Scalar.fromString("null")) { nullScalar =>
+                // Outer views borrow input data; strKey must survive for the returned pair.
+                // with-resource-lint: allow-deep-nesting -- #15997 other owners feed ifElse.
                 withResource(valueColumn.isNull) { isNull =>
                   isNull.ifElse(nullScalar, valueStr)
                 }
@@ -1132,6 +1212,8 @@ object GpuCast {
             attrColumns += withResource(castToString(cv,
               inputSchema(fieldIndex).dataType, options)) { jsonAttr =>
               withResource(cv.isNull) { isNull =>
+                // The outer view borrows input data; attrColumns are retained for concatenation.
+                // with-resource-lint: allow-deep-nesting -- #15997 other owners feed ifElse.
                 withResource(Scalar.fromString("null")) { nullScalar =>
                   isNull.ifElse(nullScalar, jsonAttr)
                 }
@@ -1198,6 +1280,9 @@ object GpuCast {
             columns += quoteScalar.incRefCount()
 
             withResource(ColumnVector.fromStrings(chars: _*)) { search =>
+              // The quote column is retained in columns, so closing its wrapper earlier
+              // would not release its storage. Keep the replacement operands together.
+              // with-resource-lint: allow-deep-nesting -- #15997 columns retain quote storage.
               withResource(ColumnVector.fromStrings(escaped: _*)) { replace =>
                 columns += cv.stringReplace(search, replace)
               }
@@ -1387,6 +1472,7 @@ object GpuCast {
           withResource(ColumnView.makeStructView(castKey, castValue)) { castKvStructColumn =>
             // We don't have to worry about null in the key/value struct because they are not
             // allowed for maps in Spark
+            // with-resource-lint: allow-deep-nesting -- #15997 outer view owns no data.
             withResource(input.replaceListChild(castKvStructColumn)) { replacedView =>
               replacedView.copyToColumnVector()
             }
@@ -1703,6 +1789,29 @@ case class GpuCast(
     // converting back to SQL query string.
     case _: ArrayType | _: MapType | _: StructType => child.sql
     case _ => s"CAST(${child.sql} AS ${dataType.sql})"
+  }
+
+  // Integral widening is exact and cannot fail, so AST JIT can keep it inside a consumer's kernel
+  // instead of materializing the widened column.
+  private def astJitCastOperator: Option[ast.JitOperator] = (child.dataType, dataType) match {
+    case (ByteType, ShortType) => Some(ast.JitOperator.CAST_TO_INT16)
+    case (ByteType | ShortType, IntegerType) => Some(ast.JitOperator.CAST_TO_INT32)
+    case (ByteType | ShortType | IntegerType, LongType) => Some(ast.JitOperator.CAST_TO_INT64)
+    case _ => None
+  }
+
+  override def selfSupportsAstJit: Boolean = astJitCastOperator.isDefined
+
+  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
+
+  // A cast alone is not worth compiling.
+  override def selfTriggersAstJit: Boolean = false
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    val jitOp = astJitCastOperator.getOrElse(
+      throw new IllegalStateException(s"$this is not supported by AST"))
+    new ast.JitOperation(jitOp,
+      child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
   }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {

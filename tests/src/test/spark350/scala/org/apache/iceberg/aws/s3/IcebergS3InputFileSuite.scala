@@ -15,7 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["350","400"],"carryForward":"all"}
+{"spark":["350"],"carryForward":"all"}
+{"spark":["400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.aws.s3
 

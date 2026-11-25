@@ -155,7 +155,9 @@ abstract class GpuBroadcastHashJoinExecBase(
 
   override val outputRowsLevel: MetricsLevel = ESSENTIAL_LEVEL
   override val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
-  override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
+  override lazy val additionalMetrics: Map[String, GpuMetric] = broadcastJoinMetrics
+
+  protected def broadcastJoinMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
     JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
@@ -198,12 +200,13 @@ abstract class GpuBroadcastHashJoinExecBase(
     case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuBroadcastExchangeExec]
   }
 
+  @transient private lazy val buildSidePostProjects = splitBroadcastPlan(buildPlan)._2.reverse
+
   private def makeBuildSidePostProjection(
       bindProject: GpuProjectExec => GpuTieredProject):
       Option[ColumnarBatch => ColumnarBatch] = {
-    val projects = splitBroadcastPlan(buildPlan)._2.reverse
-    if (projects.nonEmpty) {
-      val boundProjects = projects.map(bindProject)
+    if (buildSidePostProjects.nonEmpty) {
+      val boundProjects = buildSidePostProjects.map(bindProject)
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
           boundProject.projectAndCloseWithRetrySingleBatch(
@@ -215,6 +218,9 @@ abstract class GpuBroadcastHashJoinExecBase(
   }
 
   protected def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+    // Spark prepares the build subtree before the join executes. The extracted projects are
+    // evaluated manually, so wait here before binding them and any subsequent cached projection.
+    buildSidePostProjects.foreach(SparkPlanSubqueries.waitForSubqueries)
     makeBuildSidePostProjection { project =>
       // Match GpuProjectExec's tiered binding so build-side extraction has the same
       // splitting, retry, and metric behavior as a normal project.
@@ -233,7 +239,7 @@ abstract class GpuBroadcastHashJoinExecBase(
   }
 
   protected def buildSidePostProjectionKey: Seq[Seq[Expression]] = {
-    splitBroadcastPlan(buildPlan)._2.reverse.map { project =>
+    buildSidePostProjects.map { project =>
       project.projectList.map(_.canonicalized)
     }
   }

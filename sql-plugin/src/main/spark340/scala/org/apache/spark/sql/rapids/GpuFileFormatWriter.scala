@@ -87,7 +87,8 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
       concurrentWriterPartitionFlushSize: Long,
       forceHiveHashForBucketing: Boolean = false,
       numStaticPartitionCols: Int = 0,
-      baseDebugOutputPath: Option[String]): Set[String] = {
+      baseDebugOutputPath: Option[String],
+      beforeSetupJob: () => Unit = () => ()): Set[String] = {
     require(partitionColumns.size >= numStaticPartitionCols)
 
     val job = Job.getInstance(hadoopConf)
@@ -166,6 +167,9 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
     // propagate the description UUID into the jobs, so that committers
     // get an ID guaranteed to be unique.
     job.getConfiguration.set("spark.sql.sources.writeJobUUID", description.uuid)
+
+    // Run destructive overwrite callbacks only after the driver-side schema and option checks.
+    beforeSetupJob()
 
     if (writeFilesOpt.isDefined) {
       // Typically plan is like:

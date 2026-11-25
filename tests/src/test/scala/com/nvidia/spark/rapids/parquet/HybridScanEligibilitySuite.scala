@@ -41,7 +41,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       decryptionConfigured: Boolean = false,
       dateRebaseMode: DateTimeRebaseMode = DateTimeRebaseException,
       int96RebaseMode: DateTimeRebaseMode = DateTimeRebaseException): Option[String] = {
-    HybridScanParquetPartitionReader.ineligibleReason(enabled, schema,
+    HybridScanPipeline.ineligibleReason(enabled, schema,
       new HybridScanFilters(schema, isCaseSensitive, filters),
       useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, decryptionConfigured,
       dateRebaseMode, int96RebaseMode)
@@ -94,6 +94,12 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       StructField("array_col", ArrayType(IntegerType))
     ))
     assert(!isEligible(schema = array))
+  }
+
+  test("a literal dotted column name uses the pruned-footer reader") {
+    val schema = StructType(Seq(StructField("a.b", IntegerType)))
+    assert(ineligibleReason(schema = schema, filters = Array.empty)
+      .exists(_.contains("column a.b contains a literal dot")))
   }
 
   test("primitive types the reader passes straight through are eligible") {
@@ -182,7 +188,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
 
   test("a read that falls back throws when fallback is set to fail") {
     def check(enabled: Boolean, useChunkedReader: Boolean): Boolean =
-      HybridScanParquetPartitionReader.isEligible(enabled, failOnFallback = true, flatSchema,
+      HybridScanPipeline.isEligible(enabled, failOnFallback = true, flatSchema,
         new HybridScanFilters(flatSchema, true, Array(GreaterThan("int_col", 5))),
         useChunkedReader, decompressAnyCpu = false, useFieldId = false,
         ignoreCorruptFiles = false, decryptionConfigured = false, DateTimeRebaseException,

@@ -17,12 +17,28 @@
 package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.GpuOverrides._
-import com.nvidia.spark.rapids.shims.GpuTypeShims
+import com.nvidia.spark.rapids.shims.{ArraySetOpsShims, GpuTypeShims}
 
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.rapids._
 
 private[rapids] object GpuCollectionExpressionOverrides {
+  private val arraySetOpsIncompatibility =
+    "the GPU implementation treats -0.0 and 0.0 as equal, but the CPU implementation " +
+      "currently does not (see SPARK-39845). Also, Apache Spark 3.1.3 fixed issue " +
+      "SPARK-36741 where NaNs in these set like operators were not treated as being equal. " +
+      "We have chosen to break with compatibility for the older versions of Spark in this " +
+      "instance and handle NaNs the same as 3.1.3+"
+
+  private def withArraySetOpsCompatibility[INPUT <: Expression](
+      rule: ExprRule[INPUT]): ExprRule[INPUT] = {
+    if (ArraySetOpsShims.hasCompatibleFloatingPointSemantics) {
+      rule
+    } else {
+      rule.incompat(arraySetOpsIncompatibility)
+    }
+  }
+
   val rules: Seq[ExprRule[_ <: Expression]] = Seq(
     expr[PythonUDF](
       "UDF run in an external python process. Does not actually run on the GPU, but " +
@@ -140,10 +156,12 @@ private[rapids] object GpuCollectionExpressionOverrides {
       "Gets the field at `ordinal` in the Array",
       ExprChecks.binaryProject(
         (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
-            TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(),
+            TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+            GpuTypeShims.additionalVariantSupportedTypes).nested(),
         TypeSig.all,
         ("array", TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY +
-            TypeSig.STRUCT + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY),
+            TypeSig.STRUCT + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+            GpuTypeShims.additionalVariantSupportedTypes),
             TypeSig.ARRAY.nested(TypeSig.all)),
         ("ordinal", TypeSig.integral, TypeSig.integral)),
       GetArrayItemRuleMeta),
@@ -151,10 +169,12 @@ private[rapids] object GpuCollectionExpressionOverrides {
       "Gets Value from a Map based on a key",
       ExprChecks.binaryProject(
         (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
-          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(),
+          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+          GpuTypeShims.additionalVariantSupportedTypes).nested(),
         TypeSig.all,
         ("map", TypeSig.MAP.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT +
-          TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY),
+          TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+          GpuTypeShims.additionalVariantSupportedTypes),
           TypeSig.MAP.nested(TypeSig.all)),
         ("key", TypeSig.commonCudfTypes + TypeSig.DECIMAL_128, TypeSig.all)),
       GetMapValueRuleMeta),
@@ -382,15 +402,18 @@ private[rapids] object GpuCollectionExpressionOverrides {
       ArrayFilterRuleMeta),
     expr[ArrayAggregate](
       "Aggregate elements in an array using an accumulator function and finishing " +
-          "transformation. Currently only lambdas of the form (acc, x) -> op(acc, g(x)) with " +
-          "an identity finish are executed on the GPU, where op is one of SUM/PRODUCT/MAX/" +
-          "MIN/ALL/ANY. If/CaseWhen branches are accepted as long as each branch is itself " +
-          "op-of-acc (or bare acc) with op consistent across branches; other shapes fall " +
-          "back to CPU. SUM/PRODUCT on float/double share the same parallel-reduction " +
-          "non-determinism as GpuSum and are gated by " +
-          "spark.rapids.sql.variableFloatAgg.enabled. SUM/PRODUCT on integer/decimal in " +
-          "ANSI mode fall back to CPU because cuDF segmented reduce wraps on overflow " +
-          "instead of raising.",
+          "transformation. GPU execution supports lambdas reducible to (acc, x) -> op(acc, g(x)) " +
+          "(or commuted) with an identity finish, where op is SUM/PRODUCT/MAX/MIN/ALL/ANY and " +
+          "g(x) does not reference acc, including If/CaseWhen (with else) branches that apply " +
+          "the same op or leave acc unchanged (MAX/MIN require non-nullable zero for unchanged " +
+          "acc branches), lossless casts around acc, and non-ANSI narrowing integer sums " +
+          "cast(acc as narrower_int) + x when x matches the accumulator type. Fallbacks to CPU: " +
+          "SUM/PRODUCT on decimal (all modes), integer types in ANSI mode, and try_* operations " +
+          "(cuDF segmented reductions wrap on overflow); SUM/PRODUCT on float/double when " +
+          "spark.rapids.sql.variableFloatAgg.enabled is false (parallel reduction order differs " +
+          "from Spark); MAX/MIN on float/double (cuDF absorbs NaN instead of propagating it); " +
+          "ALL/ANY with nullable elements or nullable g(x) (3VL short-circuiting differs); and " +
+          "other shapes or non-identity finish lambdas (see spark.rapids.sql.explain).",
       ExprChecks.projectOnly(
         TypeSig.commonCudfTypes + TypeSig.DECIMAL_128,
         TypeSig.all,
@@ -423,7 +446,7 @@ private[rapids] object GpuCollectionExpressionOverrides {
           TypeSig.ARRAY.nested(TypeSig.all)))),
       ArraysZipRuleMeta
     ),
-    expr[ArrayExcept](
+    withArraySetOpsCompatibility(expr[ArrayExcept](
       "Returns an array of the elements in array1 but not in array2, without duplicates",
       ExprChecks.binaryProject(
         TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL),
@@ -435,12 +458,8 @@ private[rapids] object GpuCollectionExpressionOverrides {
             TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL),
             TypeSig.ARRAY.nested(TypeSig.all))),
       ArrayExceptRuleMeta
-    ).incompat("the GPU implementation treats -0.0 and 0.0 as equal, but the CPU " +
-        "implementation currently does not (see SPARK-39845). Also, Apache Spark " +
-        "3.1.3 fixed issue SPARK-36741 where NaNs in these set like operators were " +
-        "not treated as being equal. We have chosen to break with compatibility for " +
-        "the older versions of Spark in this instance and handle NaNs the same as 3.1.3+"),
-    expr[ArrayIntersect](
+    )),
+    withArraySetOpsCompatibility(expr[ArrayIntersect](
       "Returns an array of the elements in the intersection of array1 and array2, without" +
         " duplicates",
       ExprChecks.binaryProject(
@@ -453,12 +472,8 @@ private[rapids] object GpuCollectionExpressionOverrides {
             TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL),
             TypeSig.ARRAY.nested(TypeSig.all))),
       ArrayIntersectRuleMeta
-    ).incompat("the GPU implementation treats -0.0 and 0.0 as equal, but the CPU " +
-        "implementation currently does not (see SPARK-39845). Also, Apache Spark " +
-        "3.1.3 fixed issue SPARK-36741 where NaNs in these set like operators were " +
-        "not treated as being equal. We have chosen to break with compatibility for " +
-        "the older versions of Spark in this instance and handle NaNs the same as 3.1.3+"),
-    expr[ArrayUnion](
+    )),
+    withArraySetOpsCompatibility(expr[ArrayUnion](
       "Returns an array of the elements in the union of array1 and array2, without duplicates.",
       ExprChecks.binaryProject(
         TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL),
@@ -470,12 +485,8 @@ private[rapids] object GpuCollectionExpressionOverrides {
             TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL),
             TypeSig.ARRAY.nested(TypeSig.all))),
       ArrayUnionRuleMeta
-    ).incompat("the GPU implementation treats -0.0 and 0.0 as equal, but the CPU " +
-        "implementation currently does not (see SPARK-39845). Also, Apache Spark " +
-        "3.1.3 fixed issue SPARK-36741 where NaNs in these set like operators were " +
-        "not treated as being equal. We have chosen to break with compatibility for " +
-        "the older versions of Spark in this instance and handle NaNs the same as 3.1.3+"),
-    expr[ArraysOverlap](
+    )),
+    withArraySetOpsCompatibility(expr[ArraysOverlap](
       "Returns true if a1 contains at least a non-null element present also in a2. If the arrays " +
       "have no common element and they are both non-empty and either of them contains a null " +
       "element null is returned, false otherwise.",
@@ -487,11 +498,7 @@ private[rapids] object GpuCollectionExpressionOverrides {
             TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL),
             TypeSig.ARRAY.nested(TypeSig.all))),
       ArraysOverlapRuleMeta
-    ).incompat("the GPU implementation treats -0.0 and 0.0 as equal, but the CPU " +
-        "implementation currently does not (see SPARK-39845). Also, Apache Spark " +
-        "3.1.3 fixed issue SPARK-36741 where NaNs in these set like operators were " +
-        "not treated as being equal. We have chosen to break with compatibility for " +
-        "the older versions of Spark in this instance and handle NaNs the same as 3.1.3+"),
+    )),
     expr[ArrayRemove](
       "Returns the array after removing all elements that equal to the input element (right) " +
       "from the input array (left)",

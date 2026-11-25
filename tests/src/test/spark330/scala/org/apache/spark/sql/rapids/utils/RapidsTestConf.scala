@@ -1,0 +1,42 @@
+/*
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*** spark-rapids-shim-json-lines
+{"spark":["330","420"],"carryForward":"none"}
+spark-rapids-shim-json-lines ***/
+package org.apache.spark.sql.rapids.utils
+
+import org.apache.spark.SparkConf
+
+object RapidsTestConf {
+  def apply(conf: SparkConf): SparkConf = {
+    Seq("allocFraction" -> "1", "maxAllocFraction" -> "1", "minAllocFraction" -> "0.25")
+      .foreach { case (name, default) =>
+        val key = s"spark.rapids.memory.gpu.$name"
+        conf.set(key, System.getProperty(s"rapids.test.gpu.$name", conf.get(key, default)))
+      }
+    Option(System.getenv("SPARK_CONF")).foreach { settings =>
+      settings.split(",").filter(_.trim.nonEmpty).foreach { setting =>
+        val keyValue = setting.split("=", 2)
+        val key = keyValue(0).trim
+        require(keyValue.length == 2 && key.nonEmpty,
+          "SPARK_CONF entries must have a nonempty key followed by '='")
+        conf.set(key, keyValue(1))
+      }
+    }
+    conf
+  }
+}

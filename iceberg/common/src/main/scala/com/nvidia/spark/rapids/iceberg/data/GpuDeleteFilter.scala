@@ -424,6 +424,7 @@ class GpuDeleteFilter(
   }
 
   override def close(): Unit = {
+    // Per-task build batches are owned and closed by HashedExistenceJoinIterator.
   }
 }
 

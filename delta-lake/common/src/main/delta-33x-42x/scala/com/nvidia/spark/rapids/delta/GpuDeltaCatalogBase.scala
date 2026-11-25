@@ -38,7 +38,7 @@ import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, Del
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.metering.DeltaLogging
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaRuntimeShim33x, DeltaTrampoline, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaRuntimeShim33x, DeltaTrampoline, DeltaWriteOrigin, GpuDeltaLog,
   GpuWriteIntoDeltaLike}
 import org.apache.spark.sql.delta.sources.{DeltaSourceUtils, DeltaSQLConf}
 import org.apache.spark.sql.delta.stats.StatisticsCollection
@@ -320,7 +320,11 @@ abstract class GpuDeltaCatalogBase(
         Some(tableDesc),
         schemaInCatalog = if (newSchema != schema) Some(newSchema) else None)
       val gpuDeltaLog = new GpuDeltaLog(deltaLog, rapidsConf)
-      DeltaRuntimeShim.createGpuWrite(gpuDeltaLog, cpuWriter)
+      if (DeltaRuntimeShim.isV1WriterSaveAsTableOverwrite(cpuWriter.options, operation.mode)) {
+        DeltaRuntimeShim.createGpuWrite(gpuDeltaLog, cpuWriter, DeltaWriteOrigin.V1SaveAsTable)
+      } else {
+        DeltaRuntimeShim.createGpuWrite(gpuDeltaLog, cpuWriter)
+      }
     }
 
 
@@ -480,7 +484,9 @@ abstract class GpuDeltaCatalogBase(
   }
 
   /** Applies version-specific normalization before staged properties are committed. */
-  protected def normalizeStagedTableProperties(props: util.Map[String, String]): Unit = {}
+  protected def normalizeStagedTableProperties(props: util.Map[String, String]): Unit = {
+    // Default no-op; overridden where normalization is needed.
+  }
 
   override def tableExists(ident: Identifier): Boolean = cpuCatalog.tableExists(ident)
 
@@ -533,7 +539,9 @@ abstract class GpuDeltaCatalogBase(
 
     override def name(): String = ident.name()
 
-    override def abortStagedChanges(): Unit = {}
+    override def abortStagedChanges(): Unit = {
+      // Staged changes are only materialized in commitStagedChanges.
+    }
 
     override def capabilities(): util.Set[TableCapability] = {
       Set(V1_BATCH_WRITE, TRUNCATE).asJava

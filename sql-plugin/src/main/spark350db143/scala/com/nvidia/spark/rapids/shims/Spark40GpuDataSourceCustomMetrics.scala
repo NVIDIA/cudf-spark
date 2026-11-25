@@ -15,8 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["350db143","400","400db173","401","402","403","410db183","411"],"carryForward":"none"}
-{"spark":["404"],"carryForward":"sameMinor"}
+{"spark":["350db143","400db173","410db183","411"],"carryForward":"none"}
+{"spark":["400"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -33,7 +33,9 @@ private[rapids] final class Spark4GpuDataSourceCustomMetricsFactory(
 /** Preserves Spark 4.0 and 4.1.1 custom metrics while using the GPU data source RDD. */
 private[rapids] class Spark4GpuDataSourceCustomMetrics(
     customMetrics: Map[String, SQLMetric]) extends GpuDataSourceCustomMetrics {
-  override def readerOpened(reader: PartitionReader[ColumnarBatch]): Unit = {}
+  override def readerOpened(reader: PartitionReader[ColumnarBatch]): Unit = {
+    // Metrics are updated on progress and completion.
+  }
 
   override def readerProgress(reader: PartitionReader[ColumnarBatch]): Unit = {
     update(reader)

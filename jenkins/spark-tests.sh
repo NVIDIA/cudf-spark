@@ -104,28 +104,28 @@ EOF
 }
 
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 if [ "$CLASSIFIER"x == x ];then
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
-    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
+    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
 else
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
-    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
+    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
 fi
-RAPIDS_TEST_JAR="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
+RAPIDS_TEST_JAR="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
 
 export INCLUDE_SPARK_AVRO_JAR=${INCLUDE_SPARK_AVRO_JAR:-"true"}
 if [[ "${INCLUDE_SPARK_AVRO_JAR}" == "true" ]]; then
   $WGET_CMD $SPARK_REPO/org/apache/spark/spark-avro_$SCALA_BINARY_VER/$SPARK_VER/spark-avro_$SCALA_BINARY_VER-${SPARK_VER}.jar
 fi
 
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
 
 RAPIDS_INT_TESTS_HOME="$ARTF_ROOT/integration_tests/"
 # The version of pytest.tar.gz that is uploaded is the one built against spark330 but its being pushed without classifier for now
-RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
+RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
 
 tmp_info=${TMP_INFO_FILE:-'/tmp/artifacts-build.info'}
 rm -rf "$tmp_info"
@@ -146,11 +146,11 @@ getRevision() {
 
 set +x
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
-echo "-------------------- rapids-4-spark BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark BUILD INFO --------------------" >> "$tmp_info"
 p_ver=$(getRevision $RAPIDS_PLUGIN_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
 it_ver=$(getRevision $RAPIDS_TEST_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
 pt_ver=$(getRevision $RAPIDS_INT_TESTS_TGZ integration_tests/rapids4spark-version-info.properties)
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
 set -x
@@ -287,6 +287,8 @@ run_delta_lake_tests() {
   # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
   # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
   SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
+  # Delta 4.2 and 4.3 publish Spark 4.1-line artifacts that are compatible with Spark 4.1.4.
+  SPARK_414_PATTERN="^(4\.1\.4)$"
 
   if [[ $SPARK_VER =~ $SPARK_32X_PATTERN ]]; then
     # There are multiple versions of deltalake that support SPARK 3.2.X
@@ -328,11 +330,19 @@ run_delta_lake_tests() {
       else
         DELTA_LAKE_VERSIONS="4.0.1"
       fi
-      if [[ "$SPARK_VER" == "4.0.1" ]]; then
+      if [[ "$SPARK_VER" == "4.0.1" || "$SPARK_VER" == "4.0.5" ]]; then
         DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
       fi
     else
       echo "Skipping Delta Lake 4.0.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
+    fi
+  fi
+
+  if [[ $SPARK_VER =~ $SPARK_414_PATTERN ]]; then
+    if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
+      DELTA_LAKE_VERSIONS="4.2.0 4.3.0"
+    else
+      echo "Skipping Delta Lake 4.2/4.3 tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
     fi
   fi
 
@@ -403,10 +413,10 @@ run_delta_lake_uc_tests() {
   fi
 
   # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
-  # those versions are only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated
-  # rather than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
-  # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
-  # rejects the same combinations outright; CI skips them instead.
+  # those versions are only exercised on Scala 2.13 with Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4.
+  # They are repeated rather than read from DELTA_LAKE_VERSIONS because that variable is assigned
+  # inside run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs.
+  # run_unity_catalog_server.sh rejects the same combinations outright; CI skips them instead.
   if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
     if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
       echo "!!!! Unity Catalog tests require Scala 2.13, found $SCALA_BINARY_VER"
@@ -415,14 +425,15 @@ run_delta_lake_uc_tests() {
     echo "!!!! Skipping Unity Catalog tests. They require Scala 2.13, found $SCALA_BINARY_VER"
     return 0
   fi
-  if [[ "$SPARK_VER" != "4.0.1" && "$SPARK_VER" != "4.1.1" ]]; then
+  if [[ "$SPARK_VER" != "4.0.1" && "$SPARK_VER" != "4.0.5" &&
+      "$SPARK_VER" != "4.1.1" && "$SPARK_VER" != "4.1.4" ]]; then
     if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
-      echo "!!!! Delta Lake $delta_version Unity Catalog tests require Spark 4.0.1 or 4.1.1," \
-        "found $SPARK_VER"
+      echo "!!!! Delta Lake $delta_version Unity Catalog tests require Spark 4.0.1, 4.0.5," \
+        "4.1.1, or 4.1.4; found $SPARK_VER"
       return 1
     fi
     echo "!!!! Skipping Unity Catalog tests. Delta Lake $delta_version is only tested against" \
-      "Spark 4.0.1 and 4.1.1, found $SPARK_VER"
+      "Spark 4.0.1, 4.0.5, 4.1.1, and 4.1.4; found $SPARK_VER"
     return 0
   fi
 
@@ -697,7 +708,7 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     # Add the ivysettings.xml file to support --packages downloads from Artifactory using credentials
     # Set the HOST_NAME variable for ivysettings.xml (e.g., from https://usr:psw@HOST_NAME/path/to/repo)
     SPARK_SHELL_SMOKE_TEST=1 HOST_NAME=$PROJECT_REPO_HOST \
-    PYSP_TEST_spark_jars_packages=com.nvidia:rapids-4-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
+    PYSP_TEST_spark_jars_packages=com.nvidia:cudf-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
     PYSP_TEST_spark_jars_repositories=${PROJECT_REPO} \
     PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml \
       ./run_pyspark_from_build.sh
@@ -774,7 +785,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
   # Create a separate conda env for cudf-udf tests to avoid affecting the base env (python 3.10)
   CUDF_UDF_ENV="cudf_udf_$(date +"%Y%m%d")"
   CUDF_UDF_PYTHON_VER="3.12"  # since 26.04, python 3.12+ is required for cudf-py
-  CUDF_VER=$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)
+  CUDF_VER=${CUDF_VER:-$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)}
   CUDA_VER_FOR_CUDF=${CUDA_VER_FOR_CUDF:-'12.9'}
 
   conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c conda-forge -c nvidia -c defaults \

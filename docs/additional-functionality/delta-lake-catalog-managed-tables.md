@@ -19,7 +19,7 @@ context while accelerating the data operation.
 This support is limited to the following open-source combination:
 
 - Delta Lake 4.2.0 with the Scala 2.13 artifact;
-- Apache Spark 4.0.1 or 4.1.1; and
+- Apache Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4; and
 - the Unity Catalog 0.6.0 `UCSingleCatalog` staging protocol.
 
 The plugin validates the catalog's expected staging shape before replacing

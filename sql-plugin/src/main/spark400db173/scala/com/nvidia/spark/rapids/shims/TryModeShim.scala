@@ -20,7 +20,9 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import org.apache.spark.sql.catalyst.expressions.{Add, Divide, EvalMode, Expression, Multiply, Remainder, Subtract}
+import com.nvidia.spark.rapids.GpuEvalMode
+
+import org.apache.spark.sql.catalyst.expressions.{Add, BinaryArithmetic, Divide, EvalMode, Expression, Multiply, Remainder, Subtract}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{Average, Sum}
 
 /**
@@ -29,17 +31,30 @@ import org.apache.spark.sql.catalyst.expressions.aggregate.{Average, Sum}
  * See: https://github.com/apache/spark/commit/a96e9ca81518bff31b0089d459fe78804ca1aa38
  */
 object TryModeShim {
-  def isTryMode(expr: Expression): Boolean = {
+  private def toGpuEvalMode(evalMode: EvalMode.Value): GpuEvalMode.Value = evalMode match {
+    case EvalMode.LEGACY => GpuEvalMode.LEGACY
+    case EvalMode.ANSI => GpuEvalMode.ANSI
+    case EvalMode.TRY => GpuEvalMode.TRY
+  }
+
+  def getEvalMode(expr: BinaryArithmetic): GpuEvalMode.Value = {
     val evalMode = expr match {
       case add: Add => add.evalContext.evalMode
       case sub: Subtract => sub.evalContext.evalMode
       case mul: Multiply => mul.evalContext.evalMode
       case div: Divide => div.evalContext.evalMode
       case mod: Remainder => mod.evalContext.evalMode
-      case avg: Average => avg.evalMode  // Average still uses evalMode directly as a parameter
-      case sum: Sum => sum.evalContext.evalMode  // Sum uses evalContext.evalMode
-      case _ => throw new RuntimeException(s"Unsupported expression $expr in TRY mode")
+      case _ => throw new RuntimeException(s"Unsupported expression $expr for eval mode")
     }
-    evalMode == EvalMode.TRY
+    toGpuEvalMode(evalMode)
+  }
+
+  def isTryMode(expr: Expression): Boolean = expr match {
+    case arith: BinaryArithmetic => getEvalMode(arith) == GpuEvalMode.TRY
+    // Average still uses evalMode directly as a parameter
+    case avg: Average => avg.evalMode == EvalMode.TRY
+    // Sum uses evalContext.evalMode
+    case sum: Sum => sum.evalContext.evalMode == EvalMode.TRY
+    case _ => throw new RuntimeException(s"Unsupported expression $expr in TRY mode")
   }
 }

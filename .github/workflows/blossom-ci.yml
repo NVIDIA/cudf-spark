@@ -112,7 +112,7 @@ jobs:
       # currently hardcode projects here to avoid intermittent mvn scan failures
       - name: Setup blackduck properties
         run: |
-          echo detect.maven.build.command="-pl=com.nvidia:rapids-4-spark-parent,com.nvidia:rapids-4-spark-sql_2.12 -am" >> application.properties
+          echo detect.maven.build.command="-pl=com.nvidia:cudf-spark-parent_2.12,com.nvidia:cudf-spark-sql_2.12 -am" >> application.properties
           echo detect.maven.included.scopes=compile >> application.properties
 
       - name: Run blossom action

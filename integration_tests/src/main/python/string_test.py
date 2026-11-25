@@ -25,7 +25,7 @@ from marks import *
 from pyspark.sql.types import *
 import pyspark.sql.utils
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_databricks104_or_later, \
+from spark_session import with_cpu_session, with_gpu_session, \
     is_databricks_version_or_later, is_before_spark_320, is_spark_400_or_later, \
     is_before_spark_340, spark_version_tuple
 
@@ -659,8 +659,6 @@ def test_substring_column():
             'SUBSTRING(\'abc\', b)',
             'SUBSTRING(a, b)'))
 
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks104_or_later(),
-                    reason="https://github.com/NVIDIA/spark-rapids/issues/7463")
 def test_ephemeral_substring():
     str_gen = mk_str_gen('.{0,30}')
     assert_gpu_and_cpu_are_equal_collect(

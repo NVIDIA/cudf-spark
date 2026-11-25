@@ -57,7 +57,9 @@ abstract class GpuOptimizeExecutorBase(
 
   protected def createTransaction(): OptimisticTransaction
 
-  protected def beforeOptimize(txn: OptimisticTransaction): Unit = {}
+  protected def beforeOptimize(txn: OptimisticTransaction): Unit = {
+    // Optional pre-optimize hook for version-specific subclasses.
+  }
 
   protected def getMinFileSize: Long
 
@@ -92,7 +94,9 @@ abstract class GpuOptimizeExecutorBase(
       candidateFiles: Seq[AddFile],
       addedFiles: Seq[AddFile],
       removedFiles: Seq[RemoveFile],
-      committedTxn: OptimisticTransaction): Unit = {}
+      committedTxn: OptimisticTransaction): Unit = {
+    // Optional stats hook for version-specific subclasses.
+  }
 
   def optimize(): Seq[Row] = {
     recordDeltaOperation(deltaLog, "delta.optimize") {
