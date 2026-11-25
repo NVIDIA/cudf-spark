@@ -473,6 +473,9 @@ class GpuDynamicPartitionDataSingleWriter(
     }
   }
 
+  private lazy val partitionValuesProjection =
+    UnsafeProjection.create(description.partitionColumns.map(_.dataType).toArray)
+
   protected def genGetPartValuesFunc(keyHostCb: ColumnarBatch): Int => Option[InternalRow] = {
     if (isPartitioned) {
       // Use the existing code to convert each row into a path. It would be nice to do this
@@ -480,9 +483,8 @@ class GpuDynamicPartitionDataSingleWriter(
       // support on the GPU right now
       import scala.collection.JavaConverters._
       val partCols = description.partitionColumns.indices.map(keyHostCb.column)
-      val projection = UnsafeProjection.create(description.partitionColumns.map(_.dataType).toArray)
       val iter = new ColumnarBatch(partCols.toArray, keyHostCb.numRows()).rowIterator()
-        .asScala.map(row => projection(row).copy())
+        .asScala.map(row => partitionValuesProjection(row).copy())
       _ => Some(iter.next)
     } else {
       _ => None
