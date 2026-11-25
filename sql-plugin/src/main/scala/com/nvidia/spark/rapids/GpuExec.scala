@@ -150,6 +150,9 @@ trait GpuExec extends SparkPlan with Logging {
   def createMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.create(level, name)
 
+  def createMetric(level: MetricsLevel, metric: => SQLMetric): GpuMetric =
+    metricFactory.create(level, metric)
+
   def createNanoTimingMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.createNanoTiming(level, name)
 
@@ -207,7 +210,9 @@ trait GpuExec extends SparkPlan with Logging {
         HYBRID_SCAN_OUTPUT_FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL,
           DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME),
         HYBRID_SCAN_BYTES_REQUESTED -> createSizeMetric(MODERATE_LEVEL,
-          DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED))
+          DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED),
+        HYBRID_SCAN_NATIVE_HOST_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_NATIVE_HOST_BYTES_READ))
     } else {
       rowGroupsFetched
     }

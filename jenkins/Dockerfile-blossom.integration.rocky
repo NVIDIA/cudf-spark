@@ -33,7 +33,8 @@ ARG ART_URL
 # Install jdk-8, jdk-11, maven, docker image
 RUN yum update -y && \
     yum install epel-release -y && \
-    yum install -y java-1.8.0-openjdk-devel java-11-openjdk-devel java-17-openjdk-devel wget expect rsync zip unzip procps git
+    yum install -y java-1.8.0-openjdk-devel java-11-openjdk-devel java-17-openjdk-devel java-21-openjdk-devel \
+        wget expect rsync zip unzip procps git
 
 # The plugin: net.alchim31.maven requires a higher mvn version.
 ENV MAVEN_HOME "/usr/local/apache-maven-3.8.1"
@@ -41,7 +42,7 @@ RUN wget ${ART_URL}/org/apache/maven/apache-maven/3.8.1/apache-maven-3.8.1-bin.t
     tar xzvf $MAVEN_HOME-bin.tar.gz -C /usr/local && \
     rm -f $MAVEN_HOME-bin.tar.gz
 
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+RUN wget --quiet "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh" -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -b -p /opt/conda && \
     rm -f ~/miniconda.sh
 ENV PATH="/opt/conda/bin:$MAVEN_HOME/bin:${PATH}"

@@ -1153,6 +1153,7 @@ def _append_external_parquet(spark, table, path, row_count):
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="External Parquet files require a local catalog")
 def test_iceberg_unmapped_validity_helper_id(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -1219,6 +1220,7 @@ def test_iceberg_unmapped_validity_helper_id(
     not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="External Parquet files require a local catalog")
 def test_iceberg_legacy_list_initial_defaults(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
