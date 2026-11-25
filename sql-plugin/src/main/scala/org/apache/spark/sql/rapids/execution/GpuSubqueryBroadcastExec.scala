@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -80,10 +80,12 @@ abstract class GpuSubqueryBroadcastMetaBase(
     //       +- [GPU overrides of executed subquery...]
     //
     case ex @ BroadcastExchangeExec(_, c2r: GpuColumnarToRowExec) =>
-      val exMeta = new GpuBroadcastMeta(ex.copy(child = c2r.child), conf, p, r)
+      val exchange = ex.copy(child = c2r.child)
+      exchange.copyTagsFrom(ex)
+      val exMeta = new GpuBroadcastMeta(exchange, conf, p, r)
       exMeta.tagForGpu()
       if (exMeta.canThisBeReplaced) {
-        broadcastBuilder = () => exMeta.convertToGpu()
+        broadcastBuilder = () => exMeta.convertIfNeeded()
       } else {
         willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
       }

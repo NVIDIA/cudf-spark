@@ -129,9 +129,7 @@ abstract class GpuShuffleMetaBase(
         SparkShimImpl.columnarAdaptivePlan(adaptive, goal)
       case _ => childPlans.head.convertIfNeeded()
     }
-    val gpuShuffle = convertShuffleToGpu(newChild)
-    GpuTransitionOverrides.copyAqeQueryStageExchangeTag(shuffle, gpuShuffle)
-    gpuShuffle
+    convertShuffleToGpu(newChild)
   }
 
   protected def convertShuffleToGpu(newChild: SparkPlan): GpuExec = {
