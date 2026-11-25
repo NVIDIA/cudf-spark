@@ -302,12 +302,13 @@ def test_iceberg_merge_v3_table_fallback(
 
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.parametrize("merge_mode,insert_only", [
-    pytest.param("copy-on-write", False, id="cow"),
-    pytest.param("merge-on-read", False, id="mor"),
-    pytest.param("merge-on-read", True, id="insert-only")])
+@pytest.mark.parametrize("merge_mode,insert_only,expected_writer", [
+    pytest.param("copy-on-write", False, "GpuReplaceDataExec", id="cow"),
+    pytest.param("merge-on-read", False, "GpuWriteDeltaExec", id="mor"),
+    pytest.param("merge-on-read", True, "GpuAppendDataExec", id="insert-only")])
 @allow_non_gpu("LocalTableScanExec")
-def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode, insert_only):
+def test_iceberg_merge_write_defaults(
+        spark_tmp_table_factory, merge_mode, insert_only, expected_writer):
     cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
         spark_tmp_table_factory, {"write.merge.mode": merge_mode})
     conf = copy_and_update(iceberg_merge_v3_enabled_conf, {
@@ -329,7 +330,8 @@ def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode, inser
     inserted = "current" if catalog_has_default else None
     expected = [(1, 0 if insert_only else 1, "legacy"),
                 (2, 1, "legacy" if insert_only else None), (3, 0, inserted), (4, 1, inserted)]
-    assert_iceberg_write_defaults(cpu_table, gpu_table, merge, expected, conf)
+    assert_iceberg_write_defaults(
+        cpu_table, gpu_table, merge, expected, conf, expected_writer=expected_writer)
 
 
 @iceberg

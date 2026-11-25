@@ -15,9 +15,6 @@
 import os
 import tempfile
 import logging
-import hashlib
-from contextlib import closing
-import json
 from types import MappingProxyType
 from typing import Callable, List, Dict, Optional
 
@@ -29,6 +26,7 @@ import pytest
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_rest_catalog, spark_jvm
+from iceberg.defaults import assert_iceberg_default_file_parity, assert_iceberg_gpu_writer
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
 
@@ -460,11 +458,15 @@ def check_default_rows(expected):
     return check
 
 
-def assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf):
+def assert_iceberg_write_defaults(
+        cpu_table, gpu_table, write, expected, conf, expected_writer=None):
     """Compare logical rows, physical Parquet values, and persisted field defaults."""
     def write_and_read(spark):
         table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
-        write(spark, table)
+        if expected_writer is None:
+            write(spark, table)
+        else:
+            assert_iceberg_gpu_writer(spark, lambda: write(spark, table), expected_writer)
         return spark.table(table).orderBy("id")
 
     assert_gpu_and_cpu_are_equal_collect(write_and_read, conf=conf)
@@ -475,59 +477,6 @@ def assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf):
         assert_iceberg_default_file_parity(spark, cpu_table, gpu_table)
 
     with_cpu_session(check_files, conf=conf)
-
-
-def iceberg_default_file_snapshot(spark, name):
-    """Inspect current data files without applying Iceberg defaults or delete filtering."""
-    from pyarrow import BufferReader
-    from pyarrow.parquet import ParquetFile
-
-    def defaults(metadata):
-        # The fixtures use flat schemas. Both producers identify the same fields by Iceberg ID.
-        if b"iceberg.schema" in metadata:
-            fields = json.loads(metadata[b"iceberg.schema"])["fields"]
-            return tuple(sorted((field["id"], key, field[key]) for field in fields
-                                for key in ("initial-default", "write-default") if key in field))
-
-        fields = json.loads(metadata[b"org.apache.spark.sql.parquet.row.metadata"])["fields"]
-        result = []
-        for field in fields:
-            attrs = field["metadata"]
-            for key, kind in (("EXISTS_DEFAULT", "initial-default"),
-                              ("CURRENT_DEFAULT", "write-default")):
-                if key in attrs:
-                    value = spark.sql(f"SELECT {attrs[key]}").first()[0]
-                    result.append((attrs["parquet.field.id"], kind, value))
-        return tuple(sorted(result))
-
-    table = spark_jvm().org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
-        spark._jsparkSession, name)
-    columns = [field.name() for field in table.schema().columns()]
-    records, file_defaults, files = [], set(), {}
-    with closing(table.newScan().planFiles()) as tasks, closing(tasks.iterator()) as iterator:
-        while iterator.hasNext():
-            path = str(iterator.next().file().location())
-            with closing(table.io().newInputFile(path).newStream()) as stream:
-                data = stream.readAllBytes()
-            files[path] = hashlib.sha256(data).hexdigest()
-            parquet = ParquetFile(BufferReader(data))
-            present = tuple(name for name in columns if name in parquet.schema_arrow.names)
-            attributes = defaults(parquet.metadata.metadata or {})
-            file_defaults.add((present, attributes))
-            for row in parquet.read(columns=list(present)).to_pylist():
-                # Keep absent fields distinct from physical NULLs. Include defaults per row
-                # so different file grouping cannot hide a wrong schema generation.
-                records.append((tuple(row.items()), attributes))
-    assert files, name
-    return {"records": sorted(records, key=repr),
-            "defaults": sorted(file_defaults, key=repr), "files": files}
-
-
-def assert_iceberg_default_file_parity(spark, cpu_table, gpu_table):
-    cpu = iceberg_default_file_snapshot(spark, cpu_table)
-    gpu = iceberg_default_file_snapshot(spark, gpu_table)
-    assert cpu["records"] == gpu["records"], (cpu["records"], gpu["records"])
-    assert cpu["defaults"] == gpu["defaults"], (cpu["defaults"], gpu["defaults"])
 
 
 def setup_iceberg_fixed_default_table(

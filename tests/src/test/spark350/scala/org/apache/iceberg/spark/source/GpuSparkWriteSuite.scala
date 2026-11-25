@@ -20,17 +20,25 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark.source
 
+import scala.collection.JavaConverters._
+
+import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
 import com.nvidia.spark.rapids.iceberg.IcebergDefaultTestUtils.fieldWithWriteDefault
+import org.apache.hadoop.fs.Path
 import org.apache.iceberg.{Schema, TableProperties}
 import org.apache.iceberg.types.Types
+import org.apache.parquet.hadoop.ParquetFileReader
+import org.apache.parquet.hadoop.util.HadoopInputFile
 import org.mockito.Mockito.{mock, when}
-import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_METADATA_KEY
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.types.{DataType, StructType}
 
-class GpuSparkWriteSuite extends AnyFunSuite {
+class GpuSparkWriteSuite extends SparkQueryCompareTestSuite {
 
   for (value <- Seq(None, Some(9), Some(23))) {
     test(s"data writers preserve the write schema's default $value and nested field IDs") {
@@ -53,6 +61,44 @@ class GpuSparkWriteSuite extends AnyFunSuite {
         assert(child.getCurrentDefaultValue() == value.map(_.toString))
         assert(child.metadata.contains("EXISTS_DEFAULT") == value.isDefined)
         value.foreach(_ => assert(child.metadata.getString("EXISTS_DEFAULT") == "2"))
+      }
+    }
+  }
+
+  test("the GPU Parquet writer persists distinct supplied defaults and the field ID") {
+    val field = fieldWithWriteDefault(7, "value", Types.IntegerType.get(), Int.box(23),
+      initialDefault = Some(Int.box(2)))
+    val writeSchema = GpuSparkWrite.dataWriterSparkTypeFor(new Schema(field))
+    withTempPath { output =>
+      withGpuSparkSession { spark =>
+        val data = spark.createDataFrame(Seq(Row(17)).asJava, writeSchema)
+        ExecutionPlanCaptureCallback.startCaptureWithWritePlans()
+        try {
+          data.coalesce(1).write.parquet(output.getAbsolutePath)
+          val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+          assert(plans.exists(plan =>
+            ExecutionPlanCaptureCallback.contains(plan, "GpuDataWritingCommandExec")),
+            plans.mkString("\n"))
+        } finally {
+          ExecutionPlanCaptureCallback.endCapture()
+        }
+        val files = output.listFiles().filter(_.getName.endsWith(".parquet"))
+        assert(files.nonEmpty)
+        files.foreach { file =>
+          withResource(ParquetFileReader.open(HadoopInputFile.fromPath(
+              new Path(file.getAbsolutePath), spark.sparkContext.hadoopConfiguration))) { reader =>
+            val metadata = reader.getFooter.getFileMetaData
+            assert(metadata.getSchema.getFields.get(0).getId.intValue() == 7)
+            val persisted = DataType.fromJson(metadata.getKeyValueMetaData.get(
+                "org.apache.spark.sql.parquet.row.metadata")).asInstanceOf[StructType]("value")
+            assert(persisted.metadata.getLong(FIELD_ID_METADATA_KEY) == 7L)
+            assert(persisted.metadata.getString("EXISTS_DEFAULT") == "2")
+            assert(persisted.getCurrentDefaultValue().contains("23"))
+          }
+        }
+      }
+      withCpuSparkSession { spark =>
+        assert(spark.read.parquet(output.getAbsolutePath).collect().toSeq == Seq(Row(17)))
       }
     }
   }

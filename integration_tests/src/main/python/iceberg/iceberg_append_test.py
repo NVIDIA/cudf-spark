@@ -15,7 +15,8 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, collect_data_or_exception, \
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    collect_data_or_exception, \
     assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
@@ -27,8 +28,10 @@ from iceberg import (
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table,
-    setup_iceberg_write_default_tables, assert_iceberg_write_defaults,
-    assert_iceberg_write_only_default_fallback, iceberg_default_file_snapshot)
+    setup_iceberg_write_default_tables,
+    assert_iceberg_write_only_default_fallback)
+from iceberg.defaults import (
+    assert_iceberg_default_file_parity, iceberg_default_file_snapshot, iceberg_file_hashes)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
 from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
@@ -152,12 +155,12 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
 
 
 def _insert_omitting_default(spark, table, row_id):
-    before = iceberg_default_file_snapshot(spark, table)["files"]
+    before = iceberg_file_hashes(spark, table)
     failed, _ = collect_data_or_exception(
         lambda: spark.sql(f"INSERT INTO {table} (id, p) VALUES ({row_id}, 0)").collect(),
         "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA")
     if failed:
-        assert iceberg_default_file_snapshot(spark, table)["files"] == before
+        assert iceberg_file_hashes(spark, table) == before
     return not failed
 
 
@@ -168,17 +171,22 @@ def test_iceberg_v3_write_default_evolution(spark_tmp_table_factory):
     cpu_table, gpu_table, _ = setup_iceberg_write_default_tables(spark_tmp_table_factory)
     conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
     old_rows = [(1, 0, "legacy"), (2, 1, "legacy")]
-    expected = list(old_rows)
 
-    def write(spark, table):
+    def write(spark):
+        table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
+        expected = list(old_rows)
         old = iceberg_default_file_snapshot(spark, table)
         assert all("optional_added" not in dict(row) for row, _ in old["records"])
         assert spark.table(table).orderBy("id").collect() == old_rows
-        assert iceberg_default_file_snapshot(spark, table)["files"] == old["files"]
+        assert iceberg_file_hashes(spark, table) == old["files"]
 
         spark.sql(f"INSERT INTO {table} VALUES (3, 0, 'explicit'), (4, 1, NULL)")
         first_insert = _insert_omitting_default(spark, table, 5)
-        before_update = iceberg_default_file_snapshot(spark, table)["files"]
+        expected.extend([(3, 0, "explicit"), (4, 1, None)])
+        if first_insert:
+            expected.append((5, 0, "current"))
+        assert spark.table(table).orderBy("id").collect() == expected, "current generation"
+        before_update = iceberg_file_hashes(spark, table)
         iceberg = spark._jvm.org.apache.iceberg
         target = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, table)
         target.updateSchema().updateColumnDefault(
@@ -186,20 +194,21 @@ def test_iceberg_v3_write_default_evolution(spark_tmp_table_factory):
         spark.catalog.refreshTable(table)
         field = target.schema().findField("optional_added")
         assert (field.initialDefault(), field.writeDefault()) == ("legacy", "next")
-        assert iceberg_default_file_snapshot(spark, table)["files"] == before_update
+        assert iceberg_file_hashes(spark, table) == before_update
 
         second_insert = _insert_omitting_default(spark, table, 6)
         if not second_insert:
             # Exercise the new file generation even where CPU rejects omitted columns.
             spark.sql(f"INSERT INTO {table} VALUES (6, 0, 'explicit-after-update')")
-        assert before_update.items() <= iceberg_default_file_snapshot(spark, table)["files"].items()
-        if table == cpu_table:
-            expected.extend([(3, 0, "explicit"), (4, 1, None)])
-            if first_insert:
-                expected.append((5, 0, "current"))
-            expected.append((6, 0, "next" if second_insert else "explicit-after-update"))
+        assert before_update.items() <= iceberg_file_hashes(spark, table).items()
+        expected.append((6, 0, "next" if second_insert else "explicit-after-update"))
+        assert spark.table(table).orderBy("id").collect() == expected, "next generation"
+        return spark.createDataFrame(
+            [(1, first_insert), (2, second_insert)], "generation INT, inserted BOOLEAN")
 
-    assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf)
+    assert_gpu_and_cpu_are_equal_collect(write, conf=conf)
+    with_cpu_session(lambda spark: assert_iceberg_default_file_parity(
+        spark, cpu_table, gpu_table), conf=conf)
 
 
 @iceberg
