@@ -188,7 +188,7 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
           if (Delta43xConfigChecker.isV1SaveAsTableOverwrite(cpuExec.writeOptions)) {
             // saveAsTable keeps the existing metadata, which may ask for DataPageV2.
             Delta43xConfigChecker.tagRetainedProperties(meta, cpuExec.session,
-              snapshot.metadata.configuration, cpuExec.properties, cpuExec.writeOptions)
+              snapshot.metadata.configuration, cpuExec.writeOptions)
           }
         case _: ServerSidePlannedTable =>
           meta.willNotWorkOnGpu(

@@ -140,20 +140,17 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
     } || Thread.currentThread().getStackTrace.exists(_.toString.contains(CLASSIC_DATAFRAME_WRITER))
 
   /**
-   * Tags a replace that keeps the existing table's metadata: the existing properties apply unless
-   * this write sets them explicitly. Session defaults do not apply to an existing table.
+   * Tags a replace that keeps the existing table's metadata. Delta ignores the properties and
+   * `delta.*` options given with such a write, and session defaults do not apply to an existing
+   * table, so only the existing properties count. A `parquet.writer.version` write option still
+   * applies.
    */
   def tagRetainedProperties(
       meta: RapidsMeta[_, _, _],
       spark: SparkSession,
       existingProperties: Map[String, String],
-      properties: Map[String, String],
-      writeOptions: Map[String, String]): Unit = {
-    val explicit = normalizeDeltaKeys(properties) ++ normalizeDeltaKeys(
-      writeOptions.filter { case (k, _) => k.toLowerCase(Locale.ROOT).startsWith("delta.") })
-    tagParquetFormatVersion(meta, spark, writeOptions,
-      normalizeDeltaKeys(existingProperties) ++ explicit)
-  }
+      writeOptions: Map[String, String]): Unit =
+    tagParquetFormatVersion(meta, spark, writeOptions, normalizeDeltaKeys(existingProperties))
 
   private def normalizeKey(properties: Map[String, String], key: String): Map[String, String] =
     properties.map {

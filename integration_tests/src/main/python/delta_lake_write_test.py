@@ -5244,6 +5244,30 @@ def test_delta_43_parquet_format_version_save_as_table_overwrite_keeps_propertie
 @delta_lake
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_save_as_table_overwrite_ignores_explicit_version(
+        spark_tmp_table_factory):
+    """DataFrameWriter V1 saveAsTable in overwrite mode keeps the existing table's metadata and
+    ignores a `delta.parquet.format.version` given with the write, so an explicit 1.0.0 must not
+    let a DataPageV2 table be planned on the GPU, which would then fail at write time."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA "
+        "TBLPROPERTIES ('delta.parquet.format.version' = '2.12.0')").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("overwrite") \
+                .option("delta.parquet.format.version", "1.0.0").saveAsTable(table)
+    assert not _wrote_on_gpu(write, conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_invalid_creation_default_stale_snapshot(spark_tmp_path):
     """Delta can hold a snapshot saying a table does not exist after the table was created
     elsewhere. Planning then builds the creation properties from the session's defaults, which
