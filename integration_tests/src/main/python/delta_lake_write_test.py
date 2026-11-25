@@ -2722,8 +2722,6 @@ def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(is_databricks_runtime() or not is_spark_35x(),
-                    reason="Exercises the OSS Delta partition-only overwrite writer on Spark 3.5")
 def test_delta_replace_where_rejects_out_of_partition_rows(spark_tmp_path):
     conf = copy_and_update(_delta_confs, {
         "spark.databricks.delta.replaceWhere.dataColumns.enabled": "false"})
@@ -2739,12 +2737,17 @@ def test_delta_replace_where_rejects_out_of_partition_rows(spark_tmp_path):
         with pytest.raises(AnalysisException, match="p=1") as error:
             (spark.range(2, 4).selectExpr("id", "id % 2 AS p").write.format("delta")
              .mode("overwrite").option("replaceWhere", "p = 0").save(path))
-        return error.value
+        assert "p = 0" in str(error.value)
+        # Older PySpark versions expose the Delta error through the message only.
+        get_condition = (getattr(error.value, "getCondition", None) or
+                         getattr(error.value, "getErrorClass", None))
+        if get_condition:
+            assert get_condition() == "DELTA_REPLACE_WHERE_MISMATCH"
 
-    cpu_error = with_cpu_session(lambda spark: overwrite(spark, f"{spark_tmp_path}/CPU"), conf=conf)
-    gpu_error = with_gpu_session(lambda spark: overwrite(spark, f"{spark_tmp_path}/GPU"), conf=conf)
-    assert cpu_error.getErrorClass() == gpu_error.getErrorClass() == "DELTA_REPLACE_WHERE_MISMATCH"
-    assert "org.apache.spark.sql.delta.rapids.GpuWriteIntoDelta." in gpu_error.stackTrace
+    with_cpu_session(lambda spark: overwrite(spark, f"{spark_tmp_path}/CPU"), conf=conf)
+    assert_rapids_delta_write(lambda spark: overwrite(spark, f"{spark_tmp_path}/GPU"),
+                              conf=conf, required_gpu_classes=["GpuRapidsDeltaWriteExec"],
+                              require_non_empty=True)
 
     def check_snapshots(spark):
         for suffix in ["CPU", "GPU"]:
