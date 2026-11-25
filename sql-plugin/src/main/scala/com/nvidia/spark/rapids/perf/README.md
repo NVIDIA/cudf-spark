@@ -14,7 +14,7 @@ Hive text tables, and DSv2 file scans (Parquet, ORC, CSV, JSON, Avro).
 | `spark.rapids.sql.history.planningTimeoutMillis` | 100 | budget for one history lookup while planning |
 | `spark.rapids.sql.history.declareTimeoutMillis` | 5000 | budget for declaring each metric family to the store |
 | `spark.rapids.sql.history.scanSplit.enabled` | `false` | `true` turns on the scan split heuristic when a provider is set |
-| `spark.rapids.sql.history.scanSplit.aggregate` | `latest` | how the readings that a scan finds are combined: `latest` (the newest reading, a bounded read), `mean`, `min` or `max` (the largest ratio gives the smallest split) |
+| `spark.rapids.sql.history.scanSplit.aggregate` | `latest` | how the readings that a scan finds are combined: `latest` (the newest reading, a bounded read), `mean`, `min`, `max` (the largest ratio gives the smallest split) or `consistent` (the mean when the readings are within 3x of each other, else Spark's split) |
 | `spark.rapids.sql.history.scanSplit.maxAgeDays` | 7 | how old a ratio may be; lookup only, capped at the store's 14 day retention |
 | `spark.rapids.sql.history.scanSplit.minBytes` | 64 MiB | lower bound of a learned split |
 | `spark.rapids.sql.history.scanSplit.maxBytes` | 4 GiB | upper bound of a learned split |

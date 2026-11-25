@@ -58,7 +58,19 @@ object RatioAggregate {
     override def value(summary: Summary): Double = summary.max()
   }
 
-  val all: Seq[RatioAggregate] = Seq(Latest, Mean, Min, Max)
+  /**
+   * The mean when the readings agree, every one within `MaxSpread` times the others; otherwise
+   * NaN, which the lookup drops, so a scan whose history disagrees keeps Spark's own split.
+   */
+  case object Consistent extends RatioAggregate("consistent", 0) {
+    override def value(summary: Summary): Double =
+      if (summary.max() <= MaxSpread * summary.min()) summary.mean() else Double.NaN
+  }
+
+  /** How far apart, as a factor, the readings `Consistent` averages may be. */
+  val MaxSpread: Double = 3.0
+
+  val all: Seq[RatioAggregate] = Seq(Latest, Mean, Min, Max, Consistent)
 
   /** Each aggregate by its name in the configuration, which only admits these names. */
   val byName: Map[String, RatioAggregate] = all.map(a => a.name -> a).toMap

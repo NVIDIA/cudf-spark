@@ -46,13 +46,14 @@ class ScanSplitLookupEndToEndSuite extends AnyFunSuite {
   private final class Env(heuristic: ScanSplitHeuristic) {
 
     /** The lookup as `fileSourceSplit` makes it: the tier number from 1 and the ratio, if any. */
-    def find(key: PlanKey, size: Long): Option[(Int, Double)] = {
-      val aggregate = RatioAggregate.Latest
-      heuristic.historyOf.lookup(ScanHistoryKey(key, size).searchList, System.currentTimeMillis(),
-        Policy, Some(Duration.ofDays(7)), aggregate.limit) match {
+    def find(key: PlanKey, size: Long,
+        aggregate: RatioAggregate = RatioAggregate.Latest): Option[(Int, Double)] = {
+      val found = heuristic.historyOf.lookup(ScanHistoryKey(key, size).searchList,
+        System.currentTimeMillis(), Policy, Some(Duration.ofDays(7)), aggregate.limit) match {
         case Some(Some((tier, summary))) => Some((tier + 1, aggregate.value(summary)))
         case _ => None
       }
+      found.filter { case (_, ratio) => MetricHistory.isUsable(ratio) }
     }
 
     /** Records `ratio` (asynchronous in the store) and waits until its own key finds it. */
@@ -147,6 +148,44 @@ class ScanSplitLookupEndToEndSuite extends AnyFunSuite {
         assert(env.find(PlanKey(key.plan, 777L), Size - 1) == Some((3, ratio)))
         assert(env.find(PlanKey(key.plan ^ 1L, key.literals), Size).isEmpty)
       }
+    }
+  }
+
+  /** Records one reading for each day of `ratios`, oldest first, all of one plan and size. */
+  private def days(env: Env, ratios: Double*): Unit =
+    ratios.zipWithIndex.foreach { case (ratio, i) =>
+      env.record(PlanKey(plan, 100L + i), Size, ratio)
+    }
+
+  private val newDay = PlanKey(plan, 999L)
+
+  test("consistent: tier 3 readings more than 3x apart give no ratio, so Spark's split") {
+    // Pruning that varies by day: most days decode little, one day decodes four times as much.
+    withHistory { env =>
+      days(env, 1.0, 4.0, 1.25)
+      assert(env.find(newDay, Size) == Some((3, 1.25)))
+      assert(env.find(newDay, Size, RatioAggregate.Consistent).isEmpty)
+    }
+  }
+
+  test("consistent: tier 3 readings within 3x give their mean") {
+    withHistory { env =>
+      days(env, 3.0, 4.0, 3.5)
+      assert(env.find(newDay, Size) == Some((3, 3.5)))
+      assert(env.find(newDay, Size, RatioAggregate.Consistent) == Some((3, 3.5)))
+      days(env, 6.0, 3.0) // 6 is twice the smallest, within 3x: still the mean
+      val mean = env.find(newDay, Size, RatioAggregate.Consistent).map(_._2).get
+      assert(math.abs(mean - 3.9) < 1e-9, mean) // (3 + 4 + 3.5 + 3 + 6) / 5
+    }
+  }
+
+  test("consistent: one reading is used as is, and only the winning tier counts") {
+    withHistory { env =>
+      days(env, 1.0, 8.0)
+      env.record(newDay, Size, 2.0)
+      // Tier 1 has one reading; the disagreeing tier 3 readings are not looked at.
+      assert(env.find(newDay, Size, RatioAggregate.Consistent) == Some((1, 2.0)))
+      assert(env.find(PlanKey(plan, 1000L), Size, RatioAggregate.Consistent).isEmpty)
     }
   }
 }

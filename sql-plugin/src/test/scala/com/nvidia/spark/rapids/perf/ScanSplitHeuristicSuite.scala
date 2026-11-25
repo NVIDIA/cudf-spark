@@ -221,11 +221,23 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     }
     assert(Limits.aggregate == RatioAggregate.Latest)
     Seq(RatioAggregate.Latest -> 256 * MiB, RatioAggregate.Mean -> 256 * MiB,
-        RatioAggregate.Min -> 512 * MiB, RatioAggregate.Max -> (GiB / 6.0).toLong).foreach {
+        RatioAggregate.Min -> 512 * MiB, RatioAggregate.Max -> (GiB / 6.0).toLong,
+        // 2, 4 and 6 are within a factor of three, so consistent takes their mean.
+        RatioAggregate.Consistent -> 256 * MiB).foreach {
       case (aggregate, expected) =>
         assert(decide(heuristic(store), limits = Limits.copy(aggregate = aggregate)) == expected,
           aggregate.name)
     }
+  }
+
+  test("consistent: readings within a factor of three give their mean, others Spark's split") {
+    val consistent = Limits.copy(aggregate = RatioAggregate.Consistent)
+    val agree = storeHolding(sized(scan) -> 3.0)
+    agree.record(observation(sized(scan), 5.0, now - 500))
+    assert(decide(heuristic(agree), limits = consistent) == 256 * MiB)
+    val disagree = storeHolding(sized(scan) -> 1.0)
+    disagree.record(observation(sized(scan), 4.0, now - 500))
+    assert(decide(heuristic(disagree), limits = consistent) == Static)
   }
 
   test("disabled heuristic never touches the store") {
