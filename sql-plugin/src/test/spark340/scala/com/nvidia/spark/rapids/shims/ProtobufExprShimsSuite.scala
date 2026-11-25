@@ -25,11 +25,11 @@ package com.nvidia.spark.rapids.shims
 import com.nvidia.spark.rapids.{GpuLiteral, VersionUtils}
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
-import org.apache.spark.sql.rapids.protobuf.{FlattenedSchemaArrays, ProtobufFieldDescriptor,
-  ProtobufMessageDescriptor, ProtobufPlannerOptions}
+import org.apache.spark.sql.rapids.protobuf.{FlattenedSchemaArrays, ProtobufDescriptorSource,
+  ProtobufExprInfo, ProtobufFieldDescriptor, ProtobufMessageDescriptor, ProtobufPlannerOptions}
 import org.apache.spark.sql.types._
 
 class ProtobufExprShimsSuite extends AnyFunSuite {
@@ -165,5 +165,61 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
     assert(expr(failOnErrors = true).hasSideEffects)
     assert(!expr(failOnErrors = false).hasSideEffects)
+  }
+
+  private case class FakeProtobufExpr(
+      child: Expression,
+      messageName: String,
+      descriptorBytes: Array[Byte],
+      options: Map[String, String] = Map.empty,
+      override val dataType: DataType = outputSchema,
+      isDeterministic: Boolean = true) extends UnaryExpression {
+    override lazy val deterministic: Boolean = isDeterministic
+    override def nullable: Boolean = true
+    override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode =
+      throw new UnsupportedOperationException("not needed")
+    override protected def withNewChildInternal(newChild: Expression): Expression =
+      copy(child = newChild)
+  }
+
+  test("equivalentDecode matches independent deterministic calls with equal descriptor bytes") {
+    val extract: Expression => Either[String, ProtobufExprInfo] = {
+      case f: FakeProtobufExpr =>
+        Right(ProtobufExprInfo(f.messageName,
+          ProtobufDescriptorSource.DescriptorBytes(f.descriptorBytes), f.options))
+      case _ => Left("not fake protobuf")
+    }
+    val child = FakeExprChild()
+    val target = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 3),
+      Map("mode" -> "PERMISSIVE"))
+    val targetInfo = extract(target).toOption.get
+    val targetOpts = SparkProtobufCompat.parsePlannerOptions(target.options).toOption.get
+
+    // Distinct Array[Byte] with identical bytes fails semanticEquals but matches by content.
+    val sameBytes = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 3),
+      Map("MODE" -> "permissive"))
+    assert(!sameBytes.semanticEquals(target))
+    assert(ProtobufExprShims.equivalentDecode(target, targetInfo, targetOpts, extract, sameBytes))
+
+    // Different descriptor bytes, message name, options, or unsupported option do not match.
+    val diffBytes = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 4), target.options)
+    val diffMsg = FakeProtobufExpr(child, "test.Other", Array[Byte](1, 2, 3), target.options)
+    val diffMode = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 3),
+      Map("mode" -> "FAILFAST"))
+    val unsupportedOpt = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 3),
+      Map("mode" -> "PERMISSIVE", "unknown.opt" -> "true"))
+    assert(!ProtobufExprShims.equivalentDecode(target, targetInfo, targetOpts, extract, diffBytes))
+    assert(!ProtobufExprShims.equivalentDecode(target, targetInfo, targetOpts, extract, diffMsg))
+    assert(!ProtobufExprShims.equivalentDecode(target, targetInfo, targetOpts, extract, diffMode))
+    assert(!ProtobufExprShims.equivalentDecode(
+      target, targetInfo, targetOpts, extract, unsupportedOpt))
+
+    // Non-deterministic decodes match only by reference identity.
+    val nonDet1 = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 3), target.options,
+      isDeterministic = false)
+    val nonDet2 = FakeProtobufExpr(child, "test.Row", Array[Byte](1, 2, 3), target.options,
+      isDeterministic = false)
+    assert(ProtobufExprShims.equivalentDecode(nonDet1, targetInfo, targetOpts, extract, nonDet1))
+    assert(!ProtobufExprShims.equivalentDecode(nonDet1, targetInfo, targetOpts, extract, nonDet2))
   }
 }

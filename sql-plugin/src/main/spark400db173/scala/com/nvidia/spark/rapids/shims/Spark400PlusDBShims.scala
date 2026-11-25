@@ -28,6 +28,8 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Expression, KnownNotContainsNull}
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.adaptive.TableCacheQueryStageExec
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
@@ -88,5 +90,12 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
 
   override def getPartitionFiles(partition: FilePartition): Seq[PartitionedFile] = {
     partition.filesWithAbsolutePaths.toSeq
+  }
+
+  override def getTableCacheNonQueryStagePlan(plan: SparkPlan): Option[SparkPlan] = {
+    plan match {
+      case tcqs: TableCacheQueryStageExec => Some(tcqs.plan)
+      case _ => None
+    }
   }
 }

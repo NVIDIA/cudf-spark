@@ -61,7 +61,7 @@ RUN add-apt-repository ppa:deadsnakes/ppa && \
     tzdata git zip unzip bzip2 wget parallel \
     inetutils-ping expect wget libnuma1 libgomp1 locales
 
-ARG MAVEN_VERSION=3.8.1
+ARG MAVEN_VERSION=3.8.2
 ARG MAVEN_BASE_URL=https://archive.apache.org/dist/maven/maven-3
 RUN wget "${MAVEN_BASE_URL}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
         -O /tmp/apache-maven.tar.gz && \

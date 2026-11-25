@@ -8,8 +8,19 @@ on:
   push:
     branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
   schedule:
-    - cron: '27 2 * * *'
+    - cron: '27 2 * * 2,4,6'
   workflow_dispatch:
+    inputs:
+      image:
+        description: CI image family to publish
+        type: choice
+        default: all
+        options:
+          - all
+          - spark-build
+          - integration-ubuntu
+          - integration-rocky
+          - skills-build
 
 permissions:
   contents: read
