@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import archive
 
@@ -30,6 +30,16 @@ class SparkArchiveTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), self.content)
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(fetch.call_args.args[0], self.url)
+
+    @patch("archive.subprocess.run")
+    def test_cold_download_has_time_for_a_slow_retry(self, run):
+        archive.download(self.url, self.path)
+        command = run.call_args.args[0]
+        attempt = int(command[command.index("--max-time") + 1])
+        retries = int(command[command.index("--retry-max-time") + 1])
+        self.assertGreaterEqual(attempt, 60 * 60)
+        self.assertGreater(retries, attempt)
+        self.assertGreater(run.call_args.kwargs["timeout"], retries + attempt)
 
     def test_corrupt_restore_and_invalid_download_are_not_reused(self):
         self.path.parent.mkdir()
