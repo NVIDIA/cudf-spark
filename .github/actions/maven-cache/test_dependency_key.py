@@ -11,10 +11,13 @@ from unittest.mock import Mock, patch
 from xml.etree import ElementTree as ET
 
 
+RELEASE_LINE = "00.12"
+SNAPSHOT_VERSION = "2.0.0-SNAPSHOT"
+
 helper = runpy.run_path(str(Path(__file__).with_name("dependency-key.py")))
 
 
-def model(jni="26.12.0-SNAPSHOT", private="26.10.0", scala="2.13"):
+def model(jni=SNAPSHOT_VERSION, private="1.0.0", scala="2.13"):
     return ET.fromstring(f"""<project xmlns="http://maven.apache.org/POM/4.0.0"><properties>
         <cudf-spark-jni.artifactId>jni</cudf-spark-jni.artifactId>
         <cudf-spark-jni.version>{jni}</cudf-spark-jni.version>
@@ -29,15 +32,16 @@ def metadata(entries):
                        f"<extension>jar</extension><value>{value}</value></snapshotVersion>"
                        for classifier, value in entries)
     return (f"<metadata><groupId>com.nvidia</groupId><artifactId>jni</artifactId>"
-            f"<version>26.12.0-SNAPSHOT</version><versioning><snapshotVersions>{versions}"
+            f"<version>{SNAPSHOT_VERSION}</version><versioning><snapshotVersions>{versions}"
             "</snapshotVersions></versioning></metadata>").encode()
 
 
 class DependencyKeyTest(unittest.TestCase):
     def test_release_branch_cache_keys(self):
         script = Path(__file__).with_name("cache-keys.sh")
-        for branch, scope in (("main", "main"), ("release/26.12", "26.12"),
-                              ("release/26.12-rc", "release/26.12-rc")):
+        release_branch = f"release/{RELEASE_LINE}"
+        rc_branch = f"{release_branch}-rc"
+        for branch, scope in (("main", "main"), (release_branch, RELEASE_LINE), (rc_branch, rc_branch)):
             with self.subTest(branch=branch):
                 env = dict(os.environ, BRANCH=branch, RUNNER_OS="Linux", RUNNER_ARCH="X64",
                            SCALA_VER="2.12", INPUT_HASH="inputs", PREMERGE_HASH="fixture")
@@ -50,13 +54,13 @@ class DependencyKeyTest(unittest.TestCase):
                 self.assertTrue(keys["full"].startswith(keys["stem"] + "-premerge-"))
 
     def test_cleanup_from_fingerprinted_model_only_removes_tracked_snapshots(self):
-        pom = model(private="26.10.0")
+        pom = model()
         ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "1-SNAPSHOT"
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             group = home / ".m2/repository/com/nvidia"
-            stale = ["jni/26.12.0-SNAPSHOT", "cudf-spark-history-metrics-local/1-SNAPSHOT"]
-            keep = ["jni/26.10.0-SNAPSHOT", "private_2.13/26.10.0", "unrelated/1-SNAPSHOT"]
+            stale = [f"jni/{SNAPSHOT_VERSION}", "cudf-spark-history-metrics-local/1-SNAPSHOT"]
+            keep = ["jni/1.0.0-SNAPSHOT", "private_2.13/1.0.0", "unrelated/1-SNAPSHOT"]
             for item in stale + keep:
                 directory = group / item
                 directory.mkdir(parents=True)
@@ -85,7 +89,7 @@ class DependencyKeyTest(unittest.TestCase):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, "Invalid upstream"):
                     cleanup(pom, home)
             outside = home / "outside"
-            version = outside / "jni/26.12.0-SNAPSHOT"
+            version = outside / "jni" / SNAPSHOT_VERSION
             version.mkdir(parents=True)
             marker = version / "do-not-delete"
             marker.touch()
@@ -99,8 +103,8 @@ class DependencyKeyTest(unittest.TestCase):
             self.assertTrue(marker.exists())
 
     def test_restore_keeps_only_individually_verified_snapshots(self):
-        pom = model(private="26.12.0-SNAPSHOT")
-        ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "26.12.0"
+        pom = model(private=SNAPSHOT_VERSION)
+        ET.SubElement(pom.find("{*}properties"), "history-metrics.version").text = "2.0.0"
         publications = {"jni": "jni-1", "private_2.13": "private-1"}
         def key():
             return helper["dependency_key"](pom, lambda repo, artifact, version: publications[artifact])
@@ -108,7 +112,7 @@ class DependencyKeyTest(unittest.TestCase):
         before = key()
         publications["private_2.13"] = "private-2"
         after = key()
-        prefix = "spark-maven-Linux-X64-2.13-26.12-"
+        prefix = f"spark-maven-Linux-X64-2.13-{RELEASE_LINE}-"
         stem = prefix + before + "-" + "a" * 64
         full = stem + "-premerge-4.1.2-" + "b" * 64
         self.assertLessEqual(len(full), 512)
@@ -118,9 +122,9 @@ class DependencyKeyTest(unittest.TestCase):
             with self.subTest(key=restored), tempfile.TemporaryDirectory() as tmp:
                 home = Path(tmp)
                 group = home / ".m2/repository/com/nvidia"
-                jni = group / "jni/26.12.0-SNAPSHOT/cuda12.jar"
-                private = group / "private_2.13/26.12.0-SNAPSHOT/spark405.jar"
-                pinned = group / "cudf-spark-history-metrics-local/26.12.0/fixed.jar"
+                jni = group / "jni" / SNAPSHOT_VERSION / "cuda12.jar"
+                private = group / "private_2.13" / SNAPSHOT_VERSION / "spark405.jar"
+                pinned = group / "cudf-spark-history-metrics-local/2.0.0/fixed.jar"
                 for jar in (jni, private, pinned):
                     jar.parent.mkdir(parents=True)
                     jar.write_bytes(b"original JAR")
@@ -168,14 +172,14 @@ class DependencyKeyTest(unittest.TestCase):
     def test_pins_do_not_require_snapshot_service(self):
         key = helper["dependency_key"]
         offline = Mock(side_effect=AssertionError("unexpected network request"))
-        pin = key(model(jni="26.12.0"), offline)
-        self.assertNotEqual(pin, key(model(jni="26.12.1"), offline))
-        self.assertNotEqual(pin, key(model(jni="26.12.0", private="26.10.1"), offline))
-        self.assertNotEqual(pin, key(model(jni="26.12.0", scala="2.12"), offline))
+        pin = key(model(jni="2.0.0"), offline)
+        self.assertNotEqual(pin, key(model(jni="2.0.1"), offline))
+        self.assertNotEqual(pin, key(model(jni="2.0.0", private="1.0.1"), offline))
+        self.assertNotEqual(pin, key(model(jni="2.0.0", scala="2.12"), offline))
 
     def test_each_dependency_tracks_its_own_publication(self):
         key = helper["dependency_key"]
-        both = model(private="26.12.0-SNAPSHOT")
+        both = model(private=SNAPSHOT_VERSION)
         candidates = {"jni": "build-1", "private_2.13": "build-1"}
         resolve = lambda repo, artifact, version: candidates[artifact]
         before = key(both, resolve)
@@ -186,14 +190,14 @@ class DependencyKeyTest(unittest.TestCase):
         self.assertNotEqual(after_private, key(both, resolve))
 
     def test_optional_history_metrics_snapshot(self):
-        pom = model(jni="26.12.0")
+        pom = model(jni="2.0.0")
         prop = ET.SubElement(pom.find("{*}properties"), "history-metrics.version")
-        prop.text = "26.12.0-SNAPSHOT"
+        prop.text = SNAPSHOT_VERSION
         resolver = Mock(side_effect=["history-1", "history-2"])
         key = helper["dependency_key"]
         self.assertNotEqual(key(pom, resolver), key(pom, resolver))
         resolver.assert_called_with("https://example.org/snapshots", "cudf-spark-history-metrics-local",
-                                    "26.12.0-SNAPSHOT")
+                                    SNAPSHOT_VERSION)
 
     def test_classifier_publication_not_xml_order_changes_the_key(self):
         entries = [("cuda12", "build-1"), ("cuda13", "build-1")]
@@ -215,7 +219,7 @@ class DependencyKeyTest(unittest.TestCase):
             pom.find(".//{*}repository/{*}url").text = repo.as_uri()
             effective = repo / "effective.xml"
             ET.ElementTree(pom).write(effective)
-            published = repo / "com/nvidia/jni/26.12.0-SNAPSHOT/maven-metadata.xml"
+            published = repo / "com/nvidia/jni" / SNAPSHOT_VERSION / "maven-metadata.xml"
             published.parent.mkdir(parents=True)
             published.write_bytes(metadata([("cuda12", "build-1"), ("cuda13", "build-1")]))
             original = helper["dependency_key"](pom)
