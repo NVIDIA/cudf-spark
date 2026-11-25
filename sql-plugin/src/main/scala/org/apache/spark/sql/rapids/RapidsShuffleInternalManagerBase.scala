@@ -1267,12 +1267,20 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
 
   class RapidsShuffleThreadedBlockIterator(
       fetcherIterator: RapidsShuffleBlockFetcherIterator,
-      serializer: GpuColumnarBatchSerializer)
+      serializer: GpuColumnarBatchSerializer,
+      maxOpenStreams: Int = 64)
     extends Iterator[(Any, Any)] {
     private val queued = new LinkedBlockingQueue[(Any, Any)]
+    private val publicationLock = new Object
+    @volatile private var stopped = false
     private val futures = new mutable.Queue[Future[Option[BlockState]]]()
     private val serializerInstance = serializer.newInstance()
     private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
+    // Bound codec workspaces as well as batch bytes. A small batch can retain a much larger
+    // decompressor workspace while queued, so the byte limiter alone is insufficient.
+    // Admission must stop before fetching a stream or peeking at its first batch header.
+    require(maxOpenStreams > 0, "The open stream limit must be positive")
+    private val openStreams = new AtomicInteger(0)
     private val fallbackIter: Iterator[(Any, Any)] with AutoCloseable =
       if (numReaderThreads == 1) {
         // this is the non-optimized case, where we add metrics to capture the blocked
@@ -1315,8 +1323,10 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     // Register a completion handler to close any queued cbs,
     // pending iterators, or futures
     onTaskCompletion(context) {
-      // Cancel/join futures first so that no deserializeTask thread can call
-      // queued.offer() after we drain the queue below.
+      // Cancellation is not a worker join. Prevent publication before draining the queue;
+      // workers that finish later must close their own results instead of publishing them.
+      publicationLock.synchronized { stopped = true }
+      // Interrupt work where possible; serializer completion also closes its streams.
       val futuresAndCancellations = futures.map { f =>
         val didCancel = try { f.cancel(true) } catch { case _: Exception => false }
         (f, didCancel)
@@ -1346,10 +1356,10 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
         }
       futures.clear()
 
-      // All futures are now done or cancelled — no more queued.offer() calls can arrive.
-      // Safe to drain queued and pendingIts without a race.
+      // Publication is disabled, including for workers still returning from decode.
+      // Results published before the stop flag are owned by this cleanup.
       queued.forEach {
-        case (_, cb:ColumnarBatch) => cb.close()
+        case (_, cb: ColumnarBatch) => withResource(cb) { _ => () }
       }
       queued.clear()
 
@@ -1379,8 +1389,13 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
       if (fallbackIter != null) {
         fallbackIter.hasNext
       } else {
-        pendingIts.nonEmpty || futures.nonEmpty || queued.size() > 0 ||
-          fetcherIterator.hasNext
+        // A completed future may represent an empty stream, not an output batch.
+        // Keep advancing admission/completions until output exists or all work is exhausted.
+        while (!stopped && queued.isEmpty &&
+            (pendingIts.nonEmpty || futures.nonEmpty || fetcherIterator.hasNext)) {
+          advanceReader()
+        }
+        !stopped && !queued.isEmpty
       }
     }
 
@@ -1390,6 +1405,8 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
         origStream: AutoCloseable)
       extends Iterator[(Any, Any)] with AutoCloseable {
 
+      private val streamClosed = new AtomicBoolean(false)
+      openStreams.incrementAndGet()
       private var nextBatchSize = {
         var success = false
         try {
@@ -1420,76 +1437,46 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
           if (!success) {
             // the call to get a next header threw. We need to close `nextBatch`.
             nextBatch match {
-              case (_, cb: ColumnarBatch) => cb.close()
+              case (_, cb: ColumnarBatch) => withResource(cb) { _ => () }
             }
           }
         }
       }
 
       override def close(): Unit = {
-        origStream.close() // make sure we call this on error
+        if (streamClosed.compareAndSet(false, true)) {
+          try { origStream.close() } finally {
+            openStreams.decrementAndGet()
+          }
+        }
       }
     }
 
     private val pendingIts = new mutable.Queue[BlockState]()
 
     override def next(): (Any, Any) = {
-      require(hasNext, "called next on an empty iterator")
+      if (!hasNext) throw new NoSuchElementException("called next on an empty iterator")
       val res = NvtxRegistry.PARALLEL_DESERIALIZER_ITERATOR_NEXT {
         val result = if (fallbackIter != null) {
           fallbackIter.next()
         } else {
-          var waitTime: Long = 0L
-          var waitTimeStart: Long = 0L
-          popFetchedIfAvailable()
-          waitTime = 0L
-          if (futures.nonEmpty) {
-            NvtxRegistry.BATCH_WAIT {
-              waitTimeStart = System.nanoTime()
-              val pending = futures.dequeue().get // wait for one future
-              val futureWaitThisCall = System.nanoTime() - waitTimeStart
-              waitTime += futureWaitThisCall
-              deserWaitTimeNs.foreach(_ += futureWaitThisCall)
-              // if the future returned a block state, we have more work to do
-              pending match {
-                case Some(leftOver@BlockState(_, _, _)) =>
-                  pendingIts.enqueue(leftOver)
-                case _ => // done
-              }
-            }
+          // Retire a future per consumed batch too, so completed futures cannot build up
+          // behind an already populated output queue.
+          advanceReader()
+          val res = queued.poll()
+          if (res == null) {
+            throw new java.util.concurrent.CancellationException("Shuffle reader stopped")
           }
-
-          if (pendingIts.nonEmpty) {
-            // if we had pending iterators, we should try to see if now one can be handled
-            popFetchedIfAvailable()
-          }
-
-          // We either have added futures and so will have items queued
-          // or we already exhausted the fetchIterator and are just waiting
-          // for our futures to finish. Either way, it's safe to block
-          // here while we wait.
-          waitTimeStart = System.nanoTime()
-          val res = queued.take()
           var success = false
           try {
-            val queueWaitThisCall = System.nanoTime() - waitTimeStart
-            // limiter is now released immediately after deserialization in deserializeTask
-            res match {
-              case (_, _: ColumnarBatch) =>
-                popFetchedIfAvailable()
-              case _ => // do nothing
-            }
-            waitTime += queueWaitThisCall
-            deserWaitTimeNs.foreach(_ += queueWaitThisCall)
-            deserializationTimeNs.foreach(_ += waitTime)
-            shuffleReadTimeNs.foreach(_ += waitTime)
+            popFetchedIfAvailable()
             success = true
             res
           } finally {
             if (!success) {
               res match {
-                case (_, cb: ColumnarBatch) => cb.close()
-                case _ => // do nothing
+                case (_, cb: ColumnarBatch) => withResource(cb) { _ => () }
+                case _ =>
               }
             }
           }
@@ -1505,11 +1492,31 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
       }
 
       // if this is the last call, close our range
-      if (!hasNext) {
+      // Do not call the now-blocking hasNext while owning a result outside its cleanup scope.
+      if ((fallbackIter != null && !fallbackIter.hasNext) ||
+          (fallbackIter == null && queued.isEmpty && futures.isEmpty && pendingIts.isEmpty &&
+            !fetcherIterator.hasNext)) {
         closeShuffleReadRange()
       }
 
       res
+    }
+
+    private def advanceReader(): Unit = {
+      if (!stopped) {
+        popFetchedIfAvailable()
+        if (futures.nonEmpty) {
+          NvtxRegistry.BATCH_WAIT {
+            val start = System.nanoTime()
+            futures.dequeue().get.foreach(pendingIts.enqueue(_))
+            val elapsed = System.nanoTime() - start
+            deserWaitTimeNs.foreach(_ += elapsed)
+            deserializationTimeNs.foreach(_ += elapsed)
+            shuffleReadTimeNs.foreach(_ += elapsed)
+          }
+        }
+        if (pendingIts.nonEmpty) popFetchedIfAvailable()
+      }
     }
 
     private def deserializeTask(blockState: BlockState, acquiredSize: Long): Unit = {
@@ -1520,13 +1527,26 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
         try {
           var currentBatchSize = blockState.getNextBatchSize
           var didFit = true
-          while (blockState.hasNext && didFit) {
+          while (!stopped && blockState.hasNext && didFit) {
             val batch = blockState.next()
-            queued.offer(batch)
+            val published = publicationLock.synchronized {
+              if (stopped) {
+                false
+              } else {
+                queued.offer(batch)
+                true
+              }
+            }
+            if (!published) {
+              batch match {
+                case (_, cb: ColumnarBatch) => withResource(cb) { _ => () }
+                case _ =>
+              }
+            }
             // peek at the next batch
             currentBatchSize = blockState.getNextBatchSize
             limiterAcquireCount.foreach(_ += 1)
-            didFit = limiter.acquire(currentBatchSize)
+            didFit = !stopped && limiter.acquire(currentBatchSize)
             if (didFit) {
               // Successfully acquired, add to sizeToRelease for later release
               sizeToRelease += currentBatchSize
@@ -1535,7 +1555,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
             }
           }
           success = true
-          if (!didFit) {
+          if (!didFit && !stopped) {
             Some(blockState)
           } else {
             None // no further batches
@@ -1546,7 +1566,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
           // Close blockState (Netty buffer) immediately if:
           // - failed (success = false), or
           // - all batches processed (success = true and returned None)
-          if (!success || !blockState.hasNext) {
+          if (!success || stopped || !blockState.hasNext) {
             blockState.close()
           }
         }
@@ -1554,6 +1574,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     }
 
     private def popFetchedIfAvailable(): Unit = {
+      if (stopped) return
       // If fetcherIterator is not exhausted, we try and get as many
       // ready results.
       if (pendingIts.nonEmpty) {
@@ -1589,7 +1610,8 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
             // are all dequeued (the ones that were completed up until now).
             var readBlockedTime = 0L
             var didFit = true
-            while (amountToDrain > 0 && fetcherIterator.hasNext && didFit) {
+            while (amountToDrain > 0 && openStreams.get() < maxOpenStreams &&
+                fetcherIterator.hasNext && didFit) {
               amountToDrain -= 1
               // fetch block time accounts for time spent waiting for streams.next()
               val readBlockedStart = System.nanoTime()
