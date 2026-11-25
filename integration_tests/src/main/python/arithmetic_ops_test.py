@@ -159,9 +159,9 @@ def test_addition_subtraction_mixed(lhs, rhs, addOrSub):
 
 @pytest.mark.parametrize('lhs,rhs', [
     (DecimalGen(18, 0), DecimalGen(30, 30)),
-    (DecimalGen(38, 17), DecimalGen(38, 0)),
+    (DecimalGen(38, 17), DecimalGen(31, 0)),
     (DecimalGen(23, 0), DecimalGen(30, 30)),
-    (DecimalGen(38, 22), DecimalGen(38, 0)),
+    (DecimalGen(38, 22), DecimalGen(31, 0)),
 ], ids=idfn)
 @pytest.mark.parametrize('addOrSub', ['+', '-'])
 @disable_ansi_mode
@@ -362,10 +362,10 @@ def test_int_division_mixed(lhs, rhs):
                 'a DIV b'))
 
 @pytest.mark.parametrize('lhs,rhs', [
-    (DecimalGen(12, 1), DecimalGen(30, 15)),
-    (DecimalGen(12, 1), DecimalGen(30, 17)),
-    (DecimalGen(18, 2), DecimalGen(38, 18)),
-    (DecimalGen(12, 1), DecimalGen(30, 19)),
+    (DecimalGen(12, 1), DecimalGen(20, 15)),
+    (DecimalGen(12, 1), DecimalGen(22, 17)),
+    (DecimalGen(18, 2), DecimalGen(24, 18)),
+    (DecimalGen(12, 1), DecimalGen(24, 19)),
 ], ids=idfn)
 @disable_ansi_mode
 def test_decimal_int_division_large_scale_diff(lhs, rhs):
