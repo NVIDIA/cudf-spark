@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids.jni.Protobuf._
+import org.mockito.Mockito.{mock, when, withSettings}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.rdd.RDD
@@ -29,7 +30,7 @@ import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression,
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
 import org.apache.spark.sql.execution.{FilterExec, LeafExecNode, LocalLimitExec, ProjectExec,
   SortExec, SparkPlan}
-import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
 import org.apache.spark.sql.rapids.protobuf._
 import org.apache.spark.sql.types._
 
@@ -677,37 +678,41 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     assert(analyzeReads(Seq(decodeProj, passProj, filter, sort, topProj), decode) ==
       path(Seq("top")).merge(path(Seq("child", "b"))).merge(path(Seq("items", "a"))))
 
-    // Project (alias) -> HashAggregate (grouping, aggregate function arg, aggregate filter)
+    // Project (alias) -> BaseAggregateExec (grouping, aggregate function arg, aggregate filter).
+    // Mock BaseAggregateExec rather than constructing HashAggregateExec so the test stays
+    // independent of Spark/Databricks HashAggregateExec constructor differences.
+    def mockAggregate(
+        grouping: Seq[NamedExpression],
+        aggregates: Seq[AggregateExpression],
+        results: Seq[NamedExpression]): SparkPlan = {
+      val aggExec = mock(classOf[SparkPlan],
+        withSettings().extraInterfaces(classOf[BaseAggregateExec]))
+        .asInstanceOf[SparkPlan with BaseAggregateExec]
+      when(aggExec.groupingExpressions).thenReturn(grouping)
+      when(aggExec.aggregateExpressions).thenReturn(aggregates)
+      when(aggExec.resultExpressions).thenReturn(results)
+      when(aggExec.output).thenReturn(results.map(_.toAttribute))
+      aggExec
+    }
+
     val groupKey = Alias(GetStructField(GetStructField(d, 1, Some("child")), 0, Some("a")), "ca")()
     val itemsB = GetArrayStructFields(GetStructField(d, 2, Some("items")),
       itemStructType("b"), 1, 2, containsNull = true)
     val aggFilter = GreaterThan(GetStructField(d, 0, Some("top")), Literal(0))
     val aggExpr = AggregateExpression(Count(Seq(itemsB)), Partial, isDistinct = false,
-      filter = Some(aggFilter), resultId = NamedExpression.newExprId)
-    val agg = HashAggregateExec(
-      requiredChildDistributionExpressions = None,
-      isStreaming = false,
-      numShufflePartitions = None,
-      groupingExpressions = Seq(groupKey),
-      aggregateExpressions = Seq(aggExpr),
-      aggregateAttributes = Seq(aggExpr.resultAttribute),
-      initialInputBufferOffset = 0,
-      resultExpressions = Seq(groupKey.toAttribute, aggExpr.resultAttribute),
-      child = decodeProj)
+      filter = Some(aggFilter))
+    val agg = mockAggregate(
+      grouping = Seq(groupKey),
+      aggregates = Seq(aggExpr),
+      results = Seq(groupKey.toAttribute, aggExpr.resultAttribute))
     assert(analyzeReads(Seq(decodeProj, agg), decode) ==
       path(Seq("top")).merge(path(Seq("child", "a"))).merge(path(Seq("items", "b"))))
 
     // Whole struct as a grouping key reads every field.
-    val wholeAgg = HashAggregateExec(
-      requiredChildDistributionExpressions = None,
-      isStreaming = false,
-      numShufflePartitions = None,
-      groupingExpressions = Seq(d),
-      aggregateExpressions = Nil,
-      aggregateAttributes = Nil,
-      initialInputBufferOffset = 0,
-      resultExpressions = Seq(d),
-      child = decodeProj)
+    val wholeAgg = mockAggregate(
+      grouping = Seq(d),
+      aggregates = Nil,
+      results = Seq(d))
     assert(analyzeReads(Seq(decodeProj, wholeAgg), decode) == All)
   }
 
