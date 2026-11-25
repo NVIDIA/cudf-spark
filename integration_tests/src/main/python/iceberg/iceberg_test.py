@@ -87,9 +87,7 @@ def _create_small_files_table(spark_tmp_table_factory, format_version, with_dele
 
 def _assert_coalesced_reads(table, reader_type, format_version):
     conf = {**iceberg_read_enabled_conf,
-            'spark.sql.iceberg.aggregate-push-down.enabled': 'false',
             'spark.rapids.sql.format.parquet.reader.type': reader_type,
-            'spark.sql.adaptive.enabled': 'false',
             'spark.rapids.sql.reader.batchSizeRows': '5'}
 
     constant_columns = '_spec_id, _partition'
@@ -101,10 +99,10 @@ def _assert_coalesced_reads(table, reader_type, format_version):
         lambda spark: spark.sql(f"SELECT {constant_columns}, _file, _pos FROM {table}"),
         exist_classes='GpuBatchScanExec', conf=conf, require_non_empty=True)
 
-    for aggregate in ('count(*)', 'sum(id)'):
+    # Each expression keeps a project above the scan without introducing a shuffle.
+    for projection in ('_partition.p', '_partition.p, id', 'length(p)'):
         assert_cpu_and_gpu_are_equal_collect_with_capture(
-            lambda spark: spark.sql(f"SELECT _spec_id, _partition.p, {aggregate} FROM {table} "
-                                    "GROUP BY _spec_id, _partition.p"),
+            lambda spark: spark.sql(f"SELECT {projection} FROM {table}"),
             exist_classes='GpuBatchScanExec,GpuCoalesceBatches', conf=conf, require_non_empty=True)
 
 
@@ -2002,3 +2000,14 @@ def test_iceberg_metadata_only_with_add_files_identity_partition(
     _set_iceberg_open_file_cost_to_zero(table)
     # Selecting only `a` requires no physical columns from the imported Parquet files.
     _assert_iceberg_metadata_only_small_file_combine(table, 'a', reader_type)
+
+    # The imported files still supply a from partition values after the current spec drops it.
+    def evolve_spec(spark):
+        spark.sql(f"ALTER TABLE {table} DROP PARTITION FIELD a")
+        spark.sql(f"INSERT INTO {table} (a, b) VALUES (7, 'unpartitioned')")
+
+    with_cpu_session(evolve_spec)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT a + 1 FROM {table}"),
+        exist_classes='GpuBatchScanExec,GpuCoalesceBatches', require_non_empty=True,
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})

@@ -46,8 +46,19 @@ abstract class GpuSparkScan(val cpuScan: Scan,
 
   override lazy val coalesceAfter: Boolean = {
     // Spark input-file expressions use the current split's path and offsets for the whole batch.
-    !queryUsesInputFile && GpuSparkScanAccess.expectedSchema(cpuScan).columns().asScala
-      .exists(field => MetadataColumns.isMetadataColumn(field.fieldId()))
+    !queryUsesInputFile && {
+      val schema = GpuSparkScanAccess.expectedSchema(cpuScan)
+      val columns = schema.columns().asScala
+      // Older files can still supply an identity value after the table's partition spec changes.
+      def projectsIdentityColumn: Boolean =
+        GpuSparkScanAccess.table(cpuScan).specs().values().asScala.exists { spec =>
+          spec.identitySourceIds().asScala.exists(id => schema.findField(id) != null)
+        }
+
+      columns.nonEmpty &&
+        (columns.exists(field => MetadataColumns.isMetadataColumn(field.fieldId())) ||
+          projectsIdentityColumn)
+    }
   }
 
   override def estimateStatistics(): Statistics = GpuSparkScanAccess.estimateStatistics(cpuScan)
