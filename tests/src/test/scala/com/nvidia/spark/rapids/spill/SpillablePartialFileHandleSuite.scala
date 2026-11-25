@@ -174,28 +174,31 @@ class SpillablePartialFileHandleSuite
   test("MEMORY_WITH_SPILL mode: buffer expansion then switch to file") {
     val tempFile = File.createTempFile("test-expansion-switch-", ".tmp")
 
-    // Use 600MB initial capacity, so doubling (1.2GB) would exceed 1GB limit
-    val initialCapacity = 600L * 1024 * 1024
+    // Doubling 6 KiB exceeds the 10 KiB limit, so growth must clamp before spilling.
+    val initialCapacity = 6L * 1024
+    val maxCapacity = 10L * 1024
     
     withResource(SpillablePartialFileHandle.createMemoryWithSpill(
       initialCapacity = initialCapacity,
-      maxBufferSize = testMaxBufferSize,
+      maxBufferSize = maxCapacity,
       memoryThreshold = 0.5,
       spillFile = tempFile)) { handle =>
       
       // Write data to fill initial buffer
-      val chunkSize = 1024 * 1024  // 1MB chunks
+      val chunkSize = 1024
       val chunk = new Array[Byte](chunkSize)
       (0 until chunkSize).foreach(i => chunk(i) = (i % 256).toByte)
       
       // Fill the buffer completely
-      val numChunks = (testMaxBufferSize / chunkSize).toInt
+      val numChunks = (maxCapacity / chunkSize).toInt
       (0 until numChunks).foreach { _ =>
         handle.write(chunk, 0, chunkSize)
       }
       
+      assert(!handle.isSpilled, "Growth should reach the limit without spilling early")
+
       // Write one more byte to trigger expansion, which should fail
-      // and switch to file mode due to testMaxBufferSize limit
+      // and switch to file mode due to the capacity limit
       handle.write(0xFF)
       
       // Write more data to verify file mode is working
@@ -713,10 +716,16 @@ class SpillablePartialFileHandleSuite
       file = tempFile,
       syncWrites = false,
       bufferedOutputStreamFactory = _ => outputStream)) { handle =>
-      val ignored = new Array[Byte](1)
+      val ignored = new Array[Byte](1024 * 1024)
       val expectedLogicalSize = Int.MaxValue.toLong + 4096L
-      handle.write(ignored, 0, Int.MaxValue)
-      handle.write(ignored, 0, 4096)
+      // The mocked stream discards bytes; keep each array write valid while advancing
+      // the handle past 2 GiB without allocating or writing a 2 GiB payload.
+      var remaining = expectedLogicalSize
+      while (remaining > 0) {
+        val size = math.min(remaining, ignored.length).toInt
+        handle.write(ignored, 0, size)
+        remaining -= size
+      }
       handle.finishWrite()
       assert(handle.getTotalBytesWritten == expectedLogicalSize)
       testBody(handle)

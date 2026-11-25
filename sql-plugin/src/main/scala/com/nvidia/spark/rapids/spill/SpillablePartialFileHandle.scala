@@ -23,8 +23,9 @@ import java.nio.channels.FileChannel
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.HostMemoryBuffer
+import com.nvidia.spark.rapids.{HostAlloc, SegmentedByteArrayOutputStream}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.HostAlloc
+import com.nvidia.spark.rapids.SegmentedByteArrayOutputStream.OwnedBuffer
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.GpuTaskMetrics
@@ -48,6 +49,8 @@ private[rapids] final class ClosedPartialFileHandleException
  * This handle is designed for scenarios where:
  * 1. When memory is scarce (usage > threshold), use file-based storage directly
  * 2. When memory is sufficient, use host memory buffer with automatic spill support
+ * Owned heap records bypass native capacity and pressure policies while retaining explicit
+ * spill, commit, and read-lease support.
  *
  * Features:
  * - Unified write/read interface regardless of storage mode
@@ -56,7 +59,7 @@ private[rapids] final class ClosedPartialFileHandleException
  * - Automatic transition from memory to disk when spilled
  * - Dynamic buffer expansion when capacity is exceeded (up to configured max limit)
  * - Automatic fallback to file when expansion fails or conditions not met
- * - Predictive capacity sizing via optional hint provider
+ * - Owned record segments, or legacy off-heap storage with predictive capacity sizing
  *
  * @param storageMode Whether to use FILE_ONLY or MEMORY_WITH_SPILL
  * @param file File to use for FILE_ONLY mode or as spill target for MEMORY_WITH_SPILL
@@ -81,16 +84,17 @@ class SpillablePartialFileHandle private (
     priority: Long,
     syncWrites: Boolean,
     bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream,
-    capacityHintProvider: Option[(Long, Long) => Long])
-  extends HostSpillableHandle[ai.rapids.cudf.HostMemoryBuffer] with Logging {
+    capacityHintProvider: Option[(Long, Long) => Long],
+    retainRecords: Boolean)
+  extends HostSpillableHandle[PartialFileBuffer] with Logging {
 
   // State management
   @volatile private var spilledToDisk: Boolean = false
-  override private[spill] var host: Option[ai.rapids.cudf.HostMemoryBuffer] = None
-  override val approxSizeInBytes: Long = initialCapacity
+  override private[spill] var host: Option[PartialFileBuffer] = None
+  override val approxSizeInBytes: Long = if (retainRecords) 0L else initialCapacity
 
-  // Track current buffer capacity (can grow via expansion)
-  private var currentBufferCapacity: Long = initialCapacity
+  // Capacity and expansion apply only to the native buffer used by ordinary stream writers.
+  private var currentBufferCapacity: Long = if (retainRecords) 0L else initialCapacity
 
   // Protect from spill during write phase
   @volatile private var protectedFromSpill: Boolean = true
@@ -127,11 +131,16 @@ class SpillablePartialFileHandle private (
   // Initialize host buffer for MEMORY_WITH_SPILL mode
   if (storageMode == PartialFileStorageMode.MEMORY_WITH_SPILL) {
     try {
-      val buffer = ai.rapids.cudf.HostMemoryBuffer.allocate(initialCapacity, false)
+      val buffer: PartialFileBuffer = if (retainRecords) {
+        new OwnedRecordBuffer
+      } else {
+        new ContiguousPartialFileBuffer(HostMemoryBuffer.allocate(initialCapacity, false))
+      }
       host = Some(buffer)
-      currentBufferCapacity = initialCapacity
       this.taskPriority = priority
-      SpillFramework.stores.hostStore.trackNoSpill(this)
+      // Retained heap arrays do not consume native memory and must not be selected by the
+      // native allocator's spill requests. Their owner still closes or commits them normally.
+      if (!retainRecords) SpillFramework.stores.hostStore.trackNoSpill(this)
     } catch {
       case e: Exception =>
         logWarning(s"Failed to allocate initial buffer of $initialCapacity bytes, " +
@@ -154,9 +163,8 @@ class SpillablePartialFileHandle private (
   /**
    * Expand host buffer capacity to meet required capacity.
    *
-   * When a capacityHintProvider is available, it will be used to predict the optimal
-   * capacity based on current write statistics. Otherwise, falls back to doubling
-   * until reaching required size.
+   * Only the contiguous native buffer uses capacity hints, limits and memory-pressure checks.
+   * Owned records append their arrays directly without entering this path.
    *
    * Conditions checked before expansion:
    * 1. New capacity does not exceed configured max buffer size limit
@@ -228,10 +236,12 @@ class SpillablePartialFileHandle private (
 
         try {
           // Allocate new larger buffer
-          val newBuffer = ai.rapids.cudf.HostMemoryBuffer.allocate(newCapacity, false)
+          val newBuffer = new ContiguousPartialFileBuffer(
+            HostMemoryBuffer.allocate(newCapacity, false))
           closeOnExcept(newBuffer) { _ =>
             // Copy existing data
-            newBuffer.copyFromHostBuffer(0, currentBuffer, 0, writePosition)
+            newBuffer.buffer.copyFromHostBuffer(0,
+              currentBuffer.asInstanceOf[ContiguousPartialFileBuffer].buffer, 0, writePosition)
 
             // Remove old buffer tracking and track new one
             SpillFramework.removeFromHostStore(this)
@@ -257,28 +267,47 @@ class SpillablePartialFileHandle private (
     }
   }
 
+  /** Move a sealed record into owned storage, or write its valid bytes to the destination. */
+  def writeRecord(record: OwnedBuffer): Unit = {
+    if (writeFinished || closeRequested || closed) {
+      throw new IllegalStateException("Cannot write to a finished or closed partial file")
+    }
+    val data = record.takeBuffer()
+    var adopted = false
+    try {
+      if (data.getCount > 0) {
+        host match {
+          case Some(buffer: OwnedRecordBuffer) =>
+            buffer.append(data)
+            adopted = true
+            writePosition += data.getCount
+          case _ if shouldUseFile =>
+            ensureFileOutputStreamOpen()
+            data.writeTo(bufferedOutputStream.get)
+            writePosition += data.getCount
+          case _ =>
+            // Preserve support for callers using the legacy contiguous host buffer.
+            data.writeTo(new java.io.OutputStream {
+              override def write(value: Int): Unit = SpillablePartialFileHandle.this.write(value)
+              override def write(bytes: Array[Byte], start: Int, length: Int): Unit =
+                SpillablePartialFileHandle.this.write(bytes, start, length)
+            })
+        }
+      }
+    } finally {
+      if (!adopted) data.close()
+    }
+  }
 
   /**
    * Spill current buffer content to file and switch to file-based mode.
    * Called when buffer expansion fails or capacity cannot grow further.
    */
-  private def spillBufferToFileAndSwitch(
-      buffer: ai.rapids.cudf.HostMemoryBuffer): Unit = {
-    // Defensive check: writePosition should not exceed Int.MaxValue
-    // because expandBuffer() limits buffer size to Int.MaxValue
-    require(writePosition <= Int.MaxValue,
-      s"Cannot spill buffer larger than Int.MaxValue: $writePosition bytes")
-
-    // Write current buffer content to file
+  private def spillBufferToFileAndSwitch(buffer: PartialFileBuffer): Unit = {
     withResource(new FileOutputStream(file)) { fos =>
-      val channel = fos.getChannel
-      val bb = buffer.asByteBuffer()
-      bb.limit(writePosition.toInt)
-      while (bb.hasRemaining) {
-        channel.write(bb)
-      }
+      buffer.writeTo(fos, writePosition)
       if (syncWrites) {
-        channel.force(true)
+        fos.getChannel.force(true)
       }
     }
 
@@ -286,6 +315,7 @@ class SpillablePartialFileHandle private (
     SpillFramework.removeFromHostStore(this)
     buffer.close()
     host = None
+    currentBufferCapacity = 0L
     spilledToDisk = true
     spillCount += 1
 
@@ -302,6 +332,12 @@ class SpillablePartialFileHandle private (
       throw new IllegalStateException("Write phase already finished")
     }
 
+    if (host.exists(_.isInstanceOf[OwnedRecordBuffer])) {
+      val record = new SegmentedByteArrayOutputStream(1)
+      record.write(b)
+      writeRecord(record.takeBuffer())
+      return
+    }
     if (shouldUseFile) {
       // FILE_ONLY mode or spilled: write to file
       ensureFileOutputStreamOpen()
@@ -340,6 +376,20 @@ class SpillablePartialFileHandle private (
       throw new IllegalStateException("Write phase already finished")
     }
 
+    if (bytes == null) throw new NullPointerException("bytes")
+    if (offset < 0 || length < 0 || offset > bytes.length - length) {
+      throw new IndexOutOfBoundsException()
+    }
+    if (length == 0) return
+
+    if (host.exists(_.isInstanceOf[OwnedRecordBuffer])) {
+      // Ordinary OutputStream callers retain their array. Copy only the incoming bytes;
+      // existing segments remain untouched and subsequent writes append new segments.
+      val record = new SegmentedByteArrayOutputStream(length)
+      record.write(bytes, offset, length)
+      writeRecord(record.takeBuffer())
+      return
+    }
     if (shouldUseFile) {
       // FILE_ONLY mode or spilled: write to file
       ensureFileOutputStreamOpen()
@@ -362,7 +412,7 @@ class SpillablePartialFileHandle private (
               return
             }
             logDebug(s"After expansion: currentCapacity=$currentBufferCapacity, " +
-              s"bufferLength=${host.get.getLength}")
+              s"bufferLength=${host.get.capacity}")
           }
           // Write to buffer (may be new buffer after expansion)
           host.get.setBytes(writePosition, bytes, offset, length)
@@ -664,6 +714,7 @@ class SpillablePartialFileHandle private (
       SpillFramework.removeFromHostStore(this)
       bufferToSpill.close()
       host = None
+      currentBufferCapacity = 0L
 
       if (!commit) {
         // if we are not committing, we want to account for these bytes
@@ -681,25 +732,20 @@ class SpillablePartialFileHandle private (
 
   // Performs IO outside lock - read() can still access buffer during this time
   // Only to be called from spillInternal!
-  private def doSpill(bufferToSpill: HostMemoryBuffer): Unit = {
+  private def doSpill(bufferToSpill: PartialFileBuffer): Unit = {
     try {
       val fos = new FileOutputStream(file)
       try {
-        val channel = fos.getChannel
-        val bb = bufferToSpill.asByteBuffer()
-        bb.limit(totalBytesWritten.toInt)
-        while (bb.hasRemaining) {
-          channel.write(bb)
-        }
+        bufferToSpill.writeTo(fos, totalBytesWritten)
         if (syncWrites) {
-          channel.force(true)
+          fos.getChannel.force(true)
         }
       } finally {
         fos.close()
       }
     } catch {
-      case e: Exception =>
-        // IO failed, reset flag and propagate
+      case e: Throwable =>
+        // Also reset after allocation errors in the segmented spill's bounded IO buffer.
         synchronized {
           spillInProgress = false
           notifyAll() // Wake up any waiting doClose()
@@ -881,6 +927,7 @@ class SpillablePartialFileHandle private (
 
         // Release host buffer (removes from SpillFramework tracking and closes buffer)
         releaseHostResource()
+        currentBufferCapacity = 0L
 
         result
       }
@@ -948,7 +995,8 @@ object SpillablePartialFileHandle extends Logging {
       priority = Long.MinValue,
       syncWrites = syncWrites,
       bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
-      capacityHintProvider = None)
+      capacityHintProvider = None,
+      retainRecords = false)
   }
 
   private[spill] def createFileOnly(
@@ -965,23 +1013,25 @@ object SpillablePartialFileHandle extends Logging {
       priority = Long.MinValue,
       syncWrites = syncWrites,
       bufferedOutputStreamFactory = bufferedOutputStreamFactory,
-      capacityHintProvider = None)
+      capacityHintProvider = None,
+      retainRecords = false)
   }
 
   /**
    * Create a memory-with-spill handle.
-   * Data is initially written to host memory buffer and can be spilled to disk
-   * if needed. The buffer will automatically expand when needed (up to
-   * maxBufferSize limit).
+   * Ordinary writes use a native buffer that expands up to maxBufferSize and can spill
+   * under native memory pressure. With retainRecords, arrays are retained on the heap
+   * without native capacity limits, expansion, or host-store pressure spilling. Both
+   * representations support explicit spill and commit.
    *
-   * @param initialCapacity Initial size of host memory buffer to allocate
-   * @param maxBufferSize Maximum buffer size before spilling to disk
-   * @param memoryThreshold Host memory usage threshold for buffer expansion
-   *                        decisions
+   * @param initialCapacity Initial off-heap allocation when retainRecords is false
+   * @param maxBufferSize Maximum native buffer size before spilling; ignored for owned records
+   * @param memoryThreshold Native memory usage threshold; ignored for owned records
    * @param spillFile File to use when spilling is required
    * @param priority Spill priority
    * @param syncWrites Whether to force outstanding writes to disk
-   * @param capacityHintProvider Optional function that provides capacity hints.
+   * @param retainRecords Retain transferred record arrays instead of copying into native memory.
+   * @param capacityHintProvider Optional capacity hint, only used for contiguous storage.
    *                             Signature: (currentBytesWritten, requiredCapacity) =>
    *                             suggestedCapacity. When provided, buffer expansion will
    *                             use this hint instead of simple doubling strategy.
@@ -995,7 +1045,8 @@ object SpillablePartialFileHandle extends Logging {
       spillFile: File,
       priority: Long = Long.MinValue,
       syncWrites: Boolean = false,
-      capacityHintProvider: Option[(Long, Long) => Long] = None):
+      capacityHintProvider: Option[(Long, Long) => Long] = None,
+      retainRecords: Boolean = false):
   SpillablePartialFileHandle = {
     new SpillablePartialFileHandle(
       storageMode = PartialFileStorageMode.MEMORY_WITH_SPILL,
@@ -1006,6 +1057,7 @@ object SpillablePartialFileHandle extends Logging {
       priority = priority,
       syncWrites = syncWrites,
       bufferedOutputStreamFactory = new BufferedOutputStream(_, DEFAULT_FILE_BUFFER_SIZE),
-      capacityHintProvider = capacityHintProvider)
+      capacityHintProvider = capacityHintProvider,
+      retainRecords = retainRecords)
   }
 }

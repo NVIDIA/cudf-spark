@@ -21,7 +21,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.WritableByteChannel
 import java.util.Optional
 
-import com.nvidia.spark.rapids.{HostAlloc, RapidsConf}
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedByteArrayOutputStream}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 
 import org.apache.spark.SparkConf
@@ -64,6 +64,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   private var partialFileHandle: Option[SpillablePartialFileHandle] = None
   private var storageInitAttempted: Boolean = false
   private var forceFileOnly: Boolean = false
+  private var retainRecords: Boolean = false
 
   // Track completed partition count for predictive buffer sizing
   private var completedPartitionCount: Int = 0
@@ -127,6 +128,15 @@ class RapidsLocalDiskShuffleMapOutputWriter(
     forceFileOnly = true
   }
 
+  /** Retain record arrays on the heap, independently of native buffer limits and pressure. */
+  def setRecordBufferMode(): Unit = {
+    if (storageInitAttempted) {
+      throw new IllegalStateException("Cannot change record storage after initialization")
+    }
+    // Final merge and explicit file-only output still use the existing file path.
+    retainRecords = true
+  }
+
   // Try to initialize storage on first partition write
   private def ensureStorageInitialized(): Unit = {
     if (!storageInitAttempted) {
@@ -140,8 +150,8 @@ class RapidsLocalDiskShuffleMapOutputWriter(
         val handle = SpillablePartialFileHandle.createFileOnly(
           outputTempFile, syncWrites)
         partialFileHandle = Some(handle)
-      } else if (HostAlloc.isUsageBelowThreshold(memoryThreshold)) {
-        // Memory sufficient: use MEMORY_WITH_SPILL mode with predictive sizing
+      } else if (retainRecords || HostAlloc.isUsageBelowThreshold(memoryThreshold)) {
+        // Heap records do not allocate native memory or use its predictive capacity policy.
         try {
           val handle = SpillablePartialFileHandle.createMemoryWithSpill(
             initialCapacity = initialBufferSize,
@@ -150,11 +160,16 @@ class RapidsLocalDiskShuffleMapOutputWriter(
             spillFile = outputTempFile,
             priority = Long.MinValue,
             syncWrites = syncWrites,
-            capacityHintProvider = Some(capacityHintProvider))
+            capacityHintProvider = if (retainRecords) None else Some(capacityHintProvider),
+            retainRecords = retainRecords)
           partialFileHandle = Some(handle)
-          logDebug(s"Using memory-with-spill mode for shuffle $shuffleId map $mapId " +
-            s"with predictive sizing (initial=${initialBufferSize / 1024 / 1024}MB, " +
-            s"max=${maxBufferSize / 1024 / 1024}MB, numPartitions=$numPartitions)")
+          if (retainRecords) {
+            logDebug(s"Retaining heap records for shuffle $shuffleId map $mapId")
+          } else {
+            logDebug(s"Using memory-with-spill mode for shuffle $shuffleId map $mapId " +
+              s"with predictive sizing (initial=${initialBufferSize / 1024 / 1024}MB, " +
+              s"max=${maxBufferSize / 1024 / 1024}MB, numPartitions=$numPartitions)")
+          }
         } catch {
           case e: Exception =>
             logWarning(s"Failed to create memory buffer, " +
@@ -274,11 +289,19 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   }
 
   // Unified stream writer using SpillablePartialFileHandle
-  private class PartitionWriterStream(partitionId: Int) extends OutputStream {
+  private class PartitionWriterStream(partitionId: Int)
+      extends OutputStream with SegmentedByteArrayOutputStream.Sink {
     private var count = 0L
     private var isClosed = false
 
     def getCount(): Long = count
+
+    override def writeRecord(record: SegmentedByteArrayOutputStream.OwnedBuffer): Unit = {
+      verifyNotClosed()
+      val length = record.getCount
+      partialFileHandle.get.writeRecord(record)
+      count += length
+    }
 
     override def write(b: Int): Unit = {
       verifyNotClosed()

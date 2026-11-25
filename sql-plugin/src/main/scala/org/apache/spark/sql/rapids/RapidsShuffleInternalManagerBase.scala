@@ -31,7 +31,7 @@ import com.nvidia.spark.rapids.NvtxRegistry
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.jni.kudo.OpenByteArrayOutputStream
+import com.nvidia.spark.rapids.SegmentedByteArrayOutputStream.OwnedBuffer
 import com.nvidia.spark.rapids.shuffle.{CatalogShuffleRequestHandler, RapidsShuffleServer, RapidsShuffleTransport}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 
@@ -297,6 +297,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
   private val serializer = dep.serializer.newInstance()
   private val fileBufferSize = sparkConf.get(config.SHUFFLE_FILE_BUFFER_SIZE).toInt * 1024
   private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
+  private val bufferSegmentSize =
+    new RapidsConf(sparkConf).shuffleMultiThreadedWriterBufferSegmentSize
   private val limiterWaitTimeMetric =
     handle.metrics.get(METRIC_THREADED_WRITER_LIMITER_WAIT_TIME)
   private val serializationWaitTimeMetric =
@@ -312,6 +314,27 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       partitionLengths: Array[Long],
       mapOutputWriter: ShuffleMapOutputWriter)
 
+  // Resizing and releasing must be atomic with respect to cancellation. In particular, a
+  // compression task must not resurrect quota after done() has released it.
+  private class RecordQuota(initialSize: Long) {
+    private var size = initialSize
+    private var released = false
+
+    def resize(newSize: Long): Unit = synchronized {
+      if (!released) {
+        limiter.resizeReservation(size, newSize)
+        size = newSize
+      }
+    }
+
+    def release(): Unit = synchronized {
+      if (!released) {
+        released = true
+        limiter.release(size)
+      }
+    }
+  }
+
   /**
    * Represents a single compressed record ready to be written to disk.
    * Each record has its own independent buffer, avoiding the 2GB limit issue
@@ -322,9 +345,9 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    * @param quotaToRelease The quota to release after writing to disk
    */
   private case class CompressedRecord(
-    buffer: OpenByteArrayOutputStream,
+    buffer: OwnedBuffer,
     compressedSize: Long,
-    quotaToRelease: AtomicLong)
+    quotaToRelease: RecordQuota)
 
   /**
    * Cooperatively writes one GPU batch without occupying a merger thread while waiting for work.
@@ -458,20 +481,20 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
     private def writeRecord(queue: ConcurrentLinkedQueue[Future[CompressedRecord]]): Unit = {
       var record: CompressedRecord = null
-      var buffer: OpenByteArrayOutputStream = null
+      var buffer: OwnedBuffer = null
       try {
         record = queue.peek().get()
         buffer = record.buffer
         if (record.compressedSize > 0) {
-          outputStream.write(buffer.getBuf, 0, record.compressedSize.toInt)
+          outputStream match {
+            case sink: SegmentedByteArrayOutputStream.Sink => sink.writeRecord(buffer)
+            case _ => buffer.writeTo(outputStream)
+          }
         }
         queue.poll()
       } finally {
         if (record != null) {
-          val toRelease = record.quotaToRelease.getAndSet(0)
-          if (toRelease > 0) {
-            limiter.release(toRelease)
-          }
+          record.quotaToRelease.release()
         }
         if (buffer != null) {
           buffer.close()
@@ -505,10 +528,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         recordQueue.forEach { future =>
           if (future != null && future.isDone && !future.isCancelled) {
             try {
-              val toRelease = future.get().quotaToRelease.getAndSet(0)
-              if (toRelease > 0) {
-                limiter.release(toRelease)
-              }
+              future.get().quotaToRelease.release()
             } catch {
               case _: Exception => // quota was released in the compression catch block
             }
@@ -600,6 +620,12 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       batchId: Int,
       writer: ShuffleMapOutputWriter): BatchState = {
 
+    writer match {
+      case rapids: RapidsLocalDiskShuffleMapOutputWriter =>
+        rapids.setRecordBufferMode()
+      case _ =>
+    }
+
     // Each partition has a queue of compressed record futures.
     // Each record has its own independent buffer for memory isolation.
     val partitionRecords = new ConcurrentHashMap[Int,
@@ -656,10 +682,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    * Data flow for each record:
    * 1. ColumnarBatch (already copied to host memory, may be split from GPU batches based on
    *    spark.rapids.shuffle.partitioning.maxCpuBatchSize) -> Main thread acquires limiter quota
-   * 2. Writer thread: serialize + compress -> OpenByteArrayOutputStream (JVM heap)
-   * 3. Writer thread: release excess quota (recordSize - compressedSize)
+   * 2. Writer thread: serialize + compress -> fixed-size segments (JVM heap)
+   * 3. Writer thread: adjust quota to retained output capacity
    * 4. Merger step: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
-   *    - If MEMORY_WITH_SPILL mode: data may stay in host memory until spill/commit
+   *    - If MEMORY_WITH_SPILL mode: the handle takes ownership of the original heap arrays
    *    - If FILE_ONLY mode or spilled: data goes to disk
    * 5. Merger step: release remaining quota after writing to output stream
    * 6. (Multi-batch only) Main thread: mergePartialFiles() combines all batch outputs into
@@ -760,20 +786,20 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           _ => new ConcurrentLinkedQueue[Future[CompressedRecord]]())
 
         val (cb, recordSize) = incRefCountAndGetSize(value)
+        // Reserve whole segments before admitting a record, including a minimum of one
+        // segment for tiny inputs. This bounds the number of partially filled buffers.
+        val reservedSize =
+          ((math.max(1L, recordSize) - 1) / bufferSegmentSize + 1) * bufferSegmentSize
 
         // Acquire limiter and process compression task immediately
         val waitOnLimiterStart = System.nanoTime()
         closeOnExcept(cb) { _ =>
-          limiter.acquireOrBlock(recordSize)
+          limiter.acquireOrBlock(reservedSize)
         }
         waitTimeOnLimiterNs += System.nanoTime() - waitOnLimiterStart
 
         val batchForRecord = currentBatch
-        // Tracks how much quota this task still owes back to the limiter. Initialized to
-        // the full recordSize; decremented when excessQuota is released early on the success
-        // path. getAndSet(0) in the catch block atomically claims whatever remains,
-        // ensuring quota is only released after call() has freed its resources.
-        val quotaToRelease = new AtomicLong(recordSize)
+        val quotaToRelease = new RecordQuota(reservedSize)
         // CAS gate shared between call() and done(). Whoever wins compareAndSet(false, true)
         // is responsible for closing cb and releasing quota. This prevents both a cb leak
         // (done() fires for a cancelled-before-start task and cb is never closed) and
@@ -791,7 +817,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
               withResource(cb) { _ =>
                 // Create a new buffer for this record.
                 // The buffer is closed by the merger thread after writing to disk.
-                val buffer = new OpenByteArrayOutputStream()
+                val buffer = new SegmentedByteArrayOutputStream(bufferSegmentSize)
 
                 // Serialize + compress + encryption to memory buffer
                 val compressedOutputStream = blockManager.serializerManager.wrapStream(
@@ -804,46 +830,32 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                   serializer.writeValue(value.asInstanceOf[Any])
                 }
 
-                // Track total written data size (compressed size)
-                val compressedSize = buffer.getCount.toLong
-                totalCompressedSize.addAndGet(compressedSize)
-
-                // Release excess quota immediately after compression.
-                // Data is now in OpenByteArrayOutputStream (heap), only need to hold
-                // compressedSize quota until Merger writes to disk.
-                // Note: excessQuota can be 0 if compression doesn't reduce size (or expands)
-                val excessQuota = math.max(0L, recordSize - compressedSize)
-                if (excessQuota > 0) {
-                  // addAndGet returns negative if done() already claimed quota via getAndSet(0);
-                  // skip the direct release. The merger also sees negative and skips.
-                  val remaining = quotaToRelease.addAndGet(-excessQuota)
-                  if (remaining >= 0) {
-                    limiter.release(excessQuota)
-                  }
+                // Codec closure above completes all writes before transferring the segments.
+                val owned = buffer.takeBuffer()
+                closeOnExcept(owned) { _ =>
+                  val compressedSize = owned.getCount
+                  totalCompressedSize.addAndGet(compressedSize)
+                  // Trimmed arrays retain exactly the compressed payload size.
+                  // Resizing must not block a worker behind its own unpublished record.
+                  quotaToRelease.resize(compressedSize)
+                  CompressedRecord(owned, compressedSize, quotaToRelease)
                 }
-
-                // Return CompressedRecord carrying quotaToRelease so writeRecord can use
-                // getAndSet(0) to release the remainder — or skip if done() claimed it.
-                CompressedRecord(buffer, compressedSize, quotaToRelease)
               }
             } catch {
               case e: InterruptedException =>
                 Thread.currentThread().interrupt()
-                val toRelease = quotaToRelease.getAndSet(0)
-                if (toRelease > 0) {
-                  limiter.release(toRelease)
-                }
+                quotaToRelease.release()
                 throw new IOException(
                   s"Failed compression task for shuffle $shuffleId, map $mapId, " +
                     s"partition $reducePartitionId", e)
               case e: Exception =>
-                val toRelease = quotaToRelease.getAndSet(0)
-                if (toRelease > 0) {
-                  limiter.release(toRelease)
-                }
+                quotaToRelease.release()
                 throw new IOException(
                   s"Failed compression task for shuffle $shuffleId, map $mapId, " +
                     s"partition $reducePartitionId", e)
+              case t: Throwable =>
+                quotaToRelease.release()
+                throw t
             }
           }
         }) {
@@ -857,13 +869,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             } finally {
               // Release quota when cancelled, or when the merger has already failed (so
               // writeRecord will never be called for this future's CompressedRecord).
-              // getAndSet(0) is idempotent: fail() may have already claimed it; returns 0.
+              // release() is idempotent even if fail() has already claimed the reservation.
               if (isCancelled ||
                   batchForRecord.merger.completionFuture.isCompletedExceptionally) {
-                val toRelease = quotaToRelease.getAndSet(0)
-                if (toRelease > 0) {
-                  limiter.release(toRelease)
-                }
+                quotaToRelease.release()
               }
               batchForRecord.scheduleMerger()
             }
@@ -944,10 +953,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             if (future.isDone && !future.isCancelled) {
               try {
                 val record = future.get()
-                val toRelease = record.quotaToRelease.getAndSet(0)
-                if (toRelease > 0) {
-                  limiter.release(toRelease)
-                }
+                record.quotaToRelease.release()
                 try { record.buffer.close() } catch { case _: Exception => }
               } catch {
                 case _: Exception => // future.get() threw (e.g. failed compression task)
@@ -1172,6 +1178,15 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
 
   def signalFailure(t: Throwable): Unit = synchronized {
     failureCause = t
+    notifyAll()
+  }
+
+  // A running producer may discover that compression expanded its record. Waiting here
+  // could deadlock against quota held by that same unpublished record. Charge the expansion
+  // immediately; subsequent producers wait until completed records drain again.
+  private[rapids] def resizeReservation(oldSize: Long, newSize: Long): Unit = synchronized {
+    require(oldSize >= 0 && newSize >= 0)
+    inFlight += newSize - oldSize
     notifyAll()
   }
 

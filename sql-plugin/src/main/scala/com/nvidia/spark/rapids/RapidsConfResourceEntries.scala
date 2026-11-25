@@ -316,7 +316,9 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
         "A smaller initial size reduces upfront memory allocation but may require more " +
         "expansions. When used with " +
         "RapidsLocalDiskShuffleMapOutputWriter, the buffer expansion uses predictive " +
-        "sizing based on partition write statistics to minimize expansion operations.")
+        "sizing based on partition write statistics to minimize expansion operations. " +
+        "This setting applies only to native buffers and is ignored when the " +
+        "multithreaded writer retains heap records.")
     .startupOnly()
     .internal()
     .bytesConf(ByteUnit.BYTE)
@@ -328,7 +330,8 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
         "SpillablePartialFileHandle during shuffle write. When a buffer needs to " +
         "expand beyond this limit, it will be spilled to disk instead. This prevents " +
         "excessive memory usage for large shuffle partitions. Note: Due to ByteBuffer " +
-        "constraints, the effective maximum is Int.MaxValue (~2GB).")
+        "constraints, the effective maximum is Int.MaxValue (~2GB). This setting applies only " +
+        "to native buffers and is ignored when the multithreaded writer retains heap records.")
     .startupOnly()
     .internal()
     .bytesConf(ByteUnit.BYTE)
@@ -345,7 +348,8 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
         "shuffle write optimization benefit. A value around 0.5-0.6 typically provides " +
         "optimal performance. As a guideline, ensure that (1 - threshold) * total_host_mem " +
         "is greater than num_threads * gpu_batch_size to leave enough memory for other " +
-        "threads to operate without forcing spills.")
+        "threads to operate without forcing spills. This setting applies only to native " +
+        "buffers and is ignored when the multithreaded writer retains heap records.")
     .startupOnly()
     .internal()
     .doubleConf
