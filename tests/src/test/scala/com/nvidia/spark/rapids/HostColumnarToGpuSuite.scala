@@ -19,10 +19,25 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
-import org.apache.spark.sql.types.BinaryType
+import org.apache.spark.sql.types.{BinaryType, LongType}
 
 class HostColumnarToGpuSuite extends AnyFunSuite {
+  test("HostColumnarToGpu preserves child partitioning and ordering") {
+    val child = GpuRangeExec(
+      start = 0,
+      end = 10,
+      step = 1,
+      numSlices = 2,
+      output = Seq(AttributeReference("id", LongType)()),
+      targetSizeBytes = 1024)
+    val transition = HostColumnarToGpu(child, TargetSize(1024))
+
+    assertResult(child.outputPartitioning)(transition.outputPartitioning)
+    assertResult(child.outputOrdering)(transition.outputOrdering)
+  }
+
   test("binary columnar copy counts list offsets for row-limit estimates") {
     val values = Seq(
       Array[Byte](1, 2, 3),

@@ -323,6 +323,9 @@
 413,500	src/main/scala/org/apache/spark/sql/execution/rapids/shims/FilePartitionShims.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/execution/rapids/shims/FilePartitionShims.scala
 400db173,410db183	src/main/scala/org/apache/spark/sql/execution/rapids/shims/FilePartitionShims.scala	sql-plugin/src/main/spark400db173/scala/org/apache/spark/sql/execution/rapids/shims/FilePartitionShims.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/org/apache/spark/sql/execution/rapids/shims/SplitFiles.scala	sql-plugin/src/main/spark350/scala/org/apache/spark/sql/execution/rapids/shims/SplitFiles.scala
+359,350db143,400db173	src/main/scala/org/apache/spark/sql/execution/rapids/shims/UnionExecShims.scala	sql-plugin/src/main/spark330/scala/org/apache/spark/sql/execution/rapids/shims/UnionExecShims.scala
+413,410db183	src/main/scala/org/apache/spark/sql/execution/rapids/shims/UnionExecShims.scala	sql-plugin/src/main/spark410db183/scala/org/apache/spark/sql/execution/rapids/shims/UnionExecShims.scala
+500	src/main/scala/org/apache/spark/sql/execution/rapids/shims/UnionExecShims.scala	sql-plugin/src/main/spark421/scala/org/apache/spark/sql/execution/rapids/shims/UnionExecShims.scala
 359,350db143	src/main/scala/org/apache/spark/sql/hive/rapids/shims/CommandUtilsShim.scala	sql-plugin/src/main/spark330/scala/org/apache/spark/sql/hive/rapids/shims/CommandUtilsShim.scala
 413,400db173,410db183,500	src/main/scala/org/apache/spark/sql/hive/rapids/shims/CommandUtilsShim.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/hive/rapids/shims/CommandUtilsShim.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/org/apache/spark/sql/hive/rapids/shims/CreateFunctions.scala	sql-plugin/src/main/spark350/scala/org/apache/spark/sql/hive/rapids/shims/CreateFunctions.scala

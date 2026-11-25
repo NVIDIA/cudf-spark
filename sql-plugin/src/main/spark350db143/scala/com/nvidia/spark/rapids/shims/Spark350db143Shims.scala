@@ -23,6 +23,7 @@ import com.databricks.sql.execution.UnionWithLocalDataExec
 import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.execution.{SparkPlan, UnionExec}
+import org.apache.spark.sql.execution.rapids.shims.UnionExecShims
 
 trait Spark350db143Shims extends Spark341PlusDBShims {
   // Keep this lazy to avoid a class-initialization cycle: building these rules calls
@@ -58,7 +59,8 @@ trait Spark350db143Shims extends Spark341PlusDBShims {
         }
 
         override def convertToGpu(): GpuExec =
-          GpuUnionExec(childPlans.map(_.convertIfNeeded()))
+          GpuUnionExec(childPlans.map(_.convertIfNeeded()))(
+            UnionExecShims.isPlainUnion(union))
       })
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
