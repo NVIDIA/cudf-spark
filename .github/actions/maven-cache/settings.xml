@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <mirrors>
+    <mirror>
+      <id>google-maven-central</id>
+      <url>https://maven-central.storage-download.googleapis.com/maven2</url>
+      <!-- Unity Catalog declares Central under a second ID. Leave snapshot repositories alone. -->
+      <mirrorOf>central,unity-catalog-maven-central</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>

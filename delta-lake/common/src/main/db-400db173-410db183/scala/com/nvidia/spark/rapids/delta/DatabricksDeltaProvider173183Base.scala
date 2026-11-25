@@ -103,7 +103,8 @@ abstract class DatabricksDeltaProvider173183Base extends DatabricksDeltaProvider
       GpuCheckOverflowInTableWrite.exprRule,
       GpuChecksumExpression.exprRule,
       GpuIncrementMetric.exprRule,
-      GpuConditionalIncrementMetric.exprRule)
+      GpuConditionalIncrementMetric.exprRule,
+      GpuGenerateIdentityValuesRule.exprRule)
     super.getExprs ++ rules.map(r => (r.getClassFor.asSubclass(classOf[Expression]), r))
   }
 

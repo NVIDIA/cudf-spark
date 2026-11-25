@@ -83,6 +83,33 @@ Apache Spark 3.3.0 on Scala 2.13 artifacts, issue:
 mvn package -f scala2.13 -pl tests -am -Dbuildver=330 -Dsuffixes='.*CastOpSuite' -Dtests=decimal
 ```
 
+### Spark 3.3 Hive Aggregation Tests
+
+Run both Hive aggregation suites through their shared wrapper, serially:
+
+```bash
+mvn package -pl tests -am -Dbuildver=330 -Drapids.parallelUnitTests=false \
+  -DwildcardSuites=org.apache.spark.sql.rapids.suites.RapidsHiveAggregationSuite \
+  -Dmaven.repo.local=./.mvn-repo \
+  -Drapids.test.gpu.allocFraction=0.3 \
+  -Drapids.test.gpu.maxAllocFraction=0.3 -Drapids.test.gpu.minAllocFraction=0
+```
+
+The wrapper creates its children only during execution to keep their shared Hive context alive.
+It exposes no child test names during discovery, so serial `-Dsuffixes` plus `-Dtests` selection
+can silently run zero tests (for example, `verify aggregator ser/de behavior`). Use the whole-suite
+command above instead. The child suites are marked `DoNotDiscover` and should not run independently.
+The wrapper skips Hive initialization when `org.apache.spark.tags.SlowHiveTest` is excluded or
+when include tags do not select that tag.
+
+### Spark 4.2.0 Migrated Suites
+
+Spark 4.2.0 (`buildver=420`, Scala 2.13) uses the default unit-test execution and SQL configuration.
+Register inherited Spark suites in the Spark 420 `RapidsTestSettings`; Spark 330
+retains its own registry and suites. Run the suites through the existing Maven and
+ScalaTest unit-test workflow using `-f scala2.13 -Dbuildver=420`. The Scala 2.13
+premerge stage runs 350, 401 and 420 through that same workflow.
+
 ### Large Host Memory Tests
 
 Some tests build host columns up to the 2 GiB limit of a cuDF column. They need a GPU and, per
@@ -91,7 +118,7 @@ skipped, and reported as canceled, unless `spark.rapids.test.largeHostMemory.ena
 passed through `SPARK_CONF`. They also fail unless JVM assertions are enabled (`-ea`, as the Maven
 build sets), because without them a column built past its limit corrupts memory instead of
 failing. Run them one at a time, without `-Drapids.parallelUnitTests=true`, and at a Spark 3.x
-`buildver`: the Spark 4.x test executions set `SPARK_CONF` themselves, which replaces this one.
+`buildver`: the Spark 4.0 test executions set `SPARK_CONF` themselves, which replaces this one.
 
 ```bash
 SPARK_CONF=spark.rapids.test.largeHostMemory.enabled=true \

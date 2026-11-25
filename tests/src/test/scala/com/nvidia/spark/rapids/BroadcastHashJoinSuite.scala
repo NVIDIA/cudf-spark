@@ -20,12 +20,87 @@ import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.catalyst.plans.physical.BroadcastDistribution
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.joins.HashedRelationBroadcastMode
 import org.apache.spark.sql.functions.{broadcast, col}
+import org.apache.spark.sql.rapids.GpuScalarSubquery
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.{DataFrame, SparkSession}
 
 class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
+  for (aqe <- Seq(false, true); reuse <- Seq(false, true)) {
+    test(s"scalar subquery in build-side projection: aqe=$aqe, reuse=$reuse") {
+      val conf = new SparkConf()
+        .set("spark.sql.adaptive.enabled", aqe.toString)
+        .set("spark.sql.shuffle.partitions", "8")
+        .set("spark.sql.ansi.enabled", "false")
+        .set("spark.rapids.sql.join.hashTable.reuse", reuse.toString)
+        .set("spark.rapids.sql.join.buildSide", "FIXED")
+        .set("spark.rapids.sql.metrics.level", "DEBUG")
+      withTempPath { path =>
+        val query = """
+          |WITH s AS (SELECT id, sum(value) AS total FROM source GROUP BY id)
+          |SELECT /*+ BROADCAST(s) */ a.id, s.total
+          |FROM source a LEFT JOIN s ON a.id = s.id
+          |WHERE s.total IS NOT NULL
+          |  AND (s.total > (SELECT avg(total) FROM s) OR a.name = 'name_1')
+          |""".stripMargin
+        val expected = withCpuSparkSession({ spark =>
+          spark.range(10).selectExpr("id", "concat('name_', cast(id as string)) AS name",
+            "id + 1 AS value").write.parquet(path.toString)
+          spark.read.parquet(path.toString).createOrReplaceTempView("source")
+          try {
+            spark.sql(query).collect().sortBy(_.getLong(0))
+          } finally {
+            spark.catalog.dropTempView("source")
+          }
+        }, conf)
+        assert(expected.map(_.getLong(0)).toSeq == Seq(1L, 5L, 6L, 7L, 8L, 9L))
+        withGpuSparkSession({ spark =>
+          spark.read.parquet(path.toString).createOrReplaceTempView("source")
+          try {
+            val df = spark.sql(query)
+            val actual = df.collect().sortBy(_.getLong(0))
+            assert(actual.toSeq == expected.toSeq)
+            val plan = df.queryExecution.executedPlan
+            val joinWithScalarSubquery = findOperator(plan, {
+              case join: GpuBroadcastHashJoinExec =>
+                val build = join.buildSide match {
+                  case GpuBuildLeft => join.left
+                  case GpuBuildRight => join.right
+                }
+                buildProjectHasScalarSubquery(build)
+              case _ => false
+            })
+            assert(joinWithScalarSubquery.nonEmpty,
+              s"Expected a scalar subquery in a broadcast build-side projection:\n$plan")
+            val join = joinWithScalarSubquery.get
+            // Databricks executor broadcast uses a different broadcast mode.
+            val standardBroadcast = join.requiredChildDistribution.exists {
+              case BroadcastDistribution(_: HashedRelationBroadcastMode) => true
+              case _ => false
+            }
+            if (reuse && standardBroadcast) {
+              assert(join.metrics("hashTableBuilds").value > 0L,
+                s"Expected a cached hash table build for the broadcast join:\n$plan")
+            }
+          } finally {
+            spark.catalog.dropTempView("source")
+          }
+        }, conf)
+      }
+    }
+  }
+
+  private def buildProjectHasScalarSubquery(plan: SparkPlan): Boolean = plan match {
+    case project: GpuProjectExec =>
+      project.projectList.exists(_.exists(_.isInstanceOf[GpuScalarSubquery])) ||
+        buildProjectHasScalarSubquery(project.child)
+    case _ => false
+  }
+
   private def broadcastReuseConf: SparkConf = new SparkConf()
     .set("spark.sql.adaptive.enabled", "false")
     .set("spark.sql.autoBroadcastJoinThreshold", "-1")

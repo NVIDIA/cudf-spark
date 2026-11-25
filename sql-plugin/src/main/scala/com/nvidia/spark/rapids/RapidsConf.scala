@@ -771,6 +771,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val readerGdsMode: GpuDirectStorageMode.Value =
     GpuDirectStorageMode.withName(get(READER_GPU_DIRECT_STORAGE_MODE))
 
+  lazy val readerKvikioNumThreads: Option[Int] = get(READER_KVIKIO_NUM_THREADS).map(_.toInt)
+
   lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
 
   lazy val hybridScanMinH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE)

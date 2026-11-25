@@ -1,0 +1,153 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Share the same Maven dependency cache between the branch warmer and PR checks.
+name: Prepare Spark Maven dependencies
+description: Restore or populate the Maven repository for one Scala binary version.
+inputs:
+  scala:
+    description: Scala binary version used by Maven Verify
+    required: true
+  base-branch:
+    description: PR target for callers not running on a pull_request event
+    required: false
+  premerge:
+    description: Seed premerge runtime dependencies; an existing full cache is not downloaded
+    default: 'false'
+  key-only:
+    description: Return a ready key without downloading its archive; on a miss, restore and warm as usual
+    default: 'false'
+outputs:
+  key:
+    description: Exact cache key for downstream verification jobs
+    value: ${{ (steps.target.outputs.ready == 'true' && steps.target.outputs.key) || steps.result.outputs.key || '' }}
+runs:
+  using: composite
+  steps:
+    - name: Identify Maven dependencies
+      id: key
+      shell: bash
+      env:
+        SCALA_VER: ${{ inputs.scala }}
+        BRANCH: ${{ inputs.base-branch || github.base_ref || github.ref_name }}
+        INPUT_HASH: >-
+          ${{ hashFiles('**/pom.xml', 'build/get_buildvers.py', 'dist/build/package-parallel-worlds.py',
+                        'scripts/get_iceberg_versions.py', '.github/actions/maven-cache/*.sh',
+                        '.github/actions/maven-cache/dependency-key.py',
+                        '.github/actions/maven-cache/action.yml',
+                        '.github/workflows/mvn-verify-check.yml', '.github/actions/maven-cache/settings.xml') }}
+        PREMERGE_HASH: ${{ hashFiles('integration_tests/run_unity_catalog_server.sh') }}
+      run: |
+        model=$(mktemp "$RUNNER_TEMP/maven-effective.XXXXXXXX")
+        snapshot_hash=$(timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" "$SCALA_VER" --keep-model "$model")
+        echo "snapshot-hash=$snapshot_hash" >> "$GITHUB_OUTPUT"
+        echo "model=$model" >> "$GITHUB_OUTPUT"
+        bash "$GITHUB_ACTION_PATH/cache-keys.sh" "$snapshot_hash" >> "$GITHUB_OUTPUT"
+
+    - name: Look up a ready cache
+      if: inputs.premerge == 'true' || inputs.key-only == 'true'
+      id: lookup
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.key.outputs.full }}
+        lookup-only: true
+        restore-keys: |
+          ${{ steps.key.outputs.stem }}-premerge-
+          ${{ steps.key.outputs.stem }}-verify
+
+    - name: Check whether the matched key is sufficient
+      id: existing
+      if: steps.lookup.outcome == 'success' && steps.lookup.outputs.cache-matched-key != ''
+      shell: bash
+      env:
+        STEM: ${{ steps.key.outputs.stem }}
+        FULL: ${{ steps.key.outputs.full }}
+        MATCH: ${{ steps.lookup.outputs.cache-matched-key }}
+        PREMERGE: ${{ inputs.premerge }}
+      run: bash "$GITHUB_ACTION_PATH/cache-target.sh" >> "$GITHUB_OUTPUT"
+
+    - name: Restore Maven dependencies
+      if: steps.existing.outputs.ready != 'true'
+      id: restore
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.key.outputs.full }}
+        restore-keys: |
+          ${{ steps.key.outputs.stem }}-premerge-
+          ${{ steps.key.outputs.stem }}-verify
+          ${{ steps.key.outputs.snapshot-prefix }}
+          ${{ steps.key.outputs.prefix }}
+
+    - name: Ignore incomplete Maven restore
+      if: steps.restore.outcome != 'skipped' && (steps.restore.outcome != 'success' || !steps.restore.outputs.cache-matched-key)
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/recover-restore.sh" warm
+
+    - name: Select cache to use or populate
+      id: target
+      shell: bash
+      env:
+        STEM: ${{ steps.key.outputs.stem }}
+        FULL: ${{ steps.key.outputs.full }}
+        MATCH: ${{ (steps.existing.outputs.ready == 'true' && steps.existing.outputs.key) || (steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key) || '' }}
+        PREMERGE: ${{ inputs.premerge }}
+      run: bash "$GITHUB_ACTION_PATH/cache-target.sh" >> "$GITHUB_OUTPUT"
+
+    - name: Warm missing dependencies
+      id: warm
+      if: steps.target.outputs.ready != 'true' && (inputs.premerge == 'true' || steps.restore.outcome != 'failure')
+      shell: bash
+      env:
+        MODEL: ${{ steps.key.outputs.model }}
+        EXPECTED: ${{ steps.key.outputs.snapshot-hash }}
+        CACHE_PREFIX: ${{ steps.key.outputs.prefix }}
+        RESTORED_KEY: ${{ steps.restore.outcome == 'success' && steps.restore.outputs.cache-matched-key || '' }}
+        SCALA_VER: ${{ inputs.scala }}
+        WARM_PREMERGE: ${{ inputs.premerge }}
+        WARM_TIMEOUT: ${{ inputs.premerge == 'true' && '55m' || '30m' }}
+      run: |
+        # Maven -U can fall back to stale local JARs when upstream is unavailable.
+        python3 "$GITHUB_ACTION_PATH/dependency-key.py" --discard-restored "$MODEL"
+        timeout "$WARM_TIMEOUT" "$GITHUB_ACTION_PATH/populate-cache.sh"
+
+    - name: Confirm upstream SNAPSHOTs did not change during warm-up
+      id: confirm
+      if: steps.warm.outcome == 'success'
+      shell: bash
+      env:
+        MODEL: ${{ steps.key.outputs.model }}
+        EXPECTED: ${{ steps.key.outputs.snapshot-hash }}
+      run: timeout 5m python3 "$GITHUB_ACTION_PATH/dependency-key.py" --confirm-snapshots "$MODEL" "$EXPECTED"
+
+    - name: Save Maven dependencies
+      id: save
+      if: success() && steps.confirm.outcome == 'success'
+      continue-on-error: true
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.target.outputs.key }}
+
+    - name: Look up the saved Maven cache
+      id: saved
+      if: steps.confirm.outcome == 'success'
+      continue-on-error: true
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.target.outputs.key }}
+        lookup-only: true
+
+    - name: Report Maven cache availability
+      id: result
+      if: steps.confirm.outcome == 'success'
+      shell: bash
+      env:
+        TARGET: ${{ steps.target.outputs.key }}
+        MATCH: ${{ steps.saved.outcome == 'success' && steps.saved.outputs.cache-matched-key || '' }}
+        PREMERGE: ${{ inputs.premerge }}
+      run: bash "$GITHUB_ACTION_PATH/cache-target.sh" --after-save >> "$GITHUB_OUTPUT"

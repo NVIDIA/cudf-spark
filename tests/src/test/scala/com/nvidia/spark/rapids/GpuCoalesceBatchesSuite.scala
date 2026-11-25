@@ -41,8 +41,11 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.columnar.{DefaultCachedBatchSerializer, InMemoryRelation,
+  InMemoryTableScanExec}
 import org.apache.spark.sql.execution.metric.SQLMetric
-import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
+import org.apache.spark.sql.execution.vectorized.{OffHeapColumnVector, OnHeapColumnVector,
+  WritableColumnVector}
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
@@ -298,13 +301,161 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
         copyBufTime = NoopMetric,
         opTime = NoopMetric,
         opName = "concat test",
-        useArrowCopyOpt = false)
+        useArrowCopyOpt = false,
+        inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
     coalesceIter.foreach { batch =>
       // The main point of the test is to verify there's no double-close of a host batch.
       withResource(batch) { _ =>
         assertResult(1)(batch.numCols())
         assertResult(2)(batch.numRows())
       }
+    }
+  }
+
+  test("host coalesce closes copied cache batches but not the on-deck batch") {
+    class CloseTrackingColumnarBatch(vector: WritableColumnVector, rows: Int)
+        extends ColumnarBatch(Array(vector), rows) {
+      var closeCount: Int = 0
+
+      override def close(): Unit = {
+        closeCount += 1
+        super.close()
+      }
+    }
+
+    Seq(true, false).foreach { onHeap =>
+      val inputValues =
+        Seq(Seq.empty[Int], Seq(10, 20), Seq.empty[Int], Seq(30, 40),
+          Seq(50, 60), Seq.empty[Int])
+      val inputs = inputValues.map { values =>
+        val vector: WritableColumnVector = if (onHeap) {
+          new OnHeapColumnVector(values.length, IntegerType)
+        } else {
+          new OffHeapColumnVector(values.length, IntegerType)
+        }
+        values.zipWithIndex.foreach { case (value, index) =>
+          vector.putInt(index, value)
+        }
+        new CloseTrackingColumnarBatch(vector, values.length)
+      }
+      val coalesceIter = new HostToGpuCoalesceIterator(
+        inputs.iterator,
+        TargetSize(1000),
+        new StructType().add("ints", IntegerType),
+        numInputRows = NoopMetric,
+        numInputBatches = NoopMetric,
+        numOutputRows = NoopMetric,
+        numOutputBatches = NoopMetric,
+        streamTime = NoopMetric,
+        concatTime = NoopMetric,
+        copyBufTime = NoopMetric,
+        opTime = NoopMetric,
+        opName = "cache vector close test",
+        useArrowCopyOpt = false,
+        inputBatchCleanup = HostBatchCleanupPolicy.CloseAfterCopy) {
+        override def addBatchToConcat(batch: ColumnarBatch): Unit = {
+          super.addBatchToConcat(batch)
+          batchRowLimit = Int.MaxValue
+        }
+
+        override def getBatchDataSize(batch: ColumnarBatch): Long = batch.numRows() * 250L
+      }
+
+      try {
+        assert(coalesceIter.hasNext)
+        assertResult(Seq(1, 0, 0, 0, 0, 0))(inputs.map(_.closeCount))
+        withResource(coalesceIter.next()) { output =>
+          assertResult(4)(output.numRows())
+          withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
+            assertResult(10)(host.getInt(0))
+            assertResult(20)(host.getInt(1))
+            assertResult(30)(host.getInt(2))
+            assertResult(40)(host.getInt(3))
+          }
+          assertResult(Seq(1, 1, 1, 1, 0, 0))(inputs.map(_.closeCount))
+        }
+
+        assert(coalesceIter.hasNext)
+        assertResult(0)(inputs(4).closeCount)
+        withResource(coalesceIter.next()) { output =>
+          assertResult(2)(output.numRows())
+          withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
+            assertResult(50)(host.getInt(0))
+            assertResult(60)(host.getInt(1))
+          }
+          assertResult(Seq.fill(inputs.length)(1))(inputs.map(_.closeCount))
+        }
+        assert(!coalesceIter.hasNext)
+      } finally {
+        // DefaultCachedBatchSerializer closes the batches again at task completion.
+        inputs.foreach(_.close())
+      }
+
+      assertResult(Seq.fill(inputs.length)(2))(inputs.map(_.closeCount))
+    }
+  }
+
+  test("only the exact default cache serializer selects close-after-copy") {
+    withGpuSparkSession { spark =>
+      val cached = spark.range(2).cache()
+      try {
+        val relation = cached.queryExecution.withCachedData.collectFirst {
+          case r: InMemoryRelation => r
+        }.getOrElse(fail("Expected an InMemoryRelation"))
+
+        def scanWithSerializer(serializer: DefaultCachedBatchSerializer): InMemoryTableScanExec = {
+          val updatedRelation = relation.copy(
+            cacheBuilder = relation.cacheBuilder.copy(serializer = serializer))
+          InMemoryTableScanExec(updatedRelation.output, Seq.empty, updatedRelation)
+        }
+
+        val defaultScan = scanWithSerializer(new DefaultCachedBatchSerializer)
+        assertResult(HostBatchCleanupPolicy.CloseAfterCopy) {
+          GpuTransitionOverrides.hostBatchCleanupFor(defaultScan)
+        }
+
+        val customSerializerScan = scanWithSerializer(new DefaultCachedBatchSerializer {})
+        assertResult(HostBatchCleanupPolicy.ProducerCloses) {
+          GpuTransitionOverrides.hostBatchCleanupFor(customSerializerScan)
+        }
+      } finally {
+        cached.unpersist(blocking = true)
+      }
+    }
+  }
+
+  Seq(false, true).foreach { adaptiveEnabled =>
+    test(s"default cache scan wires close-after-copy with AQE $adaptiveEnabled") {
+      val conf = new SparkConf()
+        .set("spark.sql.adaptive.enabled", adaptiveEnabled.toString)
+        .set("spark.rapids.sql.exec.InMemoryTableScanExec", "false")
+        .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
+          "InMemoryTableScanExec,TableCacheQueryStageExec")
+
+      withGpuSparkSession(spark => {
+        val cached = spark.range(8).repartition(2).cache()
+        try {
+          cached.count()
+
+          ExecutionPlanCaptureCallback.startCapture()
+          val result = cached.selectExpr("id + 1").collect().map(_.getLong(0)).toSeq
+          assertResult((1L to 8L).toSeq)(result.sorted)
+
+          val executedPlan =
+            ExecutionPlanCaptureCallback.extractExecutedPlan(getCapturedPlan())
+          val hostColumnarToGpu = executedPlan.collect {
+            case host: HostColumnarToGpu => host
+          }
+          assert(hostColumnarToGpu.nonEmpty, s"Expected HostColumnarToGpu in plan:\n$executedPlan")
+          hostColumnarToGpu.foreach { host =>
+            assertResult(HostBatchCleanupPolicy.CloseAfterCopy) {
+              host.inputBatchCleanup
+            }
+          }
+        } finally {
+          cached.unpersist(blocking = true)
+        }
+      }, conf)
     }
   }
 
@@ -324,7 +475,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       WrappedGpuMetric(new SQLMetric("t7", 0)),
       WrappedGpuMetric(new SQLMetric("t8", 0)),
       "testcoalesce",
-      useArrowCopyOpt = true)
+      useArrowCopyOpt = true,
+      inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
 
     hostToGpuCoalesceIterator.initNewBatch(batch)
     assert(hostToGpuCoalesceIterator.batchBuilder.
@@ -347,7 +499,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       WrappedGpuMetric(new SQLMetric("t7", 0)),
       WrappedGpuMetric(new SQLMetric("t8", 0)),
       "testcoalesce",
-      useArrowCopyOpt = true)
+      useArrowCopyOpt = true,
+      inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
 
     hostToGpuCoalesceIterator.initNewBatch(batch)
     // array isn't supported should fall back
@@ -436,7 +589,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       schema: StructType): HostToGpuCoalesceIterator = {
     new HostToGpuCoalesceIterator(batches, TargetSize(1024 * 1024), schema,
       NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
-      NoopMetric, "testcoalesce", useArrowCopyOpt = true)
+      NoopMetric, "testcoalesce", useArrowCopyOpt = true,
+      inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
   }
 
   test("HostToGpuCoalesceIterator copies Arrow vectors with the Arrow builder") {
@@ -819,7 +973,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       WrappedGpuMetric(new SQLMetric("t7", 0)),
       WrappedGpuMetric(new SQLMetric("t8", 0)),
       "testcoalesce",
-      useArrowCopyOpt = true)
+      useArrowCopyOpt = true,
+      inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
 
     hostToGpuCoalesceIterator.initNewBatch(batches.head)
     hostToGpuCoalesceIterator.addBatchToConcat(batches.head)
@@ -853,7 +1008,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       WrappedGpuMetric(new SQLMetric("t7", 0)),
       WrappedGpuMetric(new SQLMetric("t8", 0)),
       "testcoalesce",
-      useArrowCopyOpt = false)
+      useArrowCopyOpt = false,
+      inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
 
     hostToGpuCoalesceIterator.initNewBatch(batch)
     assert(hostToGpuCoalesceIterator.batchBuilder.
