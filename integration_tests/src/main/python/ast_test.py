@@ -616,7 +616,6 @@ def test_scalar_pow():
             'pow(-12.0, b)'))
 
 @approximate_float
-@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/89')
 @pytest.mark.parametrize('data_descr', ast_double_descr, ids=idfn)
 def test_columnar_pow(data_descr):
     assert_binary_ast(data_descr, lambda df: df.selectExpr('pow(a, b)'))

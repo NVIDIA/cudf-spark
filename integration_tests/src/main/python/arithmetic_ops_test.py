@@ -1257,7 +1257,6 @@ def test_scalar_pow():
                 'pow(b, cast(null as {}))'.format(string_type)))
 
 @approximate_float
-@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/89')
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_columnar_pow(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
