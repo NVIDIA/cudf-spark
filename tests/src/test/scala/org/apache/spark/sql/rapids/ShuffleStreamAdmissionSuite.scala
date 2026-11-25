@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids
 
 import java.io.{ByteArrayInputStream, InputStream, IOException}
 import java.util.concurrent.{BlockingQueue, CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -58,7 +58,8 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private class Fixture(counts: Seq[Int], limit: Long = 1024,
       gate: Option[CountDownLatch] = None, entered: Option[CountDownLatch] = None,
-      fetchFailure: Option[IOException] = None, headerFailure: Option[IOException] = None)
+      fetchFailure: Option[IOException] = None, headerFailure: Option[IOException] = None,
+      beforeFetch: Int => Unit = _ => ())
       extends AutoCloseable {
     val context = TaskContext.empty()
     // Constructor dependencies are irrelevant to the nested iterator. Keep its real methods.
@@ -89,6 +90,7 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     when(fetcher.next()).thenAnswer { _ =>
       fetchFailure.foreach(throw _)
       val index = fetched
+      beforeFetch(index)
       fetched += 1
       openStreams.incrementAndGet()
       (ShuffleBlockId(1, index, 0): BlockId, streams(index): InputStream)
@@ -290,4 +292,78 @@ class ShuffleStreamAdmissionSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(f.queued == 0)
     assert(f.created.get() == f.closed.get())
   }
+
+  test("interrupting a task cancels its active blocked fetch") {
+    val entered = new CountDownLatch(1)
+    val interrupted = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val failure = new AtomicReference[Throwable]()
+    val f = new Fixture(Seq(1), beforeFetch = _ => {
+      entered.countDown()
+      try release.await() catch {
+        case e: InterruptedException =>
+          interrupted.countDown()
+          throw e
+      }
+    })
+    val task = new Thread(() => {
+      try {
+        try f.iterator.hasNext finally f.close()
+      } catch { case t: Throwable => failure.set(t) }
+    })
+    try {
+      task.start()
+      assert(entered.await(5, TimeUnit.SECONDS))
+      task.interrupt()
+      task.join(5000)
+      assert(!task.isAlive)
+      assert(failure.get().isInstanceOf[InterruptedException])
+      assert(interrupted.await(5, TimeUnit.SECONDS))
+      RapidsShuffleInternalManagerBase.queueReadTask(() => ()).get(5, TimeUnit.SECONDS)
+      assert(f.open == 0)
+    } finally {
+      release.countDown()
+      task.interrupt()
+      task.join(5000)
+    }
+  }
+
+  test("ready batches are returned while another worker is blocked fetching") {
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val returned = new CountDownLatch(1)
+    val failure = new AtomicReference[Throwable]()
+    val f = new Fixture(Seq(1, 1), beforeFetch = index => {
+      if (index == 1) {
+        entered.countDown()
+        release.await()
+      }
+    })
+    val task = new Thread(() => {
+      try {
+        val (_, batch) = f.iterator.next()
+        batch.asInstanceOf[ColumnarBatch].close()
+        returned.countDown()
+      } catch { case t: Throwable => failure.set(t) }
+    })
+    try {
+      f.prime()
+      assert(entered.await(5, TimeUnit.SECONDS))
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (f.queued == 0 && System.nanoTime() < deadline) Thread.`yield`()
+      assert(f.queued == 1)
+      task.start()
+      assert(returned.await(5, TimeUnit.SECONDS))
+      assert(failure.get() == null)
+      release.countDown()
+      task.join(5000)
+      assert(f.drain().size == 1)
+    } finally {
+      release.countDown()
+      task.interrupt()
+      task.join(5000)
+      f.close()
+    }
+  }
+
 }

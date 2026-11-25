@@ -1276,7 +1276,10 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     private val serializerInstance = serializer.newInstance()
     private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
     private val fetchLock = new Object
-    private def hasFetchedBlocks: Boolean = fetchLock.synchronized { fetcherIterator.hasNext }
+    // Only workers advance the multithreaded fetcher. The task must not wait on
+    // fetchLock, which can be held across a remote fetch.
+    @volatile private var fetchExhausted = !fetcherIterator.hasNext
+    private def hasFetchedBlocks: Boolean = !fetchExhausted
 
     private val fallbackIter: Iterator[(Any, Any)] with AutoCloseable =
       if (numReaderThreads == 1) {
@@ -1285,7 +1288,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
         new Iterator[(Any, Any)]() with AutoCloseable {
           private var currentIter: Iterator[(Any, Any)] = _
           private var currentStream: AutoCloseable = _
-          override def hasNext: Boolean = hasFetchedBlocks || (
+          override def hasNext: Boolean = fetcherIterator.hasNext || (
             currentIter != null && currentIter.hasNext)
 
           override def close(): Unit = {
@@ -1499,12 +1502,22 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     private def advanceReader(): Unit = {
       if (!stopped) {
         popFetchedIfAvailable()
-        if (futures.nonEmpty) {
+        // Return ready batches without waiting for an unrelated fetch. Completed futures
+        // are still retired so their paused streams can resume.
+        if (futures.nonEmpty && (queued.isEmpty || futures.head.isDone)) {
           NvtxRegistry.BATCH_WAIT {
             val start = System.nanoTime()
-            val pending = try futures.dequeue().get catch {
+            val future = futures.head
+            val pending = try future.get catch {
+              case e: InterruptedException =>
+                future.cancel(true)
+                throw e
               // Spark must see FetchFailedException itself to retry the upstream stage.
               case e: ExecutionException if e.getCause != null => throw e.getCause
+            } finally {
+              // The wait has finished or worker cancellation has been requested.
+              // Do not replay an already-observed failure during completion cleanup.
+              futures.dequeue()
             }
             pending.foreach(pendingIts.enqueue(_))
             val elapsed = System.nanoTime() - start
@@ -1584,9 +1597,13 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
           // next() owns mutable fetch/retry bookkeeping. Keep it serialized, including
           // corruption probing, but do not read the batch header under this lock.
           val fetched = fetchLock.synchronized {
-            if (stopped || !fetcherIterator.hasNext) None else {
+            if (stopped || fetchExhausted) None else {
               val start = System.nanoTime()
-              try Some(fetcherIterator.next()) finally {
+              try {
+                val result = fetcherIterator.next()
+                fetchExhausted = !fetcherIterator.hasNext
+                Some(result)
+              } finally {
                 val elapsed = System.nanoTime() - start
                 ioWaitTimeNs.foreach(_ += elapsed)
                 shuffleReadTimeNs.foreach(_ += elapsed)
