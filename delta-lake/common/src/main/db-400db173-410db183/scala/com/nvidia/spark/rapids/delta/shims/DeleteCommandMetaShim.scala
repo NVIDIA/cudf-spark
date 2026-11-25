@@ -26,6 +26,11 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 
+/**
+ * Both command variants share the same guard. The Delta DELETE integration runs on DBR 17.3
+ * and 18.3 observed DeleteCommandEdge for the tested SQL; DeleteCommand also routes here when
+ * the runtime emits it.
+ */
 object DeleteCommandMetaShim {
   def tagForGpu(meta: DeleteCommandMeta): Unit = {
     val cmd = meta.deleteCmd

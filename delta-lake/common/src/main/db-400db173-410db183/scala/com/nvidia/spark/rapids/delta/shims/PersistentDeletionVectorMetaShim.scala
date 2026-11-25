@@ -30,6 +30,10 @@ import org.apache.spark.sql.types.StructType
 
 /** Fallback checks shared by DBR 17.3+ DELETE, UPDATE and MERGE with persistent DVs. */
 object PersistentDeletionVectorMetaShim {
+  /**
+   * Returns true if the condition includes a data predicate. Returns false for `None`
+   * and for conditions that can be evaluated entirely from partition metadata.
+   */
   def hasDataPredicate(
       condition: Option[Expression],
       partitionColumns: Seq[String],

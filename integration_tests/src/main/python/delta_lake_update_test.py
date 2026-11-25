@@ -405,16 +405,18 @@ def test_delta_update_persistent_dv_multi_file_file_name_conditions(
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Persistent-DV command acceleration requires DBR 17.3+")
-def test_delta_update_persistent_dv_row_tracking_fallback(spark_tmp_path):
+@pytest.mark.parametrize("partitioned", [False, True], ids=["row", "mixed_predicate"])
+def test_delta_update_persistent_dv_row_tracking_fallback(spark_tmp_path, partitioned):
     conf = copy_and_update(delta_update_enabled_conf, delta_row_tracking_dml_conf)
     conf["spark.databricks.delta.update.deletionVectors.persistent"] = "true"
     data_path = spark_tmp_path + "/DELTA_DATA"
     with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
-        spark, data_path, row_tracking_dml_test_df, enable_deletion_vectors=True), conf=conf)
+        spark, data_path, row_tracking_dml_test_df, enable_deletion_vectors=True,
+        partition_columns=["b"] if partitioned else None), conf=conf)
+    predicate = "b IN ('b', 'c') AND a IN (1, 2, 3)" if partitioned else "a IN (2, 3)"
 
     def update(spark, path):
-        result = spark.sql(
-            f"UPDATE delta.`{path}` SET c = b WHERE a IN (2, 3)").collect()
+        result = spark.sql(f"UPDATE delta.`{path}` SET c = b WHERE {predicate}").collect()
         assert_equal(result, [Row(2)])
 
     assert_gpu_fallback_write(
@@ -426,23 +428,27 @@ def test_delta_update_persistent_dv_row_tracking_fallback(spark_tmp_path):
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Persistent-DV command acceleration requires DBR 17.3+")
-def test_delta_update_persistent_dv_row_tracking_without_bitmap(spark_tmp_path):
+@pytest.mark.parametrize("partitioned", [False, True], ids=["whole_table", "partition"])
+def test_delta_update_persistent_dv_row_tracking_without_bitmap(spark_tmp_path, partitioned):
     conf = copy_and_update(delta_update_enabled_conf, delta_row_tracking_dml_conf)
     conf["spark.databricks.delta.update.deletionVectors.persistent"] = "true"
     data_path = spark_tmp_path + "/DELTA_DATA"
     with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
-        spark, data_path, row_tracking_dml_test_df, enable_deletion_vectors=True), conf=conf)
+        spark, data_path, row_tracking_dml_test_df, enable_deletion_vectors=True,
+        partition_columns=["b"] if partitioned else None), conf=conf)
 
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
     update_sql = "UPDATE delta.`{path}` SET c = b"
+    if partitioned:
+        update_sql += " WHERE b IN ('b', 'c')"
     cpu_result = with_cpu_session(
         lambda spark: spark.sql(update_sql.format(path=cpu_path)).collect(), conf=conf)
     gpu_result = assert_rapids_delta_write(
         lambda spark: spark.sql(update_sql.format(path=gpu_path)).collect(), conf=conf,
         expected_command="GpuUpdateCommand")
     assert_equal(cpu_result, gpu_result)
-    assert_equal(gpu_result, [Row(4)])
+    assert_equal(gpu_result, [Row(2 if partitioned else 4)])
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(
         spark, data_path), conf=conf)
 
