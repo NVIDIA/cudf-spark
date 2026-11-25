@@ -687,7 +687,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
           withResource(input.getColumnarBatch()) { cb =>
             withResource(GpuColumnVector.extractBases(cb).head.copyToHost()) { host =>
               writes += FloatingWrite(bits, bucket, counter,
-                (0 until cb.numRows()).map(host.getInt))
+                (0 until cb.numRows()).map(i => host.getInt(i)))
             }
           }
         }
@@ -705,9 +705,10 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
           doubles.castTo(GpuColumnVector.getNonNestedRapidsType(dataType)), dataType)) { parts =>
         closeOnExcept(GpuColumnVector.from(
             ai.rapids.cudf.ColumnVector.fromInts(rows: _*), IntegerType)) { data =>
-          val columns = Array[ColumnVector](parts, data) ++ buckets.map { ids =>
+          val bucketColumns: Seq[ColumnVector] = buckets.toSeq.map { ids =>
             GpuColumnVector.from(ai.rapids.cudf.ColumnVector.fromInts(ids: _*), IntegerType)
-          }.toArray
+          }
+          val columns = Array[ColumnVector](parts, data) ++ bucketColumns
           new ColumnarBatch(columns, rows.size)
         }
       }
@@ -824,7 +825,8 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
         withColumnarBatchesVerifyClosed(batches) {
           if (bucketed) {
             when(mockJobDescription.bucketSpec).thenReturn(Some(GpuWriterBucketSpec(
-              GpuBoundReference(2, IntegerType, nullable = false), _ => "")))
+              GpuBoundReference(2, IntegerType, nullable = false)(
+                allCols(2).exprId, allCols(2).name), _ => "")))
           }
           val writer = prepareDynamicPartitionSingleWriter()
           val writes = recordFloatingWrites(writer, dataType)
