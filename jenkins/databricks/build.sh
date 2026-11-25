@@ -64,8 +64,11 @@ initialize()
     sudo apt-get update
     # install rsync to be used for copying onto the databricks nodes
     sudo apt install -y rsync openjdk-17-jdk
+    # Both Scala builds use JDK 17. Scala 2.12 still targets Java 8 bytecode.
+    export JAVA_HOME=$(echo /usr/lib/jvm/java-1.17.0-*)
     local maven_version=3.8.2
-    if [[ ! -d "$HOME/apache-maven-$maven_version" ]]; then
+    local maven_bin="$HOME/apache-maven-$maven_version/bin/mvn"
+    if ! "$maven_bin" --version >/dev/null 2>&1; then
         # DBFS cache for Maven
         DBFS_CACHE_DIR=${DBFS_CACHE_DIR:-"/dbfs/cached_jars"}
         JAR_FILE_NAME=${JAR_FILE_NAME:-"apache-maven-${maven_version}-bin.tar.gz"}
@@ -79,7 +82,7 @@ initialize()
             cp "$MAVEN_CACHE_FILE" "/tmp/$JAR_FILE_NAME"
         else
             echo "Maven not found in DBFS cache, downloading from archive.apache.org..."
-            if wget "$MAVEN_URL" -P /tmp; then
+            if wget -O "/tmp/$JAR_FILE_NAME" "$MAVEN_URL"; then
                 echo "Download successful, caching to DBFS..."
                 cp "/tmp/$JAR_FILE_NAME" "$MAVEN_CACHE_FILE" || true
             else
@@ -88,14 +91,11 @@ initialize()
             fi
         fi
         
-        tar xf "/tmp/$JAR_FILE_NAME" -C $HOME
+        tar xf "/tmp/$JAR_FILE_NAME" -C "$HOME"
         rm -f "/tmp/$JAR_FILE_NAME"
+        "$maven_bin" --version
     fi
-    sudo ln -sfn "$HOME/apache-maven-$maven_version/bin/mvn" /usr/local/bin/mvn
-
-    # Set JDK 17 as the default for nightly builds across both:
-    # scala2.12 and scala2.13 (with maven.compiler.source as 1.8)
-    export JAVA_HOME=$(echo /usr/lib/jvm/java-1.17.0-*)
+    sudo ln -sfn "$maven_bin" /usr/local/bin/mvn
     mvn -version
 
     # Archive file location of the plugin repository

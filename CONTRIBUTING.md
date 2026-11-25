@@ -37,7 +37,8 @@ information.
 
 ## Building From Source
 
-Building from source requires [Maven](https://maven.apache.org) 3.8.2 or newer.
+We use [Maven](https://maven.apache.org) for most aspects of the build. We test the build with latest
+patch versions for Maven 3.6.x, 3.8.x and 3.9.x. Maven version 3.6.0 or more recent is enforced.
 
 Some important parts
 of the build execute in the `verify` phase of the Maven build lifecycle.  We recommend when
