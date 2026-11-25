@@ -332,6 +332,26 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(calls == 7)
   }
 
+  test("two-metric timing preserves child exclusion with either metric disabled") {
+    val parent = new LocalGpuMetric
+    val companion = new LocalGpuMetric
+    parent.companionGpuMetric = Some(companion)
+    val child = new LocalGpuMetric
+    child.add(10L)
+    for (metrics <- Seq(Seq(NoopMetric, parent), Seq(parent, NoopMetric))) {
+      val rawBefore = parent.value
+      val companionBefore = companion.value
+      assert(GpuMetric.ns(metrics, Seq(child)) {
+        assert(!parent.tryActivateTimer(Seq.empty))
+        child.add(40L)
+        42
+      } == 42)
+      assert(parent.value - rawBefore == companion.value - companionBefore - 40L)
+      assert(parent.tryActivateTimer(Seq.empty))
+      parent.deactivateTimer(0L, Seq.empty)
+    }
+  }
+
   test("metric ranges handle empty, single, duplicate and already active timers") {
     val outer = new LocalGpuMetric
     assert(outer.tryActivateTimer(Seq.empty))

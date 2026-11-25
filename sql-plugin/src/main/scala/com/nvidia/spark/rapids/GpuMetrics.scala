@@ -304,17 +304,20 @@ object GpuMetric extends Logging {
   }
 
   def ns[T](metrics: Seq[GpuMetric], excludeMetrics: Seq[GpuMetric])(f: => T): T = {
-    if (metrics.isEmpty) {
-      f
-    } else if (metrics.lengthCompare(1) == 0) {
-      metrics.head.ns(excludeMetrics)(f)
-    } else {
-      val range = new MetricRange(metrics, excludeMetrics)
-      try {
-        f
-      } finally {
-        range.close()
-      }
+    metrics.lengthCompare(2) match {
+      case n if n < 0 =>
+        if (metrics.isEmpty) f else metrics.head.ns(excludeMetrics)(f)
+      case 0 if metrics.head eq NoopMetric =>
+        metrics(1).ns(excludeMetrics)(f)
+      case 0 if metrics(1) eq NoopMetric =>
+        metrics.head.ns(excludeMetrics)(f)
+      case _ =>
+        val range = new MetricRange(metrics, excludeMetrics)
+        try {
+          f
+        } finally {
+          range.close()
+        }
     }
   }
 
