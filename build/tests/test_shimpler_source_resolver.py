@@ -251,6 +251,31 @@ class SourceResolverTest(unittest.TestCase):
         for target, expected in expected_paths.items():
             self.assertEqual(set(selections[target]) & baselined_paths, expected, target)
 
+    def test_unsupported_delta_profiles_use_only_stub(self):
+        namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
+        pom = ROOT / 'scala2.13' / 'pom.xml'
+        root = ET.parse(str(pom)).getroot()
+        profiles = {
+            profile.findtext('m:id', namespaces=namespace): profile
+            for profile in root.findall('m:profiles/m:profile', namespace)
+        }
+        for target in ('405', '412', '413', '414'):
+            profile = profiles['release' + target]
+            self.assertEqual(
+                profile.findtext(
+                    'm:properties/m:rapids.delta.artifactId1', namespaces=namespace),
+                'cudf-spark-delta-stub',
+                target)
+            self.assertIsNone(
+                profile.find('m:properties/m:rapids.delta.artifactId2', namespace), target)
+            self.assertIsNone(
+                profile.find('m:properties/m:rapids.delta.artifactId3', namespace), target)
+            delta_modules = [
+                module.text for module in profile.findall('m:modules/m:module', namespace)
+                if module.text.startswith('delta-lake/delta-')
+            ]
+            self.assertEqual(delta_modules, ['delta-lake/delta-stub'], target)
+
     def test_spark_421_maintenance_fixes_carry_to_future_lines(self):
         root_graph = load_source_graph(str(ROOT / 'pom.xml'))
         graph = dict(load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))

@@ -16,7 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["401","402","411"],"carryForward":"none"}
-{"spark":["405","414"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 
@@ -61,7 +60,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.2 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.0.5", "4.1.1", "4.1.4").foreach { sparkVersion =>
+    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
       val shimClassName = DeltaRuntimeShim.getDelta42ShimClassName("4.2.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta42x")))
     }
@@ -70,10 +69,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("Delta 4.2 runtime shim selection rejects unsupported combinations") {
     val unsupported = Seq(
       ("4.2.0", "4.0.0"),
-      ("4.2.0", "4.0.4"),
       ("4.2.0", "4.1.0"),
       ("4.2.0", "4.1.2"),
-      ("4.2.0", "4.1.3"),
       ("4.2.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
@@ -86,7 +83,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.0.5", "4.1.1", "4.1.4").foreach { sparkVersion =>
+    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
       val shimClassName = DeltaRuntimeShim.getDelta43ShimClassName("4.3.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta43x")))
     }
@@ -95,10 +92,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("Delta 4.3 runtime shim selection rejects unsupported combinations") {
     val unsupported = Seq(
       ("4.3.0", "4.0.0"),
-      ("4.3.0", "4.0.4"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
-      ("4.3.0", "4.1.3"),
       ("4.3.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>

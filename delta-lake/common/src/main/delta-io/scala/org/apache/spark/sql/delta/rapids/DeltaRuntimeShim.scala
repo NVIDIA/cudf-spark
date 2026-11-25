@@ -135,7 +135,7 @@ object DeltaRuntimeShim {
     if (deltaVersion.startsWith("4.2.")) {
       val parsedSparkVersion = parseSparkVersion(sparkVersion)
       (deltaVersion, parsedSparkVersion) match {
-        case ("4.2.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
+        case ("4.2.0", (4, 0, 1) | (4, 1, 1)) =>
           Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
         case _ =>
           throw new IllegalStateException(
@@ -152,7 +152,7 @@ object DeltaRuntimeShim {
     if (deltaVersion.startsWith("4.3.")) {
       val parsedSparkVersion = parseSparkVersion(sparkVersion)
       (deltaVersion, parsedSparkVersion) match {
-        case ("4.3.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
+        case ("4.3.0", (4, 0, 1) | (4, 1, 1)) =>
           Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
         case _ =>
           throw new IllegalStateException(
