@@ -31,8 +31,8 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
 import org.apache.spark.sql.rapids.protobuf.{FieldReads, FlattenedFieldDescriptor,
-  FlattenedSchemaArrays, ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
-  ProtobufSchemaValidator}
+  FlattenedSchemaArrays, ProtobufExprInfo, ProtobufFieldInfo, ProtobufMessageDescriptor,
+  ProtobufPlannerOptions, ProtobufSchemaExtractor, ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
 /**
@@ -90,9 +90,11 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           _ <- checkSupportedOptions(exprInfo.options)
           msgDesc <- SparkProtobufCompat.resolveMessageDescriptor(exprInfo)
           // Fields the query does not read are still validated, like Spark does, but are
-          // returned as nulls. Semantically equal copies read the union so they stay equal;
-          // reference identity still matches non-deterministic inputs where semanticEquals fails.
-          reads = FieldReads.analyze(this, expr => (expr eq e) || expr.semanticEquals(e))
+          // returned as nulls. Equivalent deterministic decodes in the same plan read the union
+          // so GpuTieredProject CSE still decodes the message once; reference identity still
+          // matches non-deterministic inputs where semanticEquals returns false.
+          reads = FieldReads.analyze(this,
+            equivalentDecode(e, exprInfo, plannerOptions, SparkProtobufCompat.extractExprInfo, _))
           flatFields <- flattenMessage(schema, msgDesc, exprInfo.messageName,
             plannerOptions.enumsAsInts, reads, parentVisible = true, parentIdx = -1, depth = 0,
             pathPrefix = "", Vector.empty)
@@ -213,6 +215,37 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             malformedRowsAsNullFields, child)
       }
     )
+  }
+
+  /**
+   * Spark loads identical descriptor files into distinct byte arrays, so two independent
+   * `from_protobuf` calls fail Catalyst `semanticEquals` even though they convert to identical
+   * `GpuFromProtobuf` nodes when given the same output mask. Compare deterministic decodes by
+   * descriptor content and normalized planner options so GPU tiered projection CSE stays intact.
+   */
+  private[shims] def equivalentDecode(
+      target: UnaryExpression,
+      targetInfo: ProtobufExprInfo,
+      targetOptions: ProtobufPlannerOptions,
+      extractInfo: Expression => Either[String, ProtobufExprInfo],
+      candidate: Expression): Boolean = {
+    if ((candidate eq target) || candidate.semanticEquals(target)) {
+      true
+    } else if (target.deterministic && candidate.getClass == target.getClass &&
+        candidate.deterministic && candidate.dataType == target.dataType &&
+        candidate.asInstanceOf[UnaryExpression].child.semanticEquals(target.child)) {
+      (for {
+        info <- extractInfo(candidate)
+        opts <- SparkProtobufCompat.parsePlannerOptions(info.options)
+      } yield {
+        SparkProtobufCompat.unsupportedOptions(info.options).isEmpty &&
+          info.messageName == targetInfo.messageName &&
+          info.descriptorSource == targetInfo.descriptorSource &&
+          opts == targetOptions
+      }).getOrElse(false)
+    } else {
+      false
+    }
   }
 
 }

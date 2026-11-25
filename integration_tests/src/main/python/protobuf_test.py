@@ -182,6 +182,40 @@ def _assert_gpu_output_paths(run_on_spark, expected):
     assert actual == {frozenset(paths) for paths in expected}
 
 
+def _tiered_gpu_decode_count(spark, df):
+    """Count GpuFromProtobuf expressions remaining after GpuTieredProject CSE."""
+    def count_in_expr(expr):
+        total = 1 if expr.getClass().getSimpleName() == "GpuFromProtobuf" else 0
+        children = expr.children().iterator()
+        while children.hasNext():
+            total += count_in_expr(children.next())
+        return total
+
+    def count_in_plan(plan):
+        total = 0
+        if plan.getClass().getSimpleName() == "GpuProjectExec":
+            planner_cls = plan.getClass().getClassLoader().loadClass(
+                "com.nvidia.spark.rapids.GpuProjectAstPlanner$")
+            planner = planner_cls.getField("MODULE$").get(None)
+            tiers = planner.buildExprTiers(
+                plan.projectList(), spark._jsparkSession.sessionState().conf(), False, False)
+            tier_iter = tiers.iterator()
+            while tier_iter.hasNext():
+                expr_iter = tier_iter.next().iterator()
+                while expr_iter.hasNext():
+                    total += count_in_expr(expr_iter.next())
+        else:
+            exprs = plan.expressions().iterator()
+            while exprs.hasNext():
+                total += count_in_expr(exprs.next())
+        children = plan.children().iterator()
+        while children.hasNext():
+            total += count_in_plan(children.next())
+        return total
+
+    return count_in_plan(df._jdf.queryExecution().executedPlan())
+
+
 def _encode_varint(value):
     """Encode a non-negative integer as a protobuf varint (for hand-crafting test bytes)."""
     if value < 0:
@@ -1140,6 +1174,41 @@ def test_from_protobuf_outputs_only_fields_read(
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
     _assert_gpu_output_paths(run_on_spark, decodes)
+
+
+@pytest.mark.parametrize("api", ["descriptor_file", "binary_descriptor_set"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_independent_calls_share_one_gpu_decode(
+        nested_smoke_desc, from_protobuf_fn, api):
+    desc_path, desc_bytes = nested_smoke_desc
+    if api == "binary_descriptor_set" and \
+            "binaryDescriptorSet" not in inspect.signature(from_protobuf_fn).parameters:
+        pytest.skip("binaryDescriptorSet kwarg is Spark 3.5+ only")
+
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc)
+    encoded = [(row[-1],) for row in fixture_rows]
+
+    def make_decode():
+        if api == "descriptor_file":
+            return from_protobuf_fn(f.col("bin"), "test.Root", desc_path)
+        return from_protobuf_fn(
+            f.col("bin"), "test.Root", binaryDescriptorSet=bytearray(desc_bytes))
+
+    def run_on_spark(spark):
+        # Two separate from_protobuf calls load distinct descriptor byte arrays on Spark 3.5+.
+        p1 = make_decode()
+        p2 = make_decode()
+        return spark.createDataFrame(encoded, ["bin"]).select(
+            p1.getField("top").alias("top"),
+            p2.getField("child").getField("a").alias("child_a"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_output_paths(run_on_spark, [["top", "child", "child.a"]])
+    tiered_decodes = with_gpu_session(
+        lambda spark: _tiered_gpu_decode_count(spark, run_on_spark(spark)),
+        conf={"spark.sql.adaptive.enabled": "false"})
+    assert tiered_decodes == 1
 
 
 @pytest.mark.parametrize("select_fn,expected", [
