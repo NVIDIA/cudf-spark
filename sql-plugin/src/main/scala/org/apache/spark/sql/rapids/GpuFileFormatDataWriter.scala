@@ -20,7 +20,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.util.hashing.{MurmurHash3 => ScalaMurmur3Hash}
 
-import ai.rapids.cudf.{OrderByArg, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector, OrderByArg, Scalar, Table}
 import com.nvidia.spark.TimingUtils
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -605,7 +605,19 @@ class GpuDynamicPartitionDataSingleWriter(
           }
         }
         val ordered = if (needsSort) {
-          table.orderBy(keyTypes.indices.map(OrderByArg.asc(_, nullsSmallest)): _*)
+          // Preserve upstream ordering within each partition/bucket, including bucket sort keys.
+          val columns = (0 until table.getNumberOfColumns).map(table.getColumn)
+          val ordering = keyTypes.indices.map(OrderByArg.asc(_, nullsSmallest)) :+
+            OrderByArg.asc(columns.size)
+          withResource(Scalar.fromInt(0)) { zero =>
+            withResource(CudfColumnVector.sequence(zero, table.getRowCount.toInt)) { rowIds =>
+              withResource(new Table((columns :+ rowIds): _*)) { indexed =>
+                withResource(indexed.orderBy(ordering: _*)) { sorted =>
+                  new Table(columns.indices.map(sorted.getColumn): _*)
+                }
+              }
+            }
+          }
         } else {
           new Table((0 until table.getNumberOfColumns).map(table.getColumn): _*)
         }

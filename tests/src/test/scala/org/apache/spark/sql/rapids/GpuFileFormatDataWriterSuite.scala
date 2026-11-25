@@ -681,7 +681,9 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
       val counter = invocation.getArgument[Int](2)
       val output = mock[ColumnarOutputWriter]
       doAnswer { write =>
-        withResource(write.getArgument[SpillableColumnarBatch](0)) { input =>
+        val input = write.getArgument[SpillableColumnarBatch](0)
+        val rowCount = input.numRows()
+        withResource(input) { _ =>
           withResource(input.getColumnarBatch()) { cb =>
             withResource(GpuColumnVector.extractBases(cb).head.copyToHost()) { host =>
               writes += FloatingWrite(bits, bucket, counter,
@@ -689,7 +691,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
             }
           }
         }
-        null
+        Long.box(rowCount)
       }.when(output).writeSpillableAndClose(any())
       output
     }.when(writer).newWriter(any(), any(), any())
@@ -838,7 +840,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
               val rows = bucket.map(id => Seq(start + id)).getOrElse(Seq(start, start + 1))
               FloatingWrite(if (negative) Long.MinValue else 0L, bucket, batch, rows)
             }
-            assert(writes.map(w => w.copy(rows = w.rows.sorted)).toSeq == expected)
+            assert(writes.toSeq == expected)
           } finally {
             writer.releaseResources()
           }
