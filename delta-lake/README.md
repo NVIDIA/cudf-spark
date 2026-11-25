@@ -20,7 +20,7 @@ and directory contains the corresponding support code.
 | 4.0.x              | Spark 4.0.x     | `delta-40x`        |
 | 4.1.0              | Spark 4.1.0, 4.1.1 | `delta-41x`     |
 | 4.2.0              | Spark 4.0.1, 4.1.1 | `delta-42x`     |
-| 4.3.0, 4.3.1, 4.3.2.2 | Spark 4.0.1, 4.1.1 | `delta-43x`     |
+| 4.3.x              | Spark 4.0.1, 4.1.1 | `delta-43x`     |
 | Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
 
 Delta Lake is not supported on all Spark versions, and for Spark versions where it is not
@@ -29,6 +29,10 @@ supported the `delta-stub` project is used.
 The Delta Lake 4.1.0 restriction to Spark 4.1.0 and 4.1.1 is caused by an upstream binary
 incompatibility in open source Delta Lake with Spark 4.1.2 and later, not by the NVIDIA cuDF
 plugin for Apache Spark.
+
+The `delta-43x` runtime shim accepts Delta Lake `4.3.x` patch releases on Spark 4.0.1 and 4.1.1
+so compatible patch releases are not blocked by a hardcoded version check. Open-source Delta Lake
+4.3.0 and 4.3.1 have been tested; compatibility is not guaranteed for untested `4.3.x` releases.
 
 ## Code Shared Between Modules
 

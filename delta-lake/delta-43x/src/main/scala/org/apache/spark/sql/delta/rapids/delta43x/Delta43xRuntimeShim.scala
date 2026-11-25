@@ -175,7 +175,7 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
   }
 
   override def filterIsManagedLocationProperty: Boolean =
-    DeltaRuntimeShim.shouldFilterIsManagedLocationProperty(io.delta.VERSION)
+    DeltaRuntimeShim.isDelta431OrLater(io.delta.VERSION)
 
   override protected def constructOptimisticTransaction(
       arg: StartTransactionArg): GpuOptimisticTransactionBase =

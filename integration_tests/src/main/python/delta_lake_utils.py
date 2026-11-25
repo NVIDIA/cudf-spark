@@ -91,7 +91,7 @@ def set_delta_num_records(spark, target_path, num_records, log_version=0):
     jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
 
 
-_SUPPORTED_OSS_DELTA_43_VERSIONS = ("4.3.0", "4.3.1", "4.3.2.2")
+_DELTA_43_VERSION_RE = re.compile(r"^4\.3\.\d+(?:[^0-9].*)?$")
 
 
 @lru_cache(maxsize=1)
@@ -148,7 +148,7 @@ def is_oss_delta_lake_42_or_43():
 
 def is_oss_delta_lake_43():
     return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in _SUPPORTED_OSS_DELTA_43_VERSIONS)
+            and bool(_DELTA_43_VERSION_RE.match(_loaded_delta_lake_version() or "")))
 
 
 def is_oss_delta_lake_40_to_43():
@@ -163,8 +163,8 @@ delta_reorg_xfail = pytest.mark.xfail(
     not is_databricks_runtime()
     and not is_spark_local_mode()
     and (_loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0") or is_oss_delta_lake_43()),
-    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and supported 4.3 releases calls "
-           "SparkSession.active on executors in distributed mode: "
+    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and 4.3.x calls SparkSession.active on "
+           "executors in distributed mode: "
            "https://github.com/delta-io/delta/issues/7776")
 
 

@@ -352,7 +352,7 @@ run_delta_lake_tests() {
   else
     for v in $DELTA_LAKE_VERSIONS; do
       echo "Running Delta Lake tests for Delta Lake version $v"
-      if [[ "$v" == "4.2.0" || "$v" == "4.3.0" || "$v" == "4.3.1" || "$v" == "4.3.2.2" ]]; then
+      if [[ "$v" == "4.2.0" || "$v" == 4.3.* ]]; then
         DELTA_SPARK_LINE=${SPARK_VER%.*}
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then

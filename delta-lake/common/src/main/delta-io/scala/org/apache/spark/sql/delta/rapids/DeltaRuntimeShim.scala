@@ -112,18 +112,20 @@ trait DeltaRuntimeShim {
 
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
-  private val SUPPORTED_DELTA_43_VERSIONS = Set("4.3.0", "4.3.1", "4.3.2.2")
-  private val DELTA_43_FILTER_IS_MANAGED_LOCATION_VERSIONS =
-    SUPPORTED_DELTA_43_VERSIONS - "4.3.0"
+  private val DELTA_43_VERSION = """^4\.3\.(\d+)(?:[^0-9].*)?$""".r
 
   private def isDelta42Plus(deltaVersion: String): Boolean =
     deltaVersion.startsWith("4.2.") || deltaVersion.startsWith("4.3.")
 
-  private[rapids] def isSupportedDelta43Version(deltaVersion: String): Boolean =
-    SUPPORTED_DELTA_43_VERSIONS.contains(deltaVersion)
+  private[rapids] def isDelta43Version(deltaVersion: String): Boolean = deltaVersion match {
+    case DELTA_43_VERSION(_) => true
+    case _ => false
+  }
 
-  private[rapids] def shouldFilterIsManagedLocationProperty(deltaVersion: String): Boolean =
-    DELTA_43_FILTER_IS_MANAGED_LOCATION_VERSIONS.contains(deltaVersion)
+  private[rapids] def isDelta431OrLater(deltaVersion: String): Boolean = deltaVersion match {
+    case DELTA_43_VERSION(patch) => BigInt(patch) >= 1
+    case _ => false
+  }
 
   private[rapids] def getDelta42PlusShimClassName(
       deltaVersion: String,
@@ -132,7 +134,7 @@ object DeltaRuntimeShim {
       case ("4.2.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
         Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
       case (_, SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1"))
-          if isSupportedDelta43Version(deltaVersion) =>
+          if isDelta43Version(deltaVersion) =>
         Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
       case _ => None
     }
