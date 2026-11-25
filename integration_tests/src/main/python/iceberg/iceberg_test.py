@@ -60,7 +60,7 @@ _NO_FANOUT = _BASE_TBLPROPS_SQL
 pytestmark = iceberg_unsupported_mark
 
 
-def _create_metadata_only_table(spark_tmp_table_factory, format_version, with_deletes=False):
+def _create_small_files_table(spark_tmp_table_factory, format_version, with_deletes=False):
     table = get_full_table_name(spark_tmp_table_factory)
     props = {'read.split.open-file-cost': '0', 'read.split.target-size': '268435456'}
     if with_deletes:
@@ -85,11 +85,11 @@ def _create_metadata_only_table(spark_tmp_table_factory, format_version, with_de
     return table
 
 
-def _assert_metadata_only_reads(table, reader_type, format_version):
+def _assert_coalesced_reads(table, reader_type, format_version):
     conf = {**iceberg_read_enabled_conf,
             'spark.sql.iceberg.aggregate-push-down.enabled': 'false',
             'spark.rapids.sql.format.parquet.reader.type': reader_type,
-            'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+            'spark.sql.adaptive.enabled': 'false',
             'spark.rapids.sql.reader.batchSizeRows': '5'}
 
     constant_columns = '_spec_id, _partition'
@@ -97,30 +97,46 @@ def _assert_metadata_only_reads(table, reader_type, format_version):
     if int(format_version) >= 3 or (
             is_spark_35x() and (runtime_iceberg_version or '').startswith('1.10.')):
         constant_columns += ', _last_updated_sequence_number'
-    for query in [f"SELECT {constant_columns} FROM {table}",
-                  f"SELECT count(*) FROM {table}", f"SELECT p, count(*) FROM {table} GROUP BY p"]:
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT {constant_columns}, _file, _pos FROM {table}"),
+        exist_classes='GpuBatchScanExec', conf=conf, require_non_empty=True)
+
+    def check_aggregate(query, expect_coalesce):
+        def check_plan(_cpu_plan, plan):
+            assert len(_nodes_of_class(plan, 'GpuBatchScanExec')) == 1, str(plan)
+            coalesces = _nodes_of_class(plan, 'GpuCoalesceBatches')
+            after_scan = any(node.child().getClass().getSimpleName() == 'GpuBatchScanExec'
+                             for node in coalesces)
+            assert after_scan == expect_coalesce, str(plan)
+
         assert_cpu_and_gpu_are_equal_collect_with_capture(
-            lambda spark: spark.sql(query), exist_classes='GpuBatchScanExec', conf=conf,
-            require_non_empty=True)
+            lambda spark: spark.sql(query), conf=conf, require_non_empty=True,
+            gpu_plan_assertion=check_plan)
+
+    check_aggregate(f"SELECT _spec_id, _partition.p, sum(id) FROM {table} "
+                    "GROUP BY _spec_id, _partition.p", True)
+    check_aggregate(f"SELECT p, count(*) FROM {table} GROUP BY p", True)
+    check_aggregate(f"SELECT id, count(*) FROM {table} GROUP BY id", False)
+    check_aggregate(f"SELECT count(*) FROM {table}", False)
 
 
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('format_version', iceberg_read_format_versions)
-def test_iceberg_metadata_only_materialize_and_combine(
+def test_iceberg_coalesce_after_scan(
         spark_tmp_table_factory, format_version, reader_type):
-    table = _create_metadata_only_table(spark_tmp_table_factory, format_version)
-    _assert_metadata_only_reads(table, reader_type, format_version)
+    table = _create_small_files_table(spark_tmp_table_factory, format_version)
+    _assert_coalesced_reads(table, reader_type, format_version)
 
 
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('format_version', iceberg_mor_format_versions)
-def test_iceberg_metadata_only_with_deletes(spark_tmp_table_factory, format_version, reader_type):
-    table = _create_metadata_only_table(spark_tmp_table_factory, format_version, with_deletes=True)
-    _assert_metadata_only_reads(table, reader_type, format_version)
+def test_iceberg_coalesce_after_scan_with_deletes(spark_tmp_table_factory, format_version, reader_type):
+    table = _create_small_files_table(spark_tmp_table_factory, format_version, with_deletes=True)
+    _assert_coalesced_reads(table, reader_type, format_version)
 
 
 def _is_spark_patch_at_least(version, minimum):

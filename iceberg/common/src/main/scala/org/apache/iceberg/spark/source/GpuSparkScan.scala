@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
-import org.apache.iceberg.ScanTaskGroup
+import org.apache.iceberg.{MetadataColumns, ScanTaskGroup}
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
@@ -43,6 +43,17 @@ abstract class GpuSparkScan(val cpuScan: Scan,
   def readTimestampWithoutZone: Boolean = readConf.handleTimestampWithoutZone()
 
   override def readSchema(): StructType = cpuScan.readSchema()
+
+  override lazy val coalesceAfter: Boolean = {
+    val schema = GpuSparkScanAccess.expectedSchema(cpuScan)
+    // Files with different metadata or identity partition values can produce small batches.
+    // Once the reader has materialized these values, their batches can share a downstream batch.
+    !queryUsesInputFile && !schema.columns().isEmpty && (
+      schema.columns().asScala.exists(field => MetadataColumns.isMetadataColumn(field.fieldId())) ||
+        GpuSparkScanAccess.table(cpuScan).specs().values().asScala.exists { spec =>
+          spec.identitySourceIds().asScala.exists(id => schema.findField(id) != null)
+        })
+  }
 
   override def estimateStatistics(): Statistics = GpuSparkScanAccess.estimateStatistics(cpuScan)
 

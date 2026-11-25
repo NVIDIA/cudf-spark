@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2025, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,45 +49,6 @@ class BatchWithPartitionDataSuite extends RmmSparkRetrySuiteBase {
     val resultRowCounts = resultPartitions.flatMap(_.map(_.rowNum)).sum
     val expectedRowCounts = partitionRowData.map(_.rowNum).sum
     assert(resultRowCounts == expectedRowCounts)
-  }
-
-  test("nested partition strings respect column limits across null structs and file boundaries") {
-    val partitionType = StructType(Seq(
-      StructField("p", StringType), StructField("q", StringType)))
-    val schema = StructType(Seq(
-      StructField("_partition", partitionType), StructField("_spec_id", IntegerType)))
-    val values = Array[InternalRow](
-      InternalRow(toInternalRow(Array("aa", "c")), 0),
-      InternalRow(null, 0),
-      InternalRow(toInternalRow(Array("bbbb", null)), 1))
-    val groups = BatchWithPartitionDataUtils.splitPartitionDataIntoGroups(
-      PartitionRowData.from(values, Array(2L, 2L, 3L)), schema, 8L)
-
-    assert(groups.map(_.map(_.rowNum).sum).toSeq == Seq(5, 2))
-    assert(groups(0).last == PartitionRowData(values(2), 1))
-    assert(groups(1).head == PartitionRowData(values(2), 2))
-  }
-
-  test("a single oversized nested string fails instead of repeatedly splitting zero rows") {
-    val partitionType = StructType(Seq(StructField("p", StringType)))
-    val schema = StructType(Seq(StructField("_partition", partitionType)))
-    val value = InternalRow(toInternalRow(Array("too long")))
-    intercept[IllegalArgumentException] {
-      BatchWithPartitionDataUtils.splitPartitionDataIntoGroups(
-        Array(PartitionRowData(value, 1)), schema, 4L)
-    }
-  }
-
-  test("repeated binary values respect the column limit and empty inputs consume no bytes") {
-    val nested = StructType(Seq(StructField("p", BinaryType)))
-    val schema = new StructType().add("binary", BinaryType).add("_partition", nested)
-    val zeroRows = InternalRow(new Array[Byte](32), null)
-    for ((topWidth, childWidth) <- Seq((8, 2), (2, 8))) {
-      val row = InternalRow(new Array[Byte](topWidth), InternalRow(new Array[Byte](childWidth)))
-      val groups = BatchWithPartitionDataUtils.splitPartitionDataIntoGroups(
-        Array(PartitionRowData(zeroRows, 0), PartitionRowData(row, 5)), schema, 16)
-      assert(groups.map(_.map(_.rowNum).sum).toSeq == Seq(2, 2, 1))
-    }
   }
 
   test("test adding partition values to batch with OOM split and retry - unhandled") {

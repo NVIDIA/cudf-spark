@@ -23,7 +23,6 @@ package com.nvidia.spark.rapids.iceberg
 import java.nio.file.Files
 import java.util.{HashMap => JHashMap}
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.atomic.AtomicInteger
 
 import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, PerfIO, PerfIOConf,
   RmmSparkRetrySuiteBase, ThreadPoolConfBuilder}
@@ -71,8 +70,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
   private def writeFile(path: Path, numRows: Int, conf: Configuration): Unit = {
     val groups = new SimpleGroupFactory(parquetSchema)
     withResource(ExampleParquetWriter.builder(path).withConf(conf).withType(parquetSchema)
-        .withRowGroupSize(2048L).withPageSize(256).withDictionaryEncoding(false)
-        .withMinRowCountForPageSizeCheck(1).withMaxRowCountForPageSizeCheck(16).build()) { writer =>
+        .build()) { writer =>
       (0 until numRows).foreach { value =>
         writer.write(groups.newGroup().append("b", value.toLong))
       }
@@ -80,48 +78,26 @@ class GpuMultiThreadIcebergParquetReaderSuite
   }
 
   private val defaultColumnBytes = 1L << 20
-  for ((sameConstants, metadataColumns, maxColumnBytes, splitFiles, readBytes) <- Seq(
-      (false, false, defaultColumnBytes, false, defaultColumnBytes),
-      (true, false, defaultColumnBytes, false, defaultColumnBytes),
-      (false, true, defaultColumnBytes, false, defaultColumnBytes),
-      (true, true, defaultColumnBytes, false, defaultColumnBytes),
-      (false, true, 8L, false, defaultColumnBytes),
-      (true, true, 8L, false, defaultColumnBytes),
-      (false, true, defaultColumnBytes, false, 1L),
-      (false, true, defaultColumnBytes, true, defaultColumnBytes))) {
-    test(s"actual Iceberg reader combines metadata-only splits: " +
-        s"sameConstants=$sameConstants, metadataColumns=$metadataColumns, " +
-        s"maxColumnBytes=$maxColumnBytes, splitFiles=$splitFiles, readBytes=$readBytes") {
+  for ((sameConstants, metadataColumns) <- Seq(
+      (false, false), (true, false), (false, true), (true, true))) {
+    test(s"actual Iceberg reader combines metadata-only files only when constants match: " +
+        s"sameConstants=$sameConstants, metadataColumns=$metadataColumns") {
       val dir = Files.createTempDirectory("iceberg-metadata-combine")
       val taskContext = new MockTaskContext(1, 0)
       TrampolineUtil.setTaskContext(taskContext)
       try {
         val hadoopConf = new Configuration()
+        val firstRows = 2
+        val secondRows = 3
         val paths = Seq(new Path(dir.resolve("first.parquet").toUri),
           new Path(dir.resolve("second.parquet").toUri))
-        val fileRows = if (splitFiles) Seq(2048, 3072) else Seq(2, 3)
-        paths.zip(fileRows).foreach { case (path, rows) => writeFile(path, rows, hadoopConf) }
+        writeFile(paths.head, firstRows, hadoopConf)
+        writeFile(paths(1), secondRows, hadoopConf)
 
         withResource(new HadoopFileIO(hadoopConf)) { fileIO =>
           val rapidsFileIO = new IcebergFileIO(fileIO)
-          val (files, selectedRows) = paths.indices.map { i =>
-            val whole = IcebergPartitionedFile(rapidsFileIO.newInputFile(paths(i).toString))
-            if (splitFiles) {
-              withResource(whole.newReader()) { footer =>
-                val groups = footer.getRowGroups
-                assert(groups.size() > 1)
-                val index = if (i == 0) 0 else groups.size() - 1
-                val group = groups.get(index)
-                val start = group.getStartingPos
-                val end = if (index == 0) groups.get(1).getStartingPos else whole.length
-                (whole.copy(split = Some((start, end - start))), group.getRowCount.toInt)
-              }
-            } else {
-              (whole, fileRows(i))
-            }
-          }.unzip
-          val firstRows = selectedRows.head
-          val secondRows = selectedRows(1)
+          val files = paths.map(path =>
+            IcebergPartitionedFile(rapidsFileIO.newInputFile(path.toString)))
           val firstConstant = 10L
           val secondConstant = if (sameConstants) firstConstant else 20L
           val constants = files.zip(Seq(firstConstant, secondConstant)).toMap
@@ -134,14 +110,13 @@ class GpuMultiThreadIcebergParquetReaderSuite
           } else {
             new Schema(Types.NestedField.optional(partitionFieldId, "a", Types.LongType.get()))
           }
-          val deleteFilterCalls = new AtomicInteger()
           val conf = GpuIcebergParquetReaderConf(
             caseSensitive = true,
             hadoopConf,
             maxBatchSizeRows = 1000,
-            maxBatchSizeBytes = readBytes,
+            maxBatchSizeBytes = 1L << 20,
             targetBatchSizeBytes = 1L << 20,
-            maxGpuColumnSizeBytes = maxColumnBytes,
+            maxGpuColumnSizeBytes = defaultColumnBytes,
             useChunkedReader = false,
             maxChunkedReaderMemoryUsageSizeBytes = 0,
             skipReadEstimate = true,
@@ -172,10 +147,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
                   values.put(partitionFieldId, constants(file))
                 }
                 values
-              }, _ => {
-                deleteFilterCalls.incrementAndGet()
-                None
-              }, _ => None, conf)) { icebergReader =>
+              }, _ => None, _ => None, conf)) { icebergReader =>
             val reader = icebergReader.reader
             def readFile(index: Int) = {
               val runner = reader.getBatchRunner(taskContext,
@@ -198,36 +170,40 @@ class GpuMultiThreadIcebergParquetReaderSuite
                     assert(secondMeta.isInstanceOf[HostMemoryEmptyMetaData])
                     assert(firstMeta.memBuffersAndSizes.map(_.numRows).sum == firstRows)
                     assert(secondMeta.memBuffersAndSizes.map(_.numRows).sum == secondRows)
-                    val callsBeforeCombining = deleteFilterCalls.get()
                     withResource(reader.combineHMBs(Array(firstMeta, secondMeta))) { combined =>
-                      assert(combined.memBuffersAndSizes.map(_.numRows).sum ==
-                        firstRows + secondRows)
-                      val expectedRuns = if (sameConstants) 1 else 2
-                      assert(combined.allPartValues.exists(_.length == expectedRuns))
+                      val expectedRows = if (sameConstants) firstRows + secondRows else firstRows
+                      assert(combined.memBuffersAndSizes.map(_.numRows).sum == expectedRows)
+                      if (!sameConstants) {
+                        assert(combined eq firstMeta)
+                      }
                       // The retry-suite fixture owns the GPU; the mock task has no SparkEnv.
                       TrampolineUtil.unsetTaskContext()
+                      // With different constants, secondMeta was excluded from the first result.
+                      val results = if (sameConstants) Seq(combined) else Seq(combined, secondMeta)
                       val batchSizes = scala.collection.mutable.ArrayBuffer[Int]()
-                      val actual = reader.readBatches(combined).flatMap { batch =>
-                        withResource(batch) { _ =>
-                          batchSizes += batch.numRows()
-                          withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) {
-                              column =>
-                            if (metadataColumns) {
-                              withResource(batch.column(1).asInstanceOf[GpuColumnVector]
-                                  .copyToHost()) { specs =>
-                                withResource(batch.column(2).asInstanceOf[GpuColumnVector]
-                                    .copyToHost()) { missing =>
-                                  (0 until batch.numRows()).map { row =>
-                                    assert(missing.getBase.isNull(row))
-                                    val value = column.getBase.getChildColumnView(0)
-                                      .getJavaString(row)
-                                    (value, specs.getBase.getInt(row).toLong)
+                      val actual = results.flatMap { metadata =>
+                        reader.readBatches(metadata).flatMap { batch =>
+                          withResource(batch) { _ =>
+                            batchSizes += batch.numRows()
+                            withResource(batch.column(0).asInstanceOf[GpuColumnVector]
+                                .copyToHost()) { column =>
+                              if (metadataColumns) {
+                                withResource(batch.column(1).asInstanceOf[GpuColumnVector]
+                                    .copyToHost()) { specs =>
+                                  withResource(batch.column(2).asInstanceOf[GpuColumnVector]
+                                      .copyToHost()) { missing =>
+                                    (0 until batch.numRows()).map { row =>
+                                      assert(missing.getBase.isNull(row))
+                                      val value = column.getBase.getChildColumnView(0)
+                                        .getJavaString(row)
+                                      (value, specs.getBase.getInt(row).toLong)
+                                    }
                                   }
                                 }
-                              }
-                            } else {
-                              (0 until batch.numRows()).map { row =>
-                                ("", column.getBase.getLong(row))
+                              } else {
+                                (0 until batch.numRows()).map { row =>
+                                  ("", column.getBase.getLong(row))
+                                }
                               }
                             }
                           }
@@ -241,15 +217,12 @@ class GpuMultiThreadIcebergParquetReaderSuite
                           Vector.fill(secondRows)(("", secondConstant))
                       }
                       assert(actual == expected)
-                      val expectedBatchSizes = if (readBytes == 1) {
-                        Seq.fill(firstRows + secondRows)(1)
-                      } else if (maxColumnBytes == 8L) {
-                        if (sameConstants) Seq(4, 1) else Seq(3, 2)
-                      } else {
+                      val expectedBatchSizes = if (sameConstants) {
                         Seq(firstRows + secondRows)
+                      } else {
+                        Seq(firstRows, secondRows)
                       }
                       assert(batchSizes.toSeq == expectedBatchSizes)
-                      assert(deleteFilterCalls.get() == callsBeforeCombining)
                     }
                   }
                 }

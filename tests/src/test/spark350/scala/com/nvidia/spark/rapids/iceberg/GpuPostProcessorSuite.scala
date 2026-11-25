@@ -25,7 +25,7 @@ import java.util.{HashMap => JHashMap}
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
-import com.nvidia.spark.rapids.{GpuColumnVector, LocalGpuMetric, RapidsConf}
+import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
@@ -48,7 +48,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{LongType, StringType, StructType}
+import org.apache.spark.sql.types.{LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -506,7 +506,6 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       val (info, shaded) = createParquetInfo(emptySchema)
       val defaultProcessor = new GpuParquetReaderPostProcessor(
         info, new JHashMap[Integer, Any](), new Schema(field), shaded, Map.empty)
-      assert(defaultProcessor.metadataOnlyOutputRow == InternalRow(7))
       withResource(defaultProcessor.process(new ColumnarBatch(
           Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 3))) { output =>
         assert(output.numRows() == 3)
@@ -1502,40 +1501,6 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(same.compatibleForCombining(first))
     assert(!first.compatibleForCombining(different))
     assert(!different.compatibleForCombining(first))
-    assert(first.metadataOnlyOutputRow == InternalRow(10L))
-    assert(same.metadataOnlyOutputRow == InternalRow(10L))
-    assert(different.metadataOnlyOutputRow == InternalRow(20L))
-  }
-
-  test("Metadata-only output distinguishes null values from unsupported actions") {
-    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
-    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
-    val constants = new JHashMap[Integer, Any]()
-    constants.put(1, null)
-    val expectedSchema = new Schema(
-      Types.NestedField.optional(1, "a", Types.LongType.get()),
-      Types.NestedField.optional(2, "missing", Types.StringType.get()))
-    val elapsed = new LocalGpuMetric
-    val processor = new GpuParquetReaderPostProcessor(
-      parquetInfo, constants, expectedSchema, shadedSchema,
-      Map("icebergPostProcessTime" -> elapsed))
-    assert(processor.canMaterializeMetadataOnly)
-    assert(FillNull(StringType).constValue(constants) == null)
-    assert(processor.metadataOnlyOutputRow == InternalRow(null, null))
-    assert(elapsed.value > 0)
-    withResource(processor.process(new ColumnarBatch(
-        Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 3))) { output =>
-      withResource(output.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
-        assert(host.getBase.getNullCount == 3)
-      }
-    }
-
-    val positionSchema = new Schema(MetadataColumns.ROW_POSITION)
-    val positionProcessor = new GpuParquetReaderPostProcessor(
-      parquetInfo, constants, positionSchema, shadedSchema, Map.empty)
-    assert(!positionProcessor.canMaterializeMetadataOnly)
-    intercept[IllegalStateException](positionProcessor.metadataOnlyOutputRow)
-    intercept[IllegalStateException](FetchRowPosition.constValue(constants))
   }
 
   test("Physical lineage constants prevent incompatible file combining") {
