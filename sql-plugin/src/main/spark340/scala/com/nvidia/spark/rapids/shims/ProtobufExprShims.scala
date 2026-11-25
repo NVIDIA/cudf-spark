@@ -148,11 +148,6 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
           for {
             hidden <- SparkProtobufCompat.hiddenFieldsMissingFromSchema(schema, msgDesc, location)
-            // A hidden field decodes to an all-null column that GpuFromProtobuf drops from the
-            // top-level struct, so only the root message can hide a field for now.
-            _ <- Either.cond(hidden.isEmpty || parentIdx < 0, (),
-              s"$location has fields missing from the Spark schema: " +
-                hidden.map(_.name).mkString(", "))
             fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
               schema, msgDesc, enumsAsInts, messageName)
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
@@ -160,29 +155,48 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
               fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
                 enumsAsInts, parentIdx, depth, pathOf(sf.name), _))
             }
-            result <- flattenHiddenFields(hidden, depth, outputFields)
+            result <- flattenHiddenFields(hidden, parentIdx, depth, outputFields)
           } yield result
         }
 
         /**
-         * Appends the message fields Spark leaves out of its schema, so that the decoder parses
-         * and validates them. They go last, because GpuFromProtobuf drops the trailing columns
-         * the decoder returns for them.
+         * Appends the message fields Spark leaves out of its schema, each followed by its own
+         * fields, so that the decoder parses and validates the whole omitted subtree. They go
+         * last at every level, because GpuFromProtobuf drops the trailing columns the decoder
+         * returns for them.
          */
         private def flattenHiddenFields(
             hidden: Seq[ProtobufFieldDescriptor],
+            parentIdx: Int,
             depth: Int,
             flatFields: Vector[FlattenedFieldDescriptor])
             : Either[String, Vector[FlattenedFieldDescriptor]] = {
           val start: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
           hidden.foldLeft(start) { (fields, fieldDesc) =>
             fields.flatMap { current =>
-              ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(fieldDesc, parentIdx = -1,
-                depth = depth,
-                outputTypeId = DType.STRUCT.getTypeId.getNativeId).map(current :+ _)
+              for {
+                hiddenField <- ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(fieldDesc,
+                  parentIdx = parentIdx, depth = depth,
+                  outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+                children <- hiddenFieldsOf(fieldDesc)
+                result <- flattenHiddenFields(children, parentIdx = current.size, depth + 1,
+                  current :+ hiddenField)
+              } yield result
             }
           }
         }
+
+        /** The declared fields of a hidden message, which are hidden messages themselves. */
+        private def hiddenFieldsOf(
+            fieldDesc: ProtobufFieldDescriptor): Either[String, Seq[ProtobufFieldDescriptor]] =
+          Try {
+            fieldDesc.messageDescriptor
+              .map(msg => msg.fieldNames.flatMap(msg.findField))
+              .getOrElse(Seq.empty)
+          }.toEither.left.map { t =>
+            s"Failed to read the message type of protobuf field '${fieldDesc.name}': " +
+              s"${t.getMessage}"
+          }
 
         private def flattenField(
             sf: StructField,

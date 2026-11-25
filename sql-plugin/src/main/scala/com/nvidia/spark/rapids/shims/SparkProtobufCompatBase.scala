@@ -43,6 +43,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
   private[this] val proto2Syntax = "PROTO2"
 
+  // The decoder rejects schemas nested deeper than this, so stop before building one.
+  private[this] val maxEmptyMessageDepth = 10
+
   /** Option keys whose semantics the GPU decoder handles. */
   val SupportedOptions: Set[String] = Set("enums.as.ints", "mode")
 
@@ -130,14 +133,38 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       s"Failed to read protobuf metadata for $location: ${t.getMessage}"
     }.flatMap(identity)
 
-  /** A proto2 message field without declared fields, which Spark cannot represent. */
+  /** A proto2 message field with no field Spark can represent, so its schema omits it. */
   private def emptyMessageField(
       desc: ProtobufMessageDescriptor,
       name: String): Option[ProtobufFieldDescriptor] =
-    desc.findField(name).filter { fd =>
-      fd.protoTypeName == "MESSAGE" && !fd.isInOneof &&
-        fd.messageDescriptor.exists(m => m.fieldNames.isEmpty && m.syntax == proto2Syntax)
+    desc.findField(name).filter(isEmptyMessageField(_, Set.empty, 0))
+
+  private def isEmptyMessageField(
+      field: ProtobufFieldDescriptor,
+      visited: Set[String],
+      depth: Int): Boolean =
+    field.protoTypeName == "MESSAGE" && !field.isInOneof && !field.isMapField &&
+      field.messageDescriptor.exists(isEmptyMessageType(_, visited, depth))
+
+  /**
+   * A message type is empty for Spark when every field is itself such a message, so an empty
+   * message is the base case. A recursive type keeps nesting and the decoder limits nesting
+   * depth, so both are reported as representable and the planner falls back for them.
+   */
+  private def isEmptyMessageType(
+      desc: ProtobufMessageDescriptor,
+      visited: Set[String],
+      depth: Int): Boolean = {
+    if (desc.syntax != proto2Syntax || visited.contains(desc.fullName) ||
+        depth >= maxEmptyMessageDepth) {
+      false
+    } else {
+      val nested = visited + desc.fullName
+      desc.fieldNames.forall { name =>
+        desc.findField(name).exists(isEmptyMessageField(_, nested, depth + 1))
+      }
     }
+  }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */
   def resolveMessageDescriptor(
@@ -222,6 +249,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       Option(ProtobufReflection.findFieldByName(raw, name)).map(new ReflectiveFieldDescriptor(_))
 
     override lazy val fieldNames: Seq[String] = ProtobufReflection.getFieldNames(raw)
+
+    override lazy val fullName: String =
+      Try(ProtobufReflection.invoke0[String](raw, "getFullName")).getOrElse("")
   }
 
   private final class ReflectiveFieldDescriptor(raw: AnyRef) extends ProtobufFieldDescriptor {
@@ -231,6 +261,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     override lazy val isRepeated: Boolean = ProtobufReflection.isRepeated(raw)
     override lazy val isRequired: Boolean = ProtobufReflection.isRequired(raw)
     override lazy val isInOneof: Boolean = ProtobufReflection.getRealContainingOneof(raw) != null
+    override lazy val isMapField: Boolean =
+      Try(ProtobufReflection.invoke0[java.lang.Boolean](raw, "isMapField").booleanValue())
+        .getOrElse(false)
     override lazy val enumMetadata: Option[ProtobufEnumMetadata] =
       if (protoTypeName == "ENUM") {
         Some(ProtobufEnumMetadata(

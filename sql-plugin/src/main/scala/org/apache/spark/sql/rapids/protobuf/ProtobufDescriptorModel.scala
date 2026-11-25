@@ -122,6 +122,8 @@ object ProtobufEnumMetadata {
 trait ProtobufMessageDescriptor {
   /** Uppercase file syntax, or an empty string when it cannot be read. */
   def syntax: String
+  /** Fully qualified message name, used to detect recursive types. */
+  def fullName: String = ""
   /** File-level UTF-8 validation option; the reflective adapter uses true if reading fails. */
   def javaStringCheckUtf8: Boolean = false
   /** Looks up the protobuf field name, returning None when absent. */
@@ -144,6 +146,8 @@ trait ProtobufFieldDescriptor {
   def isRequired: Boolean
   /** Whether the field belongs to a real oneof, excluding synthetic ones for proto3 optional. */
   def isInOneof: Boolean
+  /** Whether the field is a protobuf map, which Spark reads as a MapType rather than a struct. */
+  def isMapField: Boolean = false
   /**
    * Right(None) means no explicit default; Left means the default could not be read or converted.
    */

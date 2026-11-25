@@ -22,6 +22,10 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
 
+import java.util.Optional
+
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf
 import ai.rapids.cudf.{BinaryOp, ColumnView, CudfColumnSizeOverflowException, CudfException, DType}
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuUnaryExpression}
@@ -88,23 +92,64 @@ case class GpuFromProtobuf(
     if (malformedRowsAsNullFields) restoreInputValidity(visible, input.getBase) else visible
   }
 
+  @transient private lazy val hasHiddenFields = schema.isOutput.contains(false)
+
   /**
    * The decoder returns an all-null column for every hidden field, and the planner appends those
-   * fields after the Spark schema, so the trailing columns have to be dropped here.
+   * fields after the Spark fields at each level, so the trailing columns have to be dropped here.
    * Takes ownership of the decoded column.
    */
   private def dropHiddenColumns(decoded: cudf.ColumnVector): cudf.ColumnVector = {
-    val visibleFields = decodedSchema.length
-    if (decoded.getNumChildren == visibleFields) {
+    if (!hasHiddenFields) {
       decoded
     } else {
       withResource(decoded) { _ =>
-        withResource((0 until visibleFields).safeMap(decoded.getChildColumnView)) { children =>
-          withResource(ColumnView.makeStructView(decoded.getRowCount, children: _*)) { struct =>
-            struct.mergeAndSetValidity(BinaryOp.BITWISE_AND, decoded)
+        withResource(new ArrayBuffer[ColumnView]) { toClose =>
+          val trimmed = trimHiddenColumns(decoded, decodedSchema, toClose)
+          if (trimmed == decoded) {
+            decoded.incRefCount()
+          } else {
+            toClose += trimmed
+            trimmed.copyToColumnVector()
           }
         }
       }
+    }
+  }
+
+  /**
+   * Returns a view of the column without its trailing hidden children, or the column itself when
+   * the type has none. Views are zero-copy, so the caller owns the ones added to toClose.
+   */
+  private def trimHiddenColumns(
+      col: ColumnView,
+      dataType: DataType,
+      toClose: ArrayBuffer[ColumnView]): ColumnView = {
+    def addToClose(view: ColumnView): ColumnView = {
+      toClose += view
+      view
+    }
+    dataType match {
+      case st: StructType =>
+        val children = (0 until st.length).map(i => addToClose(col.getChildColumnView(i)))
+        val trimmed = children.zipWithIndex.map { case (child, i) =>
+          val newChild = trimHiddenColumns(child, st(i).dataType, toClose)
+          if (newChild eq child) newChild else addToClose(newChild)
+        }
+        val changed = col.getNumChildren != st.length ||
+          trimmed.zip(children).exists { case (newChild, child) => newChild ne child }
+        if (changed) {
+          new ColumnView(col.getType, col.getRowCount,
+            Optional.of(col.getNullCount.asInstanceOf[java.lang.Long]), col.getValid,
+            col.getOffsets, trimmed.toArray)
+        } else {
+          col
+        }
+      case ArrayType(elementType, _) =>
+        val child = addToClose(col.getChildColumnView(0))
+        val newChild = trimHiddenColumns(child, elementType, toClose)
+        if (newChild eq child) col else col.replaceListChild(addToClose(newChild))
+      case _ => col
     }
   }
 

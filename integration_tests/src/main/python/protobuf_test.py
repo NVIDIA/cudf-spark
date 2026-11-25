@@ -880,23 +880,88 @@ def test_from_protobuf_max_nesting_depth(local_tmp_path, from_protobuf_fn):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
-# A missing required field is malformed input, which the malformed-input tests already cover.
-@pytest.mark.parametrize("label,present", [
-    ("optional", True), ("optional", False), ("required", True)], ids=idfn)
+def _build_empty_message_field_descriptor_set_bytes(spark, label):
+    return _build_proto2_descriptor(spark, f"empty_field_{label}.proto", [
+        _msg("Empty", []),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", label=label, type_name=".test.Empty"),
+        ]),
+    ])
+
+
+def _build_wrapper_empty_message_descriptor_set_bytes(spark):
+    """Wrapper only holds an empty message, so Spark cannot represent Wrapper either."""
+    return _build_proto2_descriptor(spark, "wrapper_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Wrapper", [
+            _field("empty", 1, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("wrapper", 2, "MESSAGE", type_name=".test.Wrapper"),
+        ]),
+    ])
+
+
+def _build_nested_empty_message_field_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", type_name=".test.Child"),
+        ]),
+    ])
+
+
+def _empty_label(label):
+    return lambda spark: _build_empty_message_field_descriptor_set_bytes(spark, label)
+
+
+_empty_nested_row = _encode_length_delimited_field(
+    2, _encode_varint_field(1, 9) + _encode_length_delimited_field(2, b""))
+
+# Shapes of empty-message fields Spark omits from its schema, with a row that carries them.
+_empty_message_cases = [
+    pytest.param(_empty_label("optional"), _encode_length_delimited_field(2, b""),
+                 id="optional_present"),
+    pytest.param(_empty_label("optional"), b"", id="optional_absent"),
+    pytest.param(_empty_label("required"), _encode_length_delimited_field(2, b""),
+                 id="required_present"),
+    pytest.param(_empty_label("repeated"),
+                 _encode_length_delimited_field(2, b"") * 2, id="repeated_two"),
+    pytest.param(_empty_label("repeated"), b"", id="repeated_empty"),
+    pytest.param(_build_nested_empty_message_field_descriptor_set_bytes, _empty_nested_row,
+                 id="nested"),
+    pytest.param(_build_wrapper_empty_message_descriptor_set_bytes,
+                 _encode_length_delimited_field(2, _encode_length_delimited_field(1, b"")),
+                 id="recursively_empty_wrapper"),
+    # A nested field with the wrong wire type is an unknown field, which protobuf skips
+    # instead of rejecting, so CPU and GPU both decode the row.
+    pytest.param(_build_nested_empty_message_field_descriptor_set_bytes,
+                 _encode_length_delimited_field(
+                     2, _encode_varint_field(1, 9) + _encode_varint_field(2, 1)),
+                 id="nested_wrong_wire_type"),
+]
+
+
+@pytest.mark.parametrize("build_fn,tail", _empty_message_cases, ids=idfn)
+@pytest.mark.parametrize("mode", _modes, ids=idfn)
 @ignore_order(local=True)
 def test_from_protobuf_empty_message_field(
-        local_tmp_path, from_protobuf_fn, label, present):
+        request, local_tmp_path, from_protobuf_fn, build_fn, tail, mode):
     """Spark drops empty-message fields from its schema, but the decoder still parses them."""
     desc = _setup_protobuf_desc(
-        local_tmp_path, f"empty_field_{label}_{present}.desc",
-        lambda spark: _build_empty_message_field_descriptor_set_bytes(spark, label))
-    row = _encode_varint_field(1, 7)
-    if present:
-        row += _encode_length_delimited_field(2, b"")
+        local_tmp_path, f"{request.node.callspec.id}.desc", build_fn)
+    row = _encode_varint_field(1, 7) + tail
 
     def run_on_spark(spark):
         df = spark.createDataFrame([(0, row), (1, None)], schema="idx int, bin binary")
-        decoded = _decode(from_protobuf_fn, desc, "Root")
+        decoded = _decode(from_protobuf_fn, desc, "Root", {"mode": mode})
         return df.select("idx", decoded.alias("decoded"))
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
@@ -1184,6 +1249,55 @@ _malformed_cases = [
                     _with_nested_scalars + _encode_length_delimited_field(
                         3, _encode_tag(50, 2) + _encode_varint(100) + b"x"),
                     ["simple_int", "simple_str"]),
+    # Hidden empty-message fields are validated like visible ones, so malformed bytes inside
+    # them and a missing required one must still fail, and must not disturb the null rows.
+    _malformed_case("missing_required_empty_message", _empty_label("required"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8)),
+    _malformed_case("truncated_varint_in_empty_message", _empty_label("optional"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 0) + _MALFORMED_VARINT)),
+    _malformed_case("wrong_wire_type_for_empty_message", _empty_label("optional"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8) + _encode_varint_field(2, 1)),
+    _malformed_case("truncated_varint_in_nested_empty_message",
+                    _build_nested_empty_message_field_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _empty_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 0) + _MALFORMED_VARINT))),
+    # Wire type 7 does not exist, so the tag itself is invalid inside the hidden message.
+    _malformed_case("invalid_wire_type_in_empty_message", _empty_label("optional"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 7))),
+    _malformed_case("invalid_wire_type_in_repeated_empty_message", _empty_label("repeated"),
+                    "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"") * 2,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(2, b"") +
+                    _encode_length_delimited_field(2, _encode_tag(1, 7))),
+    _malformed_case("truncated_varint_in_repeated_empty_message", _empty_label("repeated"),
+                    "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"") * 2,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 0) + _MALFORMED_VARINT)),
+    _malformed_case("wrong_wire_type_for_repeated_empty_message", _empty_label("repeated"),
+                    "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"") * 2,
+                    _encode_varint_field(1, 8) + _encode_varint_field(2, 1)),
+    _malformed_case("invalid_wire_type_in_nested_empty_message",
+                    _build_nested_empty_message_field_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _empty_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 7)))),
+    _malformed_case("invalid_wire_type_in_wrapper_empty_message",
+                    _build_wrapper_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(
+                        2, _encode_length_delimited_field(1, b"")),
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 7))),
 ]
 
 
@@ -1341,30 +1455,6 @@ def _build_group_descriptor_set_bytes(spark):
     ])
 
 
-def _build_empty_message_field_descriptor_set_bytes(spark, label):
-    return _build_proto2_descriptor(spark, f"empty_field_{label}.proto", [
-        _msg("Empty", []),
-        _msg("Root", [
-            _field("id", 1, "INT32"),
-            _field("empty", 2, "MESSAGE", label=label, type_name=".test.Empty"),
-        ]),
-    ])
-
-
-def _build_nested_empty_message_field_descriptor_set_bytes(spark):
-    return _build_proto2_descriptor(spark, "nested_empty_field.proto", [
-        _msg("Empty", []),
-        _msg("Child", [
-            _field("x", 1, "INT32"),
-            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
-        ]),
-        _msg("Root", [
-            _field("id", 1, "INT32"),
-            _field("child", 2, "MESSAGE", type_name=".test.Child"),
-        ]),
-    ])
-
-
 def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None):
     return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id)
 
@@ -1392,13 +1482,6 @@ _fallback_cases = [
     _fallback_case("nested_oneof_member", _build_oneof_descriptor_set_bytes, "OuterChoice",
                    _encode_length_delimited_field(1, _oneof_child) + _encode_varint_field(2, 9),
                    ["child.int_value", "sibling"]),
-    # A nested message cannot hide a field, because the JNI schema requires a nested field to
-    # carry the output flag of its parent.
-    _fallback_case("nested_empty_message_field",
-                   _build_nested_empty_message_field_descriptor_set_bytes,
-                   "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(
-                       2, _encode_varint_field(1, 9) +
-                       _encode_length_delimited_field(2, b""))),
     # Groups decode to structs like messages, but use their own wire types.
     _fallback_case("group_field", _build_group_descriptor_set_bytes, "WithGroup",
                    _encode_varint_field(1, 7) + _encode_tag(2, 3) + _encode_varint_field(1, 9) +

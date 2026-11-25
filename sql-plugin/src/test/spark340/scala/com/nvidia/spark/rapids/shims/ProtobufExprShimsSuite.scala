@@ -113,10 +113,13 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       Seq("foo"))
   }
 
-  private def fakeMessage(fields: Seq[ProtobufFieldDescriptor]): ProtobufMessageDescriptor =
+  private def fakeMessage(
+      fields: Seq[ProtobufFieldDescriptor],
+      name: String = "test.Message"): ProtobufMessageDescriptor =
     new ProtobufMessageDescriptor {
       def syntax: String = "PROTO2"
-      def findField(name: String): Option[ProtobufFieldDescriptor] = fields.find(_.name == name)
+      override def fullName: String = name
+      def findField(n: String): Option[ProtobufFieldDescriptor] = fields.find(_.name == n)
       def fieldNames: Seq[String] = fields.map(_.name)
     }
 
@@ -124,21 +127,40 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       fieldName: String,
       number: Int,
       typeName: String,
-      nested: Option[ProtobufMessageDescriptor] = None): ProtobufFieldDescriptor =
+      nested: => Option[ProtobufMessageDescriptor] = None,
+      inOneof: Boolean = false,
+      mapField: Boolean = false): ProtobufFieldDescriptor =
     new ProtobufFieldDescriptor {
       def name: String = fieldName
       def fieldNumber: Int = number
       def protoTypeName: String = typeName
       def isRepeated: Boolean = false
       def isRequired: Boolean = false
-      def isInOneof: Boolean = false
+      def isInOneof: Boolean = inOneof
+      override def isMapField: Boolean = mapField
       def explicitDefaultValue: Either[String, Option[ProtobufDefaultValue]] = Right(None)
       def enumMetadata: Option[ProtobufEnumMetadata] = None
       def messageDescriptor: Option[ProtobufMessageDescriptor] = nested
       def referencedTypeSyntax: Option[String] = nested.map(_.syntax)
     }
 
-  private val emptyMessageField = fakeField("empty", 2, "MESSAGE", Some(fakeMessage(Nil)))
+  private def emptyMessage(name: String): ProtobufMessageDescriptor =
+    fakeMessage(Nil, name)
+
+  private val emptyMessageField =
+    fakeField("empty", 2, "MESSAGE", Some(emptyMessage("test.Empty")))
+
+  private val idSchema = StructType(Seq(StructField("id", IntegerType)))
+
+  /** One visible INT32 entry, so a hidden entry has a sibling the decoder returns. */
+  private val visibleIdField = {
+    val idInfo = ProtobufFieldInfo(fieldNumber = 1, protoTypeName = "INT32",
+      sparkType = IntegerType, encoding = ENC_DEFAULT, isSupported = true,
+      unsupportedReason = None, isRequired = false, defaultValue = None, enumMetadata = None)
+    ProtobufSchemaValidator.toFlattenedFieldDescriptor("id", StructField("id", IntegerType),
+      idInfo, parentIdx = -1, depth = 0,
+      outputTypeId = DType.INT32.getTypeId.getNativeId, isOutput = true)
+  }
 
   test("compat keeps empty-message fields missing from the Spark schema") {
     // Spark drops fields of empty message types, but still validates them when parsing.
@@ -166,17 +188,67 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       Left("protobuf field 'child' has fields missing from the Spark schema: name, child"))
   }
 
+  test("compat hides a message whose fields are all empty messages") {
+    val wrapper = fakeMessage(Seq(emptyMessageField), "test.Wrapper")
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("wrapper", 2, "MESSAGE", Some(wrapper))), "test.Root")
+
+    val hidden = SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message")
+
+    assert(hidden.map(_.map(_.name)) == Right(Seq("wrapper")))
+  }
+
+  test("compat rejects a recursive message missing from the Spark schema") {
+    // The type never bottoms out in an empty message, so the decoder cannot be given a
+    // bounded subtree for it.
+    lazy val node: ProtobufMessageDescriptor =
+      fakeMessage(Seq(fakeField("next", 1, "MESSAGE", Some(node))), "test.Node")
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("node", 2, "MESSAGE", Some(node))), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message") ==
+      Left("root message has fields missing from the Spark schema: node"))
+  }
+
+  test("compat rejects oneof and map empty-message fields missing from the Spark schema") {
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("choice", 2, "MESSAGE", Some(emptyMessage("test.Empty")), inOneof = true),
+      fakeField("entries", 3, "MESSAGE", Some(emptyMessage("test.Entry")),
+        mapField = true)), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message") ==
+      Left("root message has fields missing from the Spark schema: choice, entries"))
+  }
+
+  test("the GPU decoder accepts a nested hidden empty-message field") {
+    val wrapper = fakeField("wrapper", 2, "MESSAGE",
+      Some(fakeMessage(Seq(emptyMessageField), "test.Wrapper")))
+    val hiddenParent = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(wrapper,
+      parentIdx = -1, depth = 0, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+    val hiddenChild = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(emptyMessageField,
+      parentIdx = 1, depth = 1, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+
+    val flatFields = (visibleIdField, hiddenParent, hiddenChild) match {
+      case (Right(id), Right(parent), Right(child)) => Array(id, parent, child)
+      case other => fail(s"unexpected planning failure: $other")
+    }
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields)
+
+    assert(arrays.isOutput.toSeq == Seq(true, false, false))
+    assert(arrays.toJniDescriptor.numFields() == 3)
+  }
+
   test("the GPU decoder accepts a schema with a hidden empty-message field") {
-    val idInfo = ProtobufFieldInfo(fieldNumber = 1, protoTypeName = "INT32",
-      sparkType = IntegerType, encoding = ENC_DEFAULT, isSupported = true,
-      unsupportedReason = None, isRequired = false, defaultValue = None, enumMetadata = None)
-    val id = ProtobufSchemaValidator.toFlattenedFieldDescriptor("id",
-      StructField("id", IntegerType), idInfo, parentIdx = -1, depth = 0,
-      outputTypeId = DType.INT32.getTypeId.getNativeId, isOutput = true)
     val hidden = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(emptyMessageField,
       parentIdx = -1, depth = 0, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
 
-    val flatFields = (id, hidden) match {
+    val flatFields = (visibleIdField, hidden) match {
       case (Right(idField), Right(hiddenField)) => Array(idField, hiddenField)
       case other => fail(s"unexpected planning failure: $other")
     }
