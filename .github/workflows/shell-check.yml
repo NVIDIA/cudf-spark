@@ -34,4 +34,4 @@ jobs:
         uses: NVIDIA/spark-rapids-common/shell-check@main
 
       - name: Test Databricks launcher
-        run: python3 -m unittest discover -s jenkins/databricks/tests -p 'test_*.py'
+        run: python3 -m unittest discover -s jenkins/databricks/tests -p '*_test.py'
