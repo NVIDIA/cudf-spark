@@ -31,12 +31,16 @@ def sha512(path):
 
 
 def download(url, path):
+    attempt_timeout = 60 * 60  # Only a cold or invalid archive needs a network transfer.
+    retry_window = attempt_timeout + 5 * 60
+    # curl can start a final attempt just before its retry window closes.
+    process_timeout = retry_window + attempt_timeout + 60
     subprocess.run([
         "curl", "--fail", "--silent", "--show-error", "--location",
         "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15",
-        "--max-time", "300", "--retry", "2", "--retry-max-time", "480",
+        "--max-time", str(attempt_timeout), "--retry", "2", "--retry-max-time", str(retry_window),
         "--output", str(path), url,
-    ], check=True, timeout=600)
+    ], check=True, timeout=process_timeout)
 
 
 def check_path(path):
