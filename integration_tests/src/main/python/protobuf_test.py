@@ -1100,6 +1100,11 @@ def _read_leaf_of_every_item(decoded, df):
     return df.select(decoded.getField("items").getField("a").alias("item_a"))
 
 
+def _read_mixed_case_fields(decoded, df):
+    return df.select(decoded.getField("CHILD").getField("A").alias("child_a"),
+                     decoded.getField("ITEMS").getField("A").alias("item_a"))
+
+
 def _read_through_alias(decoded, df):
     # Two references to the aliased struct keep CollapseProject from folding the projections.
     return df.select(decoded.alias("d")).select(f.col("d.top"), f.col("d.child.b"))
@@ -1146,6 +1151,8 @@ _field_read_cases = [
     pytest.param(_read_top_and_leaves, [["top", "child", "child.a", "items", "items.b"]],
                  id="top_and_leaves"),
     pytest.param(_read_leaf_of_every_item, [["items", "items.a"]], id="leaf_of_every_item"),
+    pytest.param(_read_mixed_case_fields, [["child", "child.a", "items", "items.a"]],
+                 id="mixed_case_fields"),
     pytest.param(_read_through_alias, [["top", "child", "child.b"]], id="through_alias"),
     pytest.param(_read_element_at, [["items", "items.b"]], id="element_at"),
     # Spark pushes the filter below the projection, so the filter decodes on its own.

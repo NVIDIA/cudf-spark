@@ -171,7 +171,9 @@ object FieldReads {
       }
     case g: GetArrayStructFields =>
       accessPath(g.child, isSource).map { case (names, indices) =>
-        (names :+ g.field.name, indices)
+        val elementStruct = g.child.dataType.asInstanceOf[ArrayType].elementType
+          .asInstanceOf[StructType]
+        (names :+ elementStruct(g.ordinal).name, indices)
       }
     // An array element has the fields of the array's element type.
     case g: GetArrayItem =>

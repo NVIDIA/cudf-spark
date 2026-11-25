@@ -740,6 +740,14 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     // Failing to locate the decode expression in its own plan fails closed to All.
     assert(analyzeReads(Seq(elemProj), decode, isDecode = Some(_ => false)) == All)
 
+    // GetArrayStructFields must resolve the canonical schema field name via ordinal, not
+    // the query spelling carried in g.field.name (which differs under caseSensitive=false).
+    val upperField = itemStructType("a").copy(name = "A")
+    val mixedCaseArray = GetArrayStructFields(GetStructField(decode, 2, Some("ITEMS")),
+      upperField, 0, 2, containsNull = true)
+    val mixedCaseProj = ProjectExec(Seq(Alias(mixedCaseArray, "item_a")()), scan)
+    assert(analyzeReads(Seq(mixedCaseProj), decode) == path(Seq("items", "a")))
+
     // Non-deterministic decode expressions do not match semanticEquals, so reference identity
     // must still trace their field reads (and never fall through to Unread).
     val nonDetDecode = FakeDecode(bin, nestedRootType, isDeterministic = false)
