@@ -23,6 +23,7 @@ import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFileInfo._
@@ -386,32 +387,50 @@ class GpuDeleteFilter(
     val schema = eqDeleteSchema(eqIds)
     val sparkType = toSparkType(schema)
     val sparkTypes = sparkType.fields.map(_.dataType)
-    val buildSide = deleteLoader.loadDeletes(eqDeletes, schema, sparkTypes)
-    val buildKeys = eqIds
-      .indices
-      .map(idx => {
-        val field = sparkType.fields(idx)
-        GpuIcebergEqualityKey(
-          GpuBoundReference(idx, field.dataType, field.nullable)(ExprId(eqIds(idx)), field.name))
-      })
-
-    val probeKeys = eqIds.zipWithIndex
-      .map {
-        case (id, index) =>
-          val field = sparkType.fields(index)
-          val inputIdx = requiredSchema.columns()
-            .asScala
-            .indexWhere(_.fieldId() == id)
-          GpuIcebergEqualityKey(
-            GpuBoundReference(inputIdx, field.dataType, field.nullable)(ExprId(id), field.name))
+    val loaded = deleteLoader.loadDeletes(eqDeletes, schema, sparkTypes)
+    val buildSide = if (sparkTypes.exists(t => t == FloatType || t == DoubleType)) {
+      val spillable = withResource(loaded) { _ =>
+        closeOnExcept(loaded.releaseBatch()) { batch =>
+          SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+        }
       }
+      withRetryNoSplit(spillable) { attempt =>
+        withResource(attempt.getColumnarBatch()) { batch =>
+          withResource(GpuFloatingPointKeyUtils.encode(batch)) { encoded =>
+            LazySpillableColumnarBatch(encoded, "Encoded eq deletes")
+          }
+        }
+      }
+    } else {
+      loaded
+    }
+    closeOnExcept(buildSide) { _ =>
+      val buildKeys = eqIds
+        .indices
+        .map(idx => {
+          val field = sparkType.fields(idx)
+          GpuBoundReference(idx, buildSide.dataTypes(idx), field.nullable)(
+            ExprId(eqIds(idx)), field.name)
+        })
+
+      val probeKeys = eqIds.zipWithIndex
+        .map {
+          case (id, index) =>
+            val field = sparkType.fields(index)
+            val inputIdx = requiredSchema.columns()
+              .asScala
+              .indexWhere(_.fieldId() == id)
+            GpuIcebergEqualityKey(
+              GpuBoundReference(inputIdx, field.dataType, field.nullable)(ExprId(id), field.name))
+        }
 
 
-    DeleteFilterContext(buildSide,
-      buildKeys,
-      probeKeys,
-      parquetConf.metrics(OP_TIME_LEGACY),
-      parquetConf.metrics(JOIN_TIME))
+      DeleteFilterContext(buildSide,
+        buildKeys,
+        probeKeys,
+        parquetConf.metrics(OP_TIME_LEGACY),
+        parquetConf.metrics(JOIN_TIME))
+    }
   }
 
   private def eqDeleteSchema(eqIds: Seq[Int]): Schema = {
