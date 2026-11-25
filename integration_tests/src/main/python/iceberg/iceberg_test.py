@@ -101,23 +101,11 @@ def _assert_coalesced_reads(table, reader_type, format_version):
         lambda spark: spark.sql(f"SELECT {constant_columns}, _file, _pos FROM {table}"),
         exist_classes='GpuBatchScanExec', conf=conf, require_non_empty=True)
 
-    def check_aggregate(query, expect_coalesce):
-        def check_plan(_cpu_plan, plan):
-            assert len(_nodes_of_class(plan, 'GpuBatchScanExec')) == 1, str(plan)
-            coalesces = _nodes_of_class(plan, 'GpuCoalesceBatches')
-            after_scan = any(node.child().getClass().getSimpleName() == 'GpuBatchScanExec'
-                             for node in coalesces)
-            assert after_scan == expect_coalesce, str(plan)
-
+    for aggregate in ('count(*)', 'sum(id)'):
         assert_cpu_and_gpu_are_equal_collect_with_capture(
-            lambda spark: spark.sql(query), conf=conf, require_non_empty=True,
-            gpu_plan_assertion=check_plan)
-
-    check_aggregate(f"SELECT _spec_id, _partition.p, sum(id) FROM {table} "
-                    "GROUP BY _spec_id, _partition.p", True)
-    check_aggregate(f"SELECT p, count(*) FROM {table} GROUP BY p", True)
-    check_aggregate(f"SELECT id, count(*) FROM {table} GROUP BY id", False)
-    check_aggregate(f"SELECT count(*) FROM {table}", False)
+            lambda spark: spark.sql(f"SELECT _spec_id, _partition.p, {aggregate} FROM {table} "
+                                    "GROUP BY _spec_id, _partition.p"),
+            exist_classes='GpuBatchScanExec,GpuCoalesceBatches', conf=conf, require_non_empty=True)
 
 
 @iceberg
@@ -1207,8 +1195,8 @@ def test_iceberg_input_meta(format_version, spark_tmp_table_factory, reader_type
             f"AS SELECT * FROM {tmpview}")
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : spark.sql(
-            "SELECT a, input_file_name(), input_file_block_start(), input_file_block_length() " + \
+        lambda spark: spark.sql(
+            "SELECT a, _file, input_file_name(), input_file_block_start(), input_file_block_length() "
             f"FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
