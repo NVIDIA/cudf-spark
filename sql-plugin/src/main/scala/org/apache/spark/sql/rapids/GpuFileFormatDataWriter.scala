@@ -581,6 +581,9 @@ class GpuDynamicPartitionDataSingleWriter(
   }
 
   private def splitFloatingPartitionBatchAndClose(batch: ColumnarBatch): Array[SplitPack] = {
+    if (batch.numRows() == 0) {
+      return withResource(batch)(_ => Array.empty[SplitPack])
+    }
     val dataTypes = description.dataColumns.map(_.dataType).toArray
     val keyTypes = description.partitionColumns.map(_.dataType).toArray ++
       (if (isBucketed) Array[DataType](IntegerType) else Array.empty[DataType])
