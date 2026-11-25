@@ -44,20 +44,22 @@ abstract class GpuSparkScan(val cpuScan: Scan,
 
   override def readSchema(): StructType = cpuScan.readSchema()
 
-  override lazy val coalesceAfter: Boolean = {
-    // Spark input-file expressions use the current split's path and offsets for the whole batch.
-    !queryUsesInputFile && {
-      val schema = GpuSparkScanAccess.expectedSchema(cpuScan)
-      val columns = schema.columns().asScala
-      // Older files can still supply an identity value after the table's partition spec changes.
-      def projectsIdentityColumn: Boolean =
-        GpuSparkScanAccess.table(cpuScan).specs().values().asScala.exists { spec =>
-          spec.identitySourceIds().asScala.exists(id => schema.findField(id) != null)
-        }
+  // Spark input-file expressions use the current split's path and offsets for the whole batch.
+  override lazy val coalesceAfter: Boolean = !queryUsesInputFile && projectsMetadataOrIdentityColumn
 
-      columns.nonEmpty &&
-        (columns.exists(field => MetadataColumns.isMetadataColumn(field.fieldId())) ||
-          projectsIdentityColumn)
+  private def projectsMetadataOrIdentityColumn: Boolean = {
+    val schema = GpuSparkScanAccess.expectedSchema(cpuScan)
+    val columns = schema.columns().asScala
+    if (columns.isEmpty) {
+      false
+    } else if (columns.exists(field => MetadataColumns.isMetadataColumn(field.fieldId()))) {
+      true
+    } else {
+      // Older files can still supply an identity value after the table's partition spec changes.
+      val specs = GpuSparkScanAccess.table(cpuScan).specs().values().asScala
+      specs.exists { spec =>
+        spec.identitySourceIds().asScala.exists(id => schema.findField(id) != null)
+      }
     }
   }
 

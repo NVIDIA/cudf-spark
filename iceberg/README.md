@@ -38,16 +38,6 @@ For Spark 4.1.x, only `iceberg-1-11-x` is compiled during the build. Apache Iceb
 publishes the `iceberg-spark-runtime-4.1` artifact starting at version 1.11.0, so earlier
 Iceberg releases cannot be used with Spark 4.1.
 
-## GPU scan batching
-
-GPU Iceberg scans request batch coalescing when they project an Iceberg metadata column or
-an identity-partition source column. For example, on a table identity-partitioned by `a`,
-`SELECT a + 1 FROM t` can combine batches before evaluating the expression. This applies to
-imported Parquet files that supply `a` through partition metadata and to files written before
-the table dropped the identity partition. The reader materializes each file's values first.
-Spark input-file expressions such as `input_file_name()` preserve split boundaries until those
-expressions are evaluated.
-
 ## Code Shared Between Modules
 
 The `common` directory contains code that is shared across some or all of the Iceberg
