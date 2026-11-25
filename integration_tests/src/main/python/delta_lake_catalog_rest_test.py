@@ -39,7 +39,7 @@ from spark_session import with_cpu_session, with_gpu_session
 
 pytestmark = pytest.mark.skipif(
     not is_oss_delta_lake_43(),
-    reason="Unity Catalog Delta REST API routing requires OSS Delta Lake 4.3.x")
+    reason="Unity Catalog Delta REST API routing requires OSS Delta Lake 4.3.0, 4.3.1, or 4.3.2.2")
 
 _SERVER_REJECTION_MESSAGE = "Injected server-side Delta commit rejection"
 

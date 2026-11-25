@@ -2158,6 +2158,8 @@ def test_delta_deletion_vector_count_star_after_empty_batch(
         ("4.3.0", False, True, True, True, True),
         ("4.3.1", False, True, True, True, True),
         ("4.3.2.2", False, True, True, True, True),
+        ("4.3.2", False, False, False, False, False),
+        ("4.3.3", False, False, False, False, False),
         ("4.3.", False, False, False, False, False),
         ("4.3.x", False, False, False, False, False),
         ("4.4.0", False, False, False, False, False),

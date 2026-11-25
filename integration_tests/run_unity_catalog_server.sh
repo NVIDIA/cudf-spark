@@ -23,7 +23,7 @@
 # Options:
 #   --port N          client port, the server binds its REST API at N+1 (default 18080)
 #   --uc-version V    Unity Catalog version; this suite is pinned to 0.6.0 (default 0.6.0)
-#   --delta-version V Delta Lake version, either 4.2.0 or 4.3.x (default 4.2.0)
+#   --delta-version V Delta Lake version: 4.2.0, 4.3.0, 4.3.1, or 4.3.2.2 (default 4.2.0)
 #   --run-dir DIR     parent for the server's scratch directory (default $TMPDIR or /tmp)
 #   --refresh         re-resolve the cached classpaths before starting
 #
@@ -87,7 +87,7 @@ Usage:
 Options:
   --port N          client port, the server binds its REST API at N+1 (default 18080)
   --uc-version V    Unity Catalog version; this suite is pinned to 0.6.0 (default 0.6.0)
-  --delta-version V Delta Lake version, either 4.2.0 or 4.3.x (default 4.2.0)
+  --delta-version V Delta Lake version: 4.2.0, 4.3.0, 4.3.1, or 4.3.2.2 (default 4.2.0)
   --run-dir DIR     parent for the server's scratch directory (default $TMPDIR or /tmp)
   --refresh         re-resolve the cached classpaths before starting
 EOF
@@ -136,10 +136,10 @@ SPARK_LINE=${SPARK_VER%.*}
 # somebody asked for it explicitly, so silence would be the wrong answer.
 [[ "$SCALA_BINARY_VER" == "2.13" ]] ||
   die "Delta Lake $DELTA_VERSION requires Scala 2.13, found $SCALA_BINARY_VER"
-ALLOWED_DELTA_VERSION_RE='^(4\.2\.0|4\.3\.[0-9]+(\.[0-9]+)*(-[A-Za-z0-9._-]+)?)$'
-if [[ "$DELTA_VERSION" == *$'\n'* || ! "$DELTA_VERSION" =~ $ALLOWED_DELTA_VERSION_RE ]]; then
-  die "Unity Catalog tests support Delta Lake 4.2.0 and 4.3.x, found $DELTA_VERSION"
-fi
+case "$DELTA_VERSION" in
+  4.2.0|4.3.0|4.3.1|4.3.2.2) ;;
+  *) die "Unity Catalog tests support Delta Lake 4.2.0, 4.3.0, 4.3.1, and 4.3.2.2, found $DELTA_VERSION" ;;
+esac
 case "$SPARK_VER" in
   4.0.1|4.1.1) ;;
   *) die "Delta Lake $DELTA_VERSION is only tested against Spark 4.0.1 and 4.1.1, found $SPARK_VER" ;;
