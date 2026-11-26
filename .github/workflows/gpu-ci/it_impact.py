@@ -1,12 +1,12 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Detect isolated edits to existing standalone pytest case bodies.
+"""Detect isolated edits to existing standalone pytest case bodies."""
 
-For example, the decimal-scale assertion change in #17105 selects a single
-Parquet case on both Scala versions. Changes to a fixture, decorator or module
-setup keep the full workload, even if the same file also edits a test body.
-"""
+# Examples (paths relative to integration_tests/src/main/python/):
+#   parquet_test.py: edit only an assertion in test_parquet_decimal_scale_change_boundaries
+#     -> {2: ["parquet_test.py::test_parquet_decimal_scale_change_boundaries"]}
+#   parquet_test.py: also edit a fixture or a test decorator -> {} (full workload)
 
 import ast
 from pathlib import Path

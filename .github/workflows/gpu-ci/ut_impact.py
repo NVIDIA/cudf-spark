@@ -3,12 +3,11 @@
 
 """Select standalone ScalaTest suites from a complete base-to-merge diff.
 
-#16246 (cc6249f35a): changed only OrcScanRetrySuite's expected timestamp.
-The result is ["com.nvidia.spark.rapids.OrcScanRetrySuite"]. Editing both this suite
-and OrcScanSuite in isolation selects both fully qualified names.
-#16948 (be19b6ab8c): changed implementation as well as tests, so the result
-is [] (full standalone coverage). Changes to the shared SparkQueryCompareTestSuite
-trait also return []. Neither result makes a decision about Databricks CI.
+Examples (paths relative to tests/src/test/scala/com/nvidia/spark/rapids/):
+  OrcScanRetrySuite.scala (edit an assertion) -> ["com.nvidia.spark.rapids.OrcScanRetrySuite"]
+  OrcScanSuite.scala and OrcScanRetrySuite.scala (edit assertions in both)
+    -> ["com.nvidia.spark.rapids.OrcScanRetrySuite", "com.nvidia.spark.rapids.OrcScanSuite"]
+  OrcScanSuite.scala and the root pom.xml -> [] (full workload, not a skip)
 """
 
 import re

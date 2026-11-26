@@ -3,14 +3,10 @@
 
 """Select tests for one runtime from the complete base-to-merge diff.
 
-Examples:
-  * Only the ORC retry suite changes (#16246): run that class on the configured UT shims.
-    If two eligible leaf suites change, run both classes on those same shims.
-  * Only the Parquet decimal scale test body changes (#17105): run that pytest
-    case in its standalone IT shard on each Scala version.
-  * Product code, shared fixtures or mixed changes: keep the full configured workload.
-  * The same Parquet edit with --runtime databricks: keep the full DB workload.
-    Standalone sharding does not cover DB-specific modes or runtime versions.
+Examples (runtime, changed files -> plan):
+  standalone, pom.xml and a test file -> {"mode": "full"}
+  databricks, even a single standalone test file -> {"mode": "full"}
+See ut_impact.py and it_impact.py for inputs that select individual suites or cases.
 """
 
 import argparse
