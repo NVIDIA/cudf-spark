@@ -501,6 +501,10 @@ sealed abstract class GpuMetric extends Serializable {
     Arrays.copyOf(snapshot, capacity)
   }
 
+  /**
+   * After successful activation, keep the size of `excludeMetrics` and the metric instance at
+   * each position unchanged until deactivation. Snapshots are matched by position.
+   */
   def tryActivateTimer(excludeMetrics: Seq[GpuMetric]): Boolean = {
     if (!isTimerActive) {
       isTimerActive = true
