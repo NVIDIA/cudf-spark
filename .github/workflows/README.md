@@ -12,8 +12,11 @@ skip does not bypass Maven checks.
 
 [GPU CI](gpu-ci.yml) tests the approved PR head merged with its target.
 Documentation-only or Skills-only changes and a `[skip ci]` title skip these
-jobs. Isolated edits to eligible Python integration tests run the affected cases;
-shared or uncertain changes run all eight groups. The selection job lists what will run.
+jobs. The [impact selector](gpu-ci/impact.py) runs just the changed ScalaTest
+suites on the configured UT shims, or just the affected pytest cases, when it
+can establish that the changes are isolated. Shared or uncertain changes run
+all eight groups. The selection job lists the suites or cases. These reductions
+apply only to standalone Spark, not to Databricks.
 
 [GPU CI suites](../gpu-ci-suites.json) assigns four unit-test runners by Scala
 version and Spark shim. Groups default to AMD64; set `"arch": "arm64"` on an

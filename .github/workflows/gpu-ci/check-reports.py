@@ -10,9 +10,10 @@ import sys
 from xml.etree import ElementTree as ET
 
 
-def stage(reports, destination, filecache):
+def stage(reports, destination, filecache=False, expected=None):
     cases = skipped = failures = invalid = 0
-    executed_filecache = False
+    observed = set()
+    executed = set()
     for path in sorted(reports.rglob("TEST-*.xml")):
         if path.resolve() != path or not path.is_file():
             raise ValueError(f"Refusing to upload a linked JUnit report: {path}")
@@ -26,28 +27,46 @@ def stage(reports, destination, filecache):
             invalid += 1
             continue
         tests = list(suite.iter("testcase"))
+        if expected and (suite.tag != "testsuite" or suite.get("tests") != str(len(tests)) or
+                         any(suite.get(field) != "0" for field in ("errors", "failures"))):
+            print(f"Incomplete or failed ScalaTest JUnit report: {path}", file=sys.stderr)
+            invalid += 1
         cases += len(tests)
         skipped += sum(test.find("skipped") is not None for test in tests)
         failures += sum(1 for tag in ("failure", "error") for _ in suite.iter(tag))
-        executed_filecache |= any(
-            test.get("classname", "").endswith(".FileCacheIntegrationSuite") and test.find("skipped") is None
-            for test in tests)
+        observed.update(test.get("classname", "") for test in tests)
+        executed.update(test.get("classname", "") for test in tests if test.find("skipped") is None)
     print(f"{reports.relative_to(Path.cwd())}: {cases} testcases, {skipped} skipped, "
-          f"{failures} failures/errors, {invalid} malformed reports")
-    return not (failures or invalid) and cases > skipped and (not filecache or executed_filecache)
+          f"{failures} failures/errors, {invalid} invalid reports")
+    if failures or invalid:
+        return 1
+    if expected:
+        if expected != observed:
+            print(f"ScalaTest suite mismatch: missing={sorted(expected - observed)}, "
+                  f"unexpected={sorted(observed - expected)}", file=sys.stderr)
+            return 1
+        if expected - executed:
+            print(f"All reported cases skipped for: {sorted(expected - executed)}")
+            return 3  # The worker can run this shim in full, but only if Maven succeeded.
+    return int(cases <= skipped or (filecache and not any(
+        name.endswith(".FileCacheIntegrationSuite") for name in executed)))
 
 
 def main():
-    scala, shim, group = sys.argv[1:]
+    scala, shim, group, *suites = sys.argv[1:]
     module = Path.cwd() / ("scala2.13/tests" if scala == "2.13" else "tests")
     build = module / "target" / f"spark{shim}"
     destination = Path(os.environ["RUNNER_TEMP"]) / "unit-junit" / f"spark{shim}"
+    if suites:
+        sys.exit(stage(build / "surefire-reports", destination / "selected", expected=set(suites)))
     # The entry point preserves the full suite before rerunning just FileCacheIntegrationSuite.
-    checks = [("surefire-reports", group != "ut2")]
-    if group != "ut2":
+    filecache = group != "ut2"
+    checks = [("surefire-reports", filecache)]
+    if filecache:
         checks.append(("unit-reports", False))
-    results = [stage(build / name, destination / name, filecache) for name, filecache in checks]
-    if not all(results):
+    results = [stage(build / name, destination / name, needs_filecache)
+               for name, needs_filecache in checks]
+    if any(results):
         sys.exit(f"Missing or failed GPU unit-test evidence for Spark {shim} ({group})")
 
 

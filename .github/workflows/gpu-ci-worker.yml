@@ -108,9 +108,8 @@ jobs:
             exit 1
           fi
           if jq -e 'has("targets")' <<< "$WORKLOAD" >/dev/null; then
-            targets=$(jq -ce 'if .kind == "integration" and
-              (.targets | type == "array" and length > 0 and all(.[]; type == "string"))
-              then .targets else error("Expected nonempty integration test targets") end' <<< "$WORKLOAD")
+            targets=$(jq -ce 'if (.targets | type == "array" and length > 0 and all(.[]; type == "string"))
+              then .targets else error("Expected nonempty suite or case targets") end' <<< "$WORKLOAD")
             if ! python3 .github/workflows/gpu-ci/groups.py "$suites" --base "$BASE_SHA" --merge "$MERGE_SHA" |
               jq -e --argjson row "$row" --argjson targets "$targets" '
                 any(.include[]; . == ($row + {targets: $targets}))' >/dev/null; then

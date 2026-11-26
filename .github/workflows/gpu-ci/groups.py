@@ -57,13 +57,16 @@ def gpu_matrix(root, suites, base=None, merge=None):
             seen_shims.add((scala, shim))
     if any(set(shards) != {1, 2} for shards in it_shards.values()):
         raise ValueError("Each integration-test shim requires both case partitions")
-    if base and merge and it_shards:
-        from impact import affected_cases
+    if base and merge:
+        from impact import select_impact
 
-        cases = affected_cases(root, base, merge)
-        if cases:
+        plan = select_impact(root, base, merge, runtime="standalone")
+        if plan["mode"] == "integration" and it_shards:
+            cases = plan["shards"]
             groups = [dict(row, targets=cases[row["shard"]]) for row in groups
                       if row["kind"] == "integration" and row["shard"] in cases]
+        elif plan["mode"] == "unit" and seen_shims:
+            groups = [dict(row, targets=plan["suites"]) for row in groups if row["kind"] == "unit"]
     return {"include": groups}
 
 

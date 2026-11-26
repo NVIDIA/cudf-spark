@@ -106,6 +106,39 @@ if [[ $KIND == integration ]]; then
   exit
 fi
 
+suites=()
+if [[ -n ${TARGETS_JSON:-} ]]; then
+  suite_csv=$(jq -er '
+    if type == "array" and length > 0 and
+       all(.[]; type == "string" and test("\\A([A-Za-z_][A-Za-z0-9_]*\\.)+[A-Za-z_][A-Za-z0-9_]*\\z"))
+    then join(",") else error("Expected fully qualified ScalaTest suite names") end' <<< "$TARGETS_JSON")
+  IFS=, read -r -a suites <<< "$suite_csv"
+fi
+
+run_selected_suites() {
+  local project
+  case "$SCALA" in
+    2.12) project=. ;;
+    2.13) project=scala2.13 ;;
+    *) echo "::error::Unsupported Scala version: $SCALA"; return 1 ;;
+  esac
+  echo "Selected ScalaTest suites: $suite_csv"
+  # Build the classified reactor dependencies first. Only the tests module has these suites.
+  # Its serial ScalaTest plugin accepts exact names; parallelUnitTests uses prefix matching.
+  # shellcheck disable=SC2016
+  run_in_image -c '
+    set -e
+    nvidia-smi
+    suites=$1
+    shift
+    set -- "$@" "-Dcuda.version=$CLASSIFIER"
+    mvn "$@" -U -am clean install -DskipTests
+    mvn "$@" test "-Dsuites=$suites"
+  ' bash "$suite_csv" -B -f "$project/pom.xml" -pl tests -Dbuildver="$SPARK_SHIM" \
+    -Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true \
+    -Dmaven.wagon.http.retryHandler.count=3
+}
+
 jq -er '.[] | [.shim, ."unit-group"] | @tsv' <<< "${SHIMS:?}" > "$scratch/shims"
 [[ -s "$scratch/shims" ]]
 while read -r SPARK_SHIM unit_group; do
@@ -115,11 +148,22 @@ while read -r SPARK_SHIM unit_group; do
     *) echo "::error::Unsupported unit group $unit_group"; exit 1 ;;
   esac
   status=0
-  run_in_image jenkins/spark-premerge-build.sh ci_unit || status=$?
+  evidence=0
+  check=(python3 .github/workflows/gpu-ci/check-reports.py "$SCALA" "$SPARK_SHIM" "$unit_group")
+  if ((${#suites[@]})); then
+    run_selected_suites || status=$?
+    "${check[@]}" "${suites[@]}" || evidence=$?
+  fi
+  if (( ${#suites[@]} == 0 || (status == 0 && evidence == 3) )); then
+    if ((evidence == 3)); then
+      echo "Targeted suite skipped all cases; running the full group for Spark $SPARK_SHIM"
+    fi
+    run_in_image jenkins/spark-premerge-build.sh ci_unit || status=$?
+    evidence=0
+    "${check[@]}" || evidence=$?
+  fi
 
   # Keep partial results on failure, and never replace the original Maven/timeout exit.
-  evidence=0
-  python3 .github/workflows/gpu-ci/check-reports.py "$SCALA" "$SPARK_SHIM" "$unit_group" || evidence=$?
   if ((status || evidence)); then
     echo "::error::Scala $SCALA / Spark $SPARK_SHIM: workload exit $status, JUnit check exit $evidence"
     if ((status)); then exit "$status"; fi

@@ -1,7 +1,12 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Choose the hosted Maven checks for the tested PR merge."""
+"""Choose the hosted Maven checks for the tested PR merge.
+
+Examples: README.md alone skips Verify; a standalone *_test.py edit needs
+only RAT; a Scala suite, a POM, or Maven-generated docs/supported_ops.md needs
+full Verify. Mixed changes take the most thorough of the applicable checks.
+"""
 
 from fnmatch import fnmatchcase
 import json
