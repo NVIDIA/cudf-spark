@@ -549,11 +549,10 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   // ==================== Skip-merge catalog ====================
 
-  test("multiple batches preserve memory buffering and finalization with segmentSize=0") {
+  test("multiple batches retain and finalize records with the default segment size") {
     val descriptors = Paths.get("/proc/self/fd")
     assume(Files.isDirectory(descriptors), "file descriptor inspection requires procfs")
     val settings = Map(
-      "spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize" -> "0",
       "spark.rapids.memory.host.partialFileBufferInitialSize" -> "1k",
       "spark.rapids.memory.host.partialFileBufferMaxSize" -> "1m",
       "spark.rapids.memory.host.partialFileBufferMemoryThreshold" -> "1.0",
