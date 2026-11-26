@@ -1,5 +1,5 @@
 # Change log
-Generated on 2026-11-03
+Generated on 2026-11-26
 
 ## Release 26.10
 
@@ -179,6 +179,12 @@ Generated on 2026-11-03
 ### PRs
 |||
 |:---|:---|
+|[#17164](https://github.com/NVIDIA/cudf-spark/pull/17164)|[DOC] Update download links for v26.10.1 [skip ci]|
+|[#17033](https://github.com/NVIDIA/cudf-spark/pull/17033)|Allow Delta Lake 4.3.1 and 4.3.2.2 in the Delta 4.3 runtime shim|
+|[#17094](https://github.com/NVIDIA/cudf-spark/pull/17094)|Fix GpuUnionExec partitioning attribute matching  [reduced-it]|
+|[#16877](https://github.com/NVIDIA/cudf-spark/pull/16877)|Fall back to the CPU instead of failing or misreading Delta tables on unsupported Delta runtimes|
+|[#17091](https://github.com/NVIDIA/cudf-spark/pull/17091)|Backport Spark package-private audit and Parquet cache root loading|
+|[#16713](https://github.com/NVIDIA/cudf-spark/pull/16713)|Update CHANGELOG for the v26.10.0 release [skip ci]|
 |[#16710](https://github.com/NVIDIA/cudf-spark/pull/16710)|[DOC] remove Dataproc Serverless 2.3 support [skip ci]|
 |[#16705](https://github.com/NVIDIA/cudf-spark/pull/16705)|Ignore unregistered accumulator in recordPerfioGCSBackendOnce|
 |[#16692](https://github.com/NVIDIA/cudf-spark/pull/16692)|Mark distributed Delta 4.2/4.3 REORG failures as expected [skip ci]|
@@ -235,7 +241,6 @@ Generated on 2026-11-03
 |[#16055](https://github.com/NVIDIA/cudf-spark/pull/16055)|Move stable scalar helpers to root-safe modules|
 |[#15992](https://github.com/NVIDIA/cudf-spark/pull/15992)|Add Delta 4.3 provider and runtime with basic features|
 |[#16103](https://github.com/NVIDIA/cudf-spark/pull/16103)|Make build info event root-safe across runtimes|
-|[#15080](https://github.com/NVIDIA/cudf-spark/pull/15080)|Fix byte position accounting in cached batch output [reduced-it]|
 |[#15717](https://github.com/NVIDIA/cudf-spark/pull/15717)|Support Iceberg v3 deletion vector writes on GPU [reduced-it]|
 |[#16057](https://github.com/NVIDIA/cudf-spark/pull/16057)|Document RapidsConf entry placement for agents [skip ci]|
 |[#16060](https://github.com/NVIDIA/cudf-spark/pull/16060)|Shorten Variant integer-cast resource lifetimes|
@@ -440,6 +445,7 @@ Generated on 2026-11-03
 |[#15708](https://github.com/NVIDIA/cudf-spark/pull/15708)|[fast-ut] [reduced-it] [SkipRecovery] Narrow JSON array overflow xfails|
 |[#15500](https://github.com/NVIDIA/cudf-spark/pull/15500)|Delta Lake REORG TABLE APPLY (PURGE) Support|
 |[#15706](https://github.com/NVIDIA/cudf-spark/pull/15706)|Update default pinned pool init threads to 'all'|
+|[#15682](https://github.com/NVIDIA/cudf-spark/pull/15682)|Remove inert InMemoryTableScanExec allowances in cache_test.py|
 |[#15693](https://github.com/NVIDIA/cudf-spark/pull/15693)|[fast-ut] [reduced-it] Xfail Iceberg V3 COW DELETE on Spark 3.5|
 |[#15496](https://github.com/NVIDIA/cudf-spark/pull/15496)|Fix legacy ORC date rebasing|
 |[#14806](https://github.com/NVIDIA/cudf-spark/pull/14806)|[BUILD] Avoid scala213 doc generation overwriting shared outputs[reduced-it][fast-ut]|
