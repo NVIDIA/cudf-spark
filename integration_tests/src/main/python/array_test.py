@@ -1136,19 +1136,13 @@ def test_array_distinct_no_neg_zero(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)')
     )
 
-# These Spark versions have compatible floating-point normalization. Other runtimes
-# retain the quarantine for the behavior described in SPARK-51475.
-@pytest.mark.xfail(
-    condition=not _spark_has_array_set_ops_float_normalization(),
-    reason="Array distinct floating-point normalization differs on this Spark runtime; "
-           "see https://issues.apache.org/jira/browse/SPARK-51475")
+@pytest.mark.xfail
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in [float_gen, double_gen]], ids=idfn)
 def test_array_distinct_neg_zero(data_gen):
     # separate -0.0 case, because Spark itself is inconsistent, see https://issues.apache.org/jira/browse/SPARK-51475
-    cpu, gpu = run_with_cpu_and_gpu(
-        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)'),
-        'COLLECT')
-    assert_equal_with_signed_zero(cpu, gpu)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)')
+    )
 
 
 # No NULL keys are allowed
