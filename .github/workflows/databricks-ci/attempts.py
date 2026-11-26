@@ -16,6 +16,9 @@ from tempfile import TemporaryDirectory
 
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))  # Trusted checkout, including under python -I.
+from runtimes import discover, runtime_label
+
 DB = HERE.parents[2] / "jenkins/databricks"
 PROVIDERS = ("aws2", "aws", "azure3")
 REPO = "NVIDIA/cudf-spark"
@@ -146,6 +149,7 @@ def run_attempt(path, env, workload):
 
 
 def run_row(args, adapter):
+    runtime_label(args.runtime)
     root = args.state_dir.absolute()
     if root.is_symlink() or root.parent.resolve() != Path(os.environ["RUNNER_TEMP"]).resolve():
         raise Failure("State directory must be a direct child of RUNNER_TEMP")
@@ -165,9 +169,12 @@ def run_row(args, adapter):
             return
     else:
         if args.candidate is None or not re.fullmatch(r"[0-9a-f]{40}", args.merge_sha or ""):
-            raise Failure("Run requires a candidate checkout and its approved merge SHA")
+            raise Failure("Run requires a candidate checkout and merge SHA")
         if root.is_relative_to(args.candidate.resolve()) or args.candidate.resolve().is_relative_to(root):
             raise Failure("Candidate checkout and state directory must be disjoint")
+        spark = discover(args.candidate, args.merge_sha).get(args.runtime)
+        if not spark:
+            raise Failure(f"DBR {args.runtime} is not enabled at {args.merge_sha}")
         root.mkdir(mode=0o700)  # Never overwrite state left by an earlier invocation.
         marker.write_text(owner)
         private.mkdir(mode=0o700)
@@ -191,7 +198,7 @@ def run_row(args, adapter):
                 directory.mkdir(mode=0o700)
                 with TemporaryDirectory(dir=private) as scratch:
                     scratch = Path(scratch)
-                    env = adapter.attempt_env(profile, args.runtime, args.mode, args.reduced, scratch)
+                    env = adapter.attempt_env(profile, args.runtime, spark, args.mode, args.reduced, scratch)
                     env.update(identity, CLUSTER_NAME=tag, IDLE_TIMEOUT="390", NUM_WORKERS="0", DB_ZONE="auto")
                     print(f"DBR {args.runtime}, {args.mode}: {label}", flush=True)
                     result = subprocess.run([sys.executable, "-EsB", str(DB / "fallback-config.py")],
@@ -228,7 +235,7 @@ def run_row(args, adapter):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("run", "cleanup"))
-    parser.add_argument("--runtime", required=True, choices=("17.3", "18.3"))
+    parser.add_argument("--runtime", required=True, type=runtime_label)
     parser.add_argument("--mode", required=True, choices=("CI_PART1", "CI_PART2"))
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--candidate", type=Path)
@@ -236,7 +243,6 @@ def main():
     parser.add_argument("--reduced", action="store_true")
     args = parser.parse_args()
     # The worker invokes this script with python -I from a trusted checkout.
-    sys.path.insert(0, str(HERE))
     import workload
 
     def interrupt(signum, _frame):

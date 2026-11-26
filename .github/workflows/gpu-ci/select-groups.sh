@@ -3,26 +3,31 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
-revisions=(--base "$BASE_SHA" --merge "$MERGE_SHA")
-if [[ $SELECT_OUTCOME != success || -z $SUITES ]]; then
-  echo "::warning::Could not establish changed-file scope; running all configured GPU suites"
-  SUITES=$(jq -ce '[.suites | to_entries[] | select(.value.enabled != false) | .key] | select(length > 0)' .github/gpu-ci-suites.json)
-  revisions=()
+candidate=${1:?candidate checkout}
+base=${2:?base SHA}
+merge=${3:?merge SHA}
+if [[ ! $base =~ ^[0-9a-f]{40}$ || ! $merge =~ ^[0-9a-f]{40}$ || $(git -C "$candidate" rev-parse HEAD) != "$merge" ]]; then
+  echo "GPU selection does not match the candidate checkout" >&2
+  exit 1
 fi
-if [[ $SUITES == '[]' ]]; then
-  # A docs-only result must belong to the original merge, even if the base moved.
-  gh api "repos/$GITHUB_REPOSITORY/pulls/${GITHUB_REF_NAME#pull-request/}" |
-    jq -e '.state == "open" and .head.sha == env.GITHUB_SHA and .base.ref == env.BASE and
-      .base.sha == env.BASE_SHA and .merge_commit_sha == env.MERGE_SHA' >/dev/null ||
-    { echo "::error::Cannot confirm the current PR merge for the no-test decision"; exit 1; }
-  exit 0
+control=$(cd "$(dirname "$0")" && pwd)
+catalog="$candidate/.github/gpu-ci-suites.json"
+selector="${GITHUB_WORKSPACE:?}/common/workflow-suite-selector/index.js"
+# Use both paths of a rename; only read candidate files, never load candidate modules.
+if suites=$(git -C "$candidate" diff --no-renames --no-ext-diff --no-textconv --ignore-submodules=none \
+    --name-only -z "$base" "$merge" -- | node -e '
+      const fs = require("node:fs"), select = require(process.argv[1]).selectSuites;
+      const paths = fs.readFileSync(0, "utf8").split("\0").filter(Boolean);
+      console.log(JSON.stringify(select(paths.map(filename => ({filename})), JSON.parse(fs.readFileSync(process.argv[2])))));
+    ' "$selector" "$catalog"); then
+  set -- --base "$base" --merge "$merge"
+else
+  echo "Could not establish changed-file scope; selecting all enabled GPU suites" >&2
+  suites=$(jq -ce '[.suites | to_entries[] | select(.value.enabled != false) | .key]' "$catalog")
+  set --
 fi
-matrix=$(python3 .github/workflows/gpu-ci/groups.py "$SUITES" ${revisions[@]+"${revisions[@]}"})
-jq -er '.include[] | .group + " (" + .arch + "): " + ((.targets // ["full group"]) | join(", "))' \
-  <<< "$matrix" >> "$GITHUB_STEP_SUMMARY"
-echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-for scala in 2.12 2.13; do
-  mode=$(jq -er --arg scala "$scala" '[.include[] | select(.scala == $scala and .arch == "amd64") | .kind]
-    | if length == 0 then "none" elif index("integration") then "integration" else "unit" end' <<< "$matrix")
-  echo "cache${scala/./}=$mode" >> "$GITHUB_OUTPUT"
-done
+if [[ $suites == '[]' ]]; then
+  echo '{"include":[]}'
+else
+  python3 -I "$control/groups.py" "$suites" --repo "$candidate" "$@"
+fi

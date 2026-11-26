@@ -16,8 +16,8 @@ s = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s)
 
 
-def cluster(profile="aws2", **overrides):
-    name = f"gha-42-1-17.3-CI_PART2-{profile}-1"
+def cluster(profile="aws2", runtime="17.3", **overrides):
+    name = f"gha-42-1-{runtime}-CI_PART2-{profile}-1"
     return dict({"cluster_id": "offline-1", "cluster_name": name, "creator_user_name": "ci",
                  "custom_tags": s.managed_tags(profile, name), "state": "RUNNING"}, **overrides)
 
@@ -122,6 +122,14 @@ class CleanupOrphansTest(unittest.TestCase):
                         s.sweep(db, Mock(side_effect=[self.wf, run()]), "aws2", "ci")
                     self.assertEqual([c.args[1] for c in db.call_args_list if c.args[0] == "POST"],
                                      ["delete"] if after_terminate else [])
+
+    def test_retired_runtime_still_requires_exact_owner_and_terminal_run(self):
+        info = cluster(runtime="14.3", state="TERMINATED")
+        db = Mock(side_effect=[{"clusters": [info]}, info, {}, None])
+        self.assertEqual(s.sweep(db, self.gh, "aws2", "ci"), (1, 1))
+        for label in ("14.03", "14.3.x", "latest", "14.3/other"):
+            with self.subTest(label=label), self.assertRaises(s.SweepError):
+                s.ownership(cluster(runtime=label), "aws2", "ci")
 
     def test_404_idempotent_but_timeout_and_ambiguous_post_not_success(self):
         for remaining in ([None], [cluster(), None], [cluster(state="TERMINATED"), None]):

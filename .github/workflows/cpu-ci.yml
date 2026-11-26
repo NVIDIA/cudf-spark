@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Run the selected CPU checks after the copy bot approves a PR revision.
+# Run the selected CPU checks on copied PR branches.
 name: CPU CI
 
 on:
@@ -34,7 +34,7 @@ jobs:
       maven: ${{ steps.maven.outputs.mode }}
       required: ${{ steps.required.outputs.jobs }}
     steps:
-      - name: Resolve the approved PR merge
+      - name: Resolve the PR revision
         id: pr
         uses: actions/github-script@v9
         with:
@@ -93,7 +93,7 @@ jobs:
   maven:
     name: Maven Verify
     needs: select
-    # Other PR bases retain their existing full Maven Verify, but only after approval.
+    # Other PR bases retain their existing full Maven Verify.
     if: needs.select.outputs.maven == 'full' || needs.select.outputs.cpu-scope == 'false'
     uses: ./.github/workflows/mvn-verify-check.yml
     with:

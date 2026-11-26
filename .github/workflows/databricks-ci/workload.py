@@ -7,16 +7,16 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import shlex
 import subprocess
 import tarfile
 from urllib.parse import urlsplit
 
+from runtimes import SPARK_VERSION, runtime_label
+
 
 DB = Path(__file__).resolve().parents[3] / "jenkins/databricks"
 SUBMODULES = {"thirdparty/parquet-testing", "thirdparty/spark-rapids-common"}
-SPARK = {"17.3": "4.0.0", "18.3": "4.1.0"}
 CLOUD = {"aws2": "aws", "aws": "aws", "azure3": "azure"}
 HOSTNAME = r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
 CLEAN_ENV = {"PATH": os.defpath, "LANG": "C", "GIT_CONFIG_NOSYSTEM": "1",
@@ -113,9 +113,10 @@ def private_file(path, text):
         f.write(text.rstrip("\n") + "\n")
 
 
-def attempt_env(profile, runtime, part, reduced, directory):
+def attempt_env(profile, runtime, spark, part, reduced, directory):
     creator_name(profile)  # Refuse new allocations when their owner cannot be verified by the sweeper.
-    if runtime not in SPARK or part not in ("CI_PART1", "CI_PART2") or type(reduced) is not bool:
+    runtime_label(runtime)
+    if not re.fullmatch(SPARK_VERSION, spark) or part not in ("CI_PART1", "CI_PART2") or type(reduced) is not bool:
         raise ValueError("Invalid Databricks test selection")
     cfg = profile_config(profile)
     directory = Path(directory).resolve()
@@ -154,7 +155,7 @@ def attempt_env(profile, runtime, part, reduced, directory):
             "DATABRICKS_WORKER": cfg["worker"], "DATABRICKS_PRIVKEY": str(key), "DATABRICKS_SSH_CONFIG": str(cfgfile),
             "DATABRICKS_SSH_CONFIG_ONLY": "1",
             "DATABRICKS_PUBKEY": key.with_suffix(".pub").read_text().strip(), "NUM_WORKERS": "0",
-            "DATABRICKS_RUNTIME": runtime + ".x-gpu-ml-scala2.13", "BASE_SPARK_VERSION": SPARK[runtime],
+            "DATABRICKS_RUNTIME": runtime + ".x-gpu-ml-scala2.13", "BASE_SPARK_VERSION": spark,
             "EXTRA_ENVS": f"TEST_MODE={part},REDUCED_IT={str(reduced).lower()}"}
 
 
@@ -194,50 +195,6 @@ print(total, skipped, failed)
     return 0 if total > skipped and failed == 0 else 1
 
 
-def stage_smoke_archive(remote, cache_dir):
-    # Use the same trusted catalog and filename as the warmer, not the DB runtime's Spark version.
-    reader = runpy.run_path(str(DB.parents[1] / ".github/actions/spark-archive-cache/archive.py"))
-    name, url, digest = reader["archive"]("2.13", "databricks-smoke")
-    target = f"{cache_dir}/{name}"
-    path = Path.home().resolve() / ".cache/cudf-spark/spark" / name
-
-    def stage(producer, source, timeout):
-        # A broken SSH stream or failed download must never leave a reusable partial tarball.
-        cmd = f"""set -eu
-umask 077
-mkdir -p {shlex.quote(cache_dir)}
-cd {shlex.quote(cache_dir)}
-if [ -f {name} ] && printf '%s  %s\\n' {digest} {name} | sha512sum -c -; then exit 0; fi
-[ ! -d {name} ]
-tmp=$(mktemp .spark.XXXXXXXX)
-trap 'rm -f -- "$tmp"' EXIT
-{producer}
-printf '%s  %s\\n' {digest} "$tmp" | sha512sum -c -
-mv -f "$tmp" {name}"""
-        return remote(cmd, source, timeout=timeout)
-
-    if os.environ.get("SPARK_CACHE_FILE") == str(path):
-        try:
-            reader["check_path"](path)
-            if path.is_file():
-                with path.open("rb") as source:
-                    if reader["stream_sha512"](source) == digest:
-                        source.seek(0)
-                        rc = stage('cat > "$tmp"', source, 600)
-                        if rc == 0:
-                            print(f"Verified prepared {name} on the driver.", flush=True)
-                            return 0, target
-                        print(f"Prepared Spark transfer failed (exit={rc}); trying Apache on the driver.", flush=True)
-        except (OSError, ValueError):
-            pass  # Cache availability is optional; a verified distribution is not.
-    print(f"Preparing {name} on the driver from the Apache release.", flush=True)
-    rc = stage(f'curl --fail --silent --show-error --location --proto =https --proto-redir =https '
-               f'--connect-timeout 15 --max-time 3600 -o "$tmp" {shlex.quote(url)}', None, 3660)
-    if rc:
-        print(f"Could not prepare the checksum-verified Spark smoke archive on the driver (exit={rc}).", flush=True)
-    return rc, target
-
-
 def run_workload(phase, env, cluster_id, directory, archive):
     """Send trusted launchers and source to the remote driver. No credentials enter the workload environment."""
     address = env["DATABRICKS_DRIVER_ADDRESS"]
@@ -250,7 +207,7 @@ def run_workload(phase, env, cluster_id, directory, archive):
     if not re.fullmatch(r"TEST_MODE=CI_PART[12],REDUCED_IT=(?:true|false)(?:" + re.escape(hook) + r")?", options):
         raise ValueError("Invalid remote test environment")
     version = env["BASE_SPARK_VERSION"]
-    if version not in SPARK.values():
+    if not re.fullmatch(SPARK_VERSION, version):
         raise ValueError("Unexpected Spark build version")
     ssh = ["ssh", "-F", env["DATABRICKS_SSH_CONFIG"], "-o", "ClearAllForwardings=yes",
            "-o", "ForwardAgent=no", "ubuntu@" + address]
@@ -269,18 +226,15 @@ def run_workload(phase, env, cluster_id, directory, archive):
 
     # Each cell builds its own artifact.
     home = "/home/ubuntu/"
-    remote_env = ["env", "BASE_SPARK_VERSION=" + version, "EXTRA_ENVS=" + options,
-                  "DBFS_CACHE_DIR=" + home + ".cache/spark-ci"]
+    remote_env = ["env", "BASE_SPARK_VERSION=" + version, "EXTRA_ENVS=" + options]
     if phase == "build":
         rc = upload(archive, home + "spark-rapids-ci.tgz") or upload(DB / "build.sh", home + "build.sh")
-        command = remote_env + ["SPARKSRCTGZ=" + home + "spark-rapids-ci.tgz", "MVN_OPT=",
+        command = remote_env + ["DBFS_CACHE_DIR=" + home + ".cache/spark-ci",
+                                "SPARKSRCTGZ=" + home + "spark-rapids-ci.tgz", "MVN_OPT=",
                                 "BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=" + version, "bash", home + "build.sh"]
     elif phase == "test":
         rc = (upload(DB / "test.sh", home + "test.sh")
               or upload(DB / "run-test-command.sh", home + "run-test-command.sh"))
-        if not rc and options.startswith("TEST_MODE=CI_PART1,"):
-            rc, smoke_path = stage_smoke_archive(remote, home + ".cache/spark-ci")
-            remote_env.append("SPARK_CACHE_FILE=" + smoke_path)
         command = ["bash", home + "run-test-command.sh", *remote_env,
                    "TEST_TYPE=pre-commit", "LOCAL_JAR_PATH=", "SPARK_CONF=", "bash", home + "test.sh"]
     else:

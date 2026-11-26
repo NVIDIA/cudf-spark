@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Use a compatible published native builder, or build the approved merge recipe locally."""
+"""Use a compatible published native builder, or build the PR's recipe locally."""
 
 import json
 import os

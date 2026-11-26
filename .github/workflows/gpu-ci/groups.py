@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sys
 import xml.etree.ElementTree as ET
 
 
@@ -71,11 +72,14 @@ def gpu_matrix(root, suites, base=None, merge=None):
 
 
 if __name__ == "__main__":
+    # Under python -I, load sibling impact helpers only from this workflow's checkout.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suites", type=json.loads)
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--base")
     parser.add_argument("--merge")
     args = parser.parse_args()
     if bool(args.base) != bool(args.merge):
         parser.error("--base and --merge must be supplied together")
-    print(json.dumps(gpu_matrix(Path.cwd(), args.suites, args.base, args.merge), separators=(",", ":")))
+    print(json.dumps(gpu_matrix(args.repo, args.suites, args.base, args.merge), separators=(",", ":")))

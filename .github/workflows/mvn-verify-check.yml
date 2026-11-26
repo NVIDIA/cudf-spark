@@ -19,7 +19,7 @@ on:
   workflow_call:
     inputs:
       merge-sha:
-        description: Exact approved PR merge to verify
+        description: PR revision to verify
         required: true
         type: string
       base-branch:

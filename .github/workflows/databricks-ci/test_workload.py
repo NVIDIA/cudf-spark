@@ -1,7 +1,6 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,7 +10,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import runtimes
 import workload
+
+
+def git(path, *args):
+    return subprocess.check_output(["git", "-C", str(path), *args], env={
+        **workload.CLEAN_ENV, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }, stderr=subprocess.DEVNULL, text=True).strip()
 
 
 class WorkloadTest(unittest.TestCase):
@@ -23,12 +30,6 @@ class WorkloadTest(unittest.TestCase):
     def test_only_pinned_blobs_are_archived(self):
         repo = self.tmp / "candidate"
         repo.mkdir()
-
-        def git(path, *args):
-            return subprocess.check_output(["git", "-C", str(path), *args], env={
-                **workload.CLEAN_ENV, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "test@example.invalid",
-                "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "test@example.invalid",
-            }, stderr=subprocess.DEVNULL, text=True).strip()
 
         git(repo, "init", "-q")
         for name in workload.SUBMODULES:
@@ -72,6 +73,38 @@ class WorkloadTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pinned revision"):
             workload.make_archive(repo, git(repo, "rev-parse", "HEAD"), archive)
 
+    def test_runtime_metadata_comes_from_enabled_profiles_and_pinned_provider_blobs(self):
+        git(self.tmp, "init", "-q")
+        pom = self.tmp / "scala2.13/pom.xml"
+        pom.parent.mkdir()
+        pom.write_text("""<project><properties>
+          <spark421db1910.version>4.2.1-databricks-1910</spark421db1910.version>
+          <spark410db183.version>4.1.0-databricks-183</spark410db183.version>
+          <spark500db201.version>5.0.0-databricks-201-SNAPSHOT</spark500db201.version>
+          <dyn.shim.excluded.releases>410db183</dyn.shim.excluded.releases>
+          </properties><profiles><profile><id>release421db1910</id>
+          <properties><spark.version>${spark421db1910.version}</spark.version></properties></profile>
+          <profile><id>release410db183</id></profile><profile><id>release500db201</id></profile>
+          </profiles></project>""")
+        provider = self.tmp / ("sql-plugin/src/main/spark421db1910/scala/com/nvidia/spark/rapids/"
+                               "shims/spark421db1910/SparkShimServiceProvider.scala")
+        provider.parent.mkdir(parents=True)
+        provider.write_text('  val VERSION = DatabricksShimVersion(4, 2, 1, "19.10")\n')
+        git(self.tmp, "add", ".")
+        git(self.tmp, "commit", "-qm", "supported")
+        pinned = git(self.tmp, "rev-parse", "HEAD")
+        for text, error in [
+                ('val VERSION = DatabricksShimVersion(4, 2, 0, "19.10")', "inconsistent"),
+                ('val VERSION = DatabricksShimVersion(4, 2, 1, "19.1")', "inconsistent"),
+                ('val VERSION = computeVersion()', "one explicit"),
+                (provider.read_text() * 2, "one explicit")]:
+            provider.write_text(text)
+            git(self.tmp, "commit", "-qam", "different publication")
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, error):
+                runtimes.discover(self.tmp, git(self.tmp, "rev-parse", "HEAD"))
+        # The workspace and newer commits cannot override the original request.
+        self.assertEqual(runtimes.discover(self.tmp, pinned), {"19.10": "4.2.1"})
+
     def test_provider_and_transport(self):
         profiles = {profile: {"host": "https://workspace.example.invalid", "driver": "driver", "creator_user_name": "ci",
                               "worker": "worker", "ssh_port": 2200} for profile in workload.CLOUD}
@@ -80,11 +113,14 @@ class WorkloadTest(unittest.TestCase):
         fake.update(DATABRICKS_PROFILES_JSON=json.dumps(profiles), DATABRICKS_JUMP_PRIVATE_KEY="fixture-jump-key",
                     DATABRICKS_JUMP_KNOWN_HOSTS="fixture-known-host", UNRELATED_SECRET="unrelated")
         with patch.dict(os.environ, fake, clear=True):
-            for i, (profile, runtime, part) in enumerate((
-                    ("aws2", "17.3", "CI_PART1"), ("aws", "18.3", "CI_PART2"), ("azure3", "17.3", "CI_PART2"))):
+            for i, (profile, runtime, spark, part) in enumerate((
+                    ("aws2", "17.3", "4.0.0", "CI_PART1"), ("aws", "18.3", "4.1.0", "CI_PART2"),
+                    ("azure3", "19.10", "4.2.1", "CI_PART2"))):
                 directory = self.tmp / str(i)
                 directory.mkdir(mode=0o700)
-                env = workload.attempt_env(profile, runtime, part, False, directory)
+                env = workload.attempt_env(profile, runtime, spark, part, False, directory)
+                self.assertEqual(env["BASE_SPARK_VERSION"], spark)
+                self.assertEqual(env["DATABRICKS_RUNTIME"], runtime + ".x-gpu-ml-scala2.13")
                 self.assertEqual(env["DATABRICKS_TOKEN"], "fixture-api-" + profile)
                 self.assertNotIn("UNRELATED_SECRET", env)
                 self.assertEqual(Path(env["DATABRICKS_PRIVKEY"]).stat().st_mode & 0o777, 0o600)
@@ -98,10 +134,13 @@ class WorkloadTest(unittest.TestCase):
                 with patch("subprocess.run") as proc, patch.object(workload, "check_pytest", return_value=0):
                     proc.return_value.returncode = 0
                     self.assertEqual(workload.run_workload("build", env, "owned", directory, archive), 0)
-                    self.assertNotIn("SPARK_CACHE_FILE=", repr(proc.call_args_list))
+                    self.assertIn("DBFS_CACHE_DIR=/home/ubuntu/.cache/spark-ci", proc.call_args.args[0][-1])
                     self.assertEqual(workload.run_workload("test", env, "owned", directory, archive), 0)
-                    self.assertEqual("SPARK_CACHE_FILE=" in repr(proc.call_args_list), part == "CI_PART1")
-                    self.assertEqual("archive.apache.org" in repr(proc.call_args_list), part == "CI_PART1")
+                    test_command = proc.call_args.args[0][-1]
+                    self.assertIn("bash /home/ubuntu/test.sh", test_command)
+                    self.assertNotIn("DBFS_CACHE_DIR=", test_command)
+                    self.assertNotIn("SPARK_CACHE_FILE=", test_command)
+                    self.assertNotIn("archive.apache.org", repr(proc.call_args_list))
                     for call in proc.call_args_list:
                         self.assertEqual(call.kwargs["env"], workload.CLEAN_ENV)
                         self.assertEqual(call.kwargs["stdout"], subprocess.DEVNULL)
@@ -116,56 +155,6 @@ class WorkloadTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         workload.run_workload("test", env, "owned", directory, archive)
                 self.assertNotIn("DATABRICKS_PRIVKEY", workload.cleanup_env(profile))
-
-    def test_smoke_archive_transfer_and_verified_cold_recovery(self):
-        helper = workload.runpy.run_path(str(workload.DB.parents[1] / ".github/actions/spark-archive-cache/archive.py"))
-        name, url, _ = helper["archive"]("2.13", "databricks-smoke")
-        content = b"public release fixture"
-        helper["archive"] = lambda *args: (name, url, hashlib.sha512(content).hexdigest())
-        cache = self.tmp / ".cache/cudf-spark/spark" / name
-        cache.parent.mkdir(parents=True)
-        cache.write_bytes(content)
-        release = self.tmp / "release"
-        release.write_bytes(content)
-        driver = self.tmp / "driver"
-        calls = []
-
-        def remote(command, source, timeout):
-            calls.append(source is not None)
-            # Exercise the generated shell including its digest check. The URL has no network access.
-            fixture = 'curl() { cp "$FIXTURE" "$tmp"; }\n'
-            return subprocess.run(["sh", "-c", fixture + command], stdin=source or subprocess.DEVNULL,
-                                  env={"PATH": os.defpath + ":/sbin", "FIXTURE": str(release)},
-                                  capture_output=True, timeout=timeout).returncode
-
-        with patch.object(workload.runpy, "run_path", return_value=helper), \
-                patch.dict(os.environ, {"HOME": str(self.tmp), "SPARK_CACHE_FILE": str(cache)}):
-            rc, target = workload.stage_smoke_archive(remote, str(driver))
-            self.assertEqual((rc, Path(target).read_bytes(), calls), (0, content, [True]))
-            Path(target).unlink()
-            calls.clear()
-
-            def broken_transfer(command, source, timeout):
-                if source is not None:
-                    calls.append(True)
-                    return 255
-                return remote(command, source, timeout)
-
-            rc, _ = workload.stage_smoke_archive(broken_transfer, str(driver))
-            self.assertEqual((rc, Path(target).read_bytes(), calls), (0, content, [True, False]))
-            Path(target).unlink()
-            calls.clear()
-            cache.write_bytes(b"bad restore")
-            release.write_bytes(b"corrupt download")
-            rc, _ = workload.stage_smoke_archive(remote, str(driver))
-            self.assertNotEqual(rc, 0)
-            self.assertEqual((calls, list(driver.iterdir())), ([False], []))
-            calls.clear()
-            cache.unlink()
-            cache.symlink_to(release)
-            release.write_bytes(content)
-            rc, _ = workload.stage_smoke_archive(remote, str(driver))
-            self.assertEqual((rc, Path(target).read_bytes(), calls), (0, content, [False]))
 
     def test_driver_output_is_bounded_and_never_treated_as_commands(self):
         for text, expected in (("3 1 0\n", 0), ("0 0 0\n", 1), ("1 1 0\n", 1), ("2 0 1\n", 1),

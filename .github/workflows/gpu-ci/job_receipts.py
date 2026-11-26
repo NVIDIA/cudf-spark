@@ -3,9 +3,6 @@
 
 """Verify the latest execution of each required matrix job on a selective rerun."""
 
-import json
-import os
-import subprocess
 import time
 
 
@@ -20,12 +17,12 @@ def passed(row, label):
         raise ValueError(f"{label}: {row['status']} / {row['conclusion']}; a passing execution is required")
 
 
-def require_jobs(run, current, names, *, prefix, steps, api, selection_attempt=1):
-    if not names or run < 1 or not 1 <= selection_attempt <= current:
+def require_jobs(run, current, steps, inactive, api, selection_attempt):
+    if not steps or run < 1 or not 1 <= selection_attempt <= current:
         raise ValueError("Invalid run, selection attempt or empty matrix")
     deadline = time.monotonic() + 90
     for retry in range(3):
-        needed = set(names)
+        needed = set(steps)
         try:
             # Newest execution wins. An explicit cancellation/failure must never borrow an older pass.
             for attempt in range(current, max(selection_attempt - 1, current - 32), -1):
@@ -46,15 +43,17 @@ def require_jobs(run, current, names, *, prefix, steps, api, selection_attempt=1
                 by_name = {}
                 for job in jobs:
                     name = job["name"]
-                    if name == "select" or name.startswith(prefix):
-                        if name in by_name or (name != "select" and name not in names):
+                    if name == "select" or name.startswith("Lane "):
+                        if name in inactive and (job["status"], job["conclusion"]) != ("completed", "skipped"):
+                            raise ValueError(f"Inactive route {name} did not skip in attempt {attempt}")
+                        if name in by_name or (name != "select" and name not in steps and name not in inactive):
                             raise ValueError(f"Duplicate or unexpected job {name} in attempt {attempt}")
                         by_name[name] = job
                 for name in needed.intersection(by_name):
                     job = by_name[name]
                     label = f"{name} in attempt {attempt}"
                     passed(job, label)
-                    for step in steps:
+                    for step in steps[name]:
                         matches = [s for s in job["steps"] if s["name"] == step]
                         if len(matches) != 1:
                             raise ValueError(f"{label}: expected one '{step}' step, found {len(matches)}")
@@ -73,19 +72,21 @@ def require_jobs(run, current, names, *, prefix, steps, api, selection_attempt=1
             time.sleep(2)
 
 
-def main():
-    def api(path, *, timeout):
-        return json.loads(subprocess.check_output(
-            ["gh", "api", f"repos/{os.environ['GITHUB_REPOSITORY']}/{path}"], timeout=timeout))
-
-    groups = [row["group"] for row in json.loads(os.environ["MATRIX"])["include"]]
-    if any(not isinstance(g, str) or not g for g in groups) or len(set(groups)) != len(groups):
-        raise ValueError("Invalid or duplicate selected GPU group")
-    prefix = "GPU tests / "
-    require_jobs(int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]),
-                 {prefix + group for group in groups}, prefix=prefix, steps=("Run the shim group",),
-                 selection_attempt=int(os.environ["SELECTION_ATTEMPT"]), api=api)
-
-
-if __name__ == "__main__":
-    main()
+def require_lanes(run, current, rows, *, api, selection_attempt=1):
+    steps, inactive, groups = {}, set(), set()
+    for row in rows:
+        group, kind = row["group"], row["kind"]
+        if not isinstance(group, str) or not group or group in groups:
+            raise ValueError("Invalid or duplicate selected GPU group")
+        groups.add(group)
+        standalone = f"Lane {group} / Standalone"
+        db = f"Lane {group} / Databricks"
+        if kind in ("unit", "integration"):
+            steps[standalone] = ("Run the shim group",)
+            inactive.update((db, db + " / Cell"))
+        elif kind == "databricks":
+            steps[db + " / Cell"] = ("Build and test on Databricks", "Confirm cluster cleanup")
+            inactive.add(standalone)
+        else:
+            raise ValueError(f"Unknown lane kind: {kind}")
+    require_jobs(run, current, steps, inactive, api, selection_attempt)

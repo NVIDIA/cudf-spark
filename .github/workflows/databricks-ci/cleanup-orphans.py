@@ -13,10 +13,13 @@ import time
 # The workflow uses python -I and checks out this directory from trusted main.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from attempts import MANAGER, PROVIDERS, REPO, WORKFLOW, managed_tags
+from runtimes import RUNTIME
 from workload import creator_name, profile_config
 
 
-OWNER = re.compile(r"gha-([1-9][0-9]{0,19})-([1-9][0-9]{0,3})-(17\.3|18\.3)-CI_PART[12]-(aws2|aws|azure3)-[12]")
+# A previously supported DBR can still own an orphan after its shim is retired.
+OWNER = re.compile(r"gha-([1-9][0-9]{0,19})-([1-9][0-9]{0,3})-"
+                   rf"({RUNTIME})-CI_PART[12]-(aws2|aws|azure3)-[12]")
 TERMINAL = {"success", "failure", "cancelled", "timed_out", "skipped", "neutral", "action_required",
             "stale", "startup_failure"}
 

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: GPU CI Databricks
+name: GPU CI validation
 on:
   workflow_run:
     workflows: ['GPU CI']
@@ -43,8 +43,10 @@ jobs:
       base: ${{ steps.plan.outputs.base }}
       head: ${{ steps.plan.outputs.head }}
       merge: ${{ steps.plan.outputs.merge }}
-      run: ${{ steps.plan.outputs.run }}
-      reduced: ${{ steps.plan.outputs.reduced_it }}
+      base-branch: ${{ steps.plan.outputs.base_branch }}
+      pull-number: ${{ steps.plan.outputs.pull_number }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      selection-attempt: ${{ steps.plan.outputs.selection_attempt }}
       policy: ${{ steps.plan.outputs.policy }}
     steps:
       - uses: *checkout
@@ -58,88 +60,54 @@ jobs:
           path: candidate
           fetch-depth: 2
           persist-credentials: false
+      - uses: *checkout
+        continue-on-error: true
+        if: steps.source.outputs.eligible == 'true'
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: common
+          sparse-checkout: workflow-suite-selector
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        continue-on-error: true
+        if: steps.source.outputs.eligible == 'true'
+        with: {node-version: '24', package-manager-cache: false}
       - id: plan
         run: python3 -I control/.github/workflows/databricks-ci/source.py --candidate candidate
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_MERGE: ${{ steps.source.outputs.merge }}
 
-  databricks:
-    name: DBR ${{ matrix.runtime }} / ${{ matrix.mode }}
+  lane:
+    name: Lane ${{ matrix.group }}
     needs: select
-    if: needs.select.outputs.run == 'true'
-    runs-on:
-      group: ${{ vars.DATABRICKS_CI_RUNNER_GROUP }}
-    environment: databricks-ci
+    if: needs.select.outputs.matrix != '' && needs.select.outputs.matrix != '{"include":[]}'
+    # Only validated registrations compete; a manual retry does not displace a newer automatic run.
     concurrency:
-      group: db-cell-${{ github.event.workflow_run.head_branch }}-${{ matrix.runtime }}-${{ matrix.mode }}
-      cancel-in-progress: false
-    # Observed cells reached 214 minutes; allow startup retries and a separate cleanup window.
-    timeout-minutes: 380
-    permissions: {contents: read, actions: read, pull-requests: read}
+      group: gpu-validation-${{ needs.select.outputs.pull-number }}-${{ matrix.group }}-${{ (github.run_attempt > 1 || github.event.workflow_run.run_attempt > 1) && github.run_id || 'auto' }}
+      cancel-in-progress: true
     strategy:
       fail-fast: true
-      matrix:
-        runtime: ['17.3', '18.3']
-        mode: [CI_PART1, CI_PART2]
-    env:
-      DB_RUNTIME: ${{ matrix.runtime }}
-      DB_MODE: ${{ matrix.mode }}
-      EXPECTED_BASE: ${{ needs.select.outputs.base }}
-      EXPECTED_HEAD: ${{ needs.select.outputs.head }}
-      EXPECTED_MERGE: ${{ needs.select.outputs.merge }}
-      EXPECTED_POLICY: ${{ needs.select.outputs.policy }}
-      EXPECTED_REDUCED: ${{ needs.select.outputs.reduced }}
-    steps:
-      - uses: *checkout
-        with: {ref: '${{ github.sha }}', path: control, persist-credentials: false}
-      - uses: *checkout
-        with: {ref: '${{ needs.select.outputs.merge }}', path: candidate, fetch-depth: 2, persist-credentials: false}
-      - name: Verify approval and prepare pinned source
-        env: {GH_TOKEN: '${{ github.token }}'}
-        run: |
-          python3 -I control/.github/workflows/databricks-ci/source.py --candidate candidate
-          python3 -I control/.github/workflows/databricks-ci/prior-cleanup.py --runtime "$DB_RUNTIME" --mode "$DB_MODE"
-          python3 -I -c 'import requests'
-          bash control/.github/workflows/databricks-ci/submodules.sh candidate
-      - name: Restore the upstream smoke-test Spark binary
-        id: spark
-        if: matrix.mode == 'CI_PART1'
-        timeout-minutes: 10
-        continue-on-error: true
-        uses: ./control/.github/actions/spark-archive-cache
-        with: {scala: '2.13', distribution: databricks-smoke}
-      - name: Build and test the approved merge on Databricks
-        id: attempts
-        timeout-minutes: 330
-        env: &db-credentials
-          DATABRICKS_PROFILES_JSON: ${{ vars.DATABRICKS_PROFILES_JSON }}
-          DATABRICKS_AWS2_TOKEN: ${{ secrets.DATABRICKS_AWS2_TOKEN }}
-          DATABRICKS_AWS_TOKEN: ${{ secrets.DATABRICKS_AWS_TOKEN }}
-          DATABRICKS_AZURE3_TOKEN: ${{ secrets.DATABRICKS_AZURE3_TOKEN }}
-          DATABRICKS_JUMP_PRIVATE_KEY: ${{ secrets.DATABRICKS_JUMP_PRIVATE_KEY }}
-          DATABRICKS_JUMP_KNOWN_HOSTS: ${{ secrets.DATABRICKS_JUMP_KNOWN_HOSTS }}
-          SPARK_CACHE_FILE: ${{ steps.spark.outputs.path }}
-        run: |
-          args=()
-          if [[ $EXPECTED_REDUCED == true ]]; then args+=(--reduced); fi
-          python3 -I control/.github/workflows/databricks-ci/attempts.py run \
-            --runtime "$DB_RUNTIME" --mode "$DB_MODE" --candidate candidate --merge-sha "$EXPECTED_MERGE" \
-            --state-dir "$RUNNER_TEMP/db-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DB_RUNTIME-$DB_MODE" "${args[@]}"
-      - name: Confirm cluster cleanup
-        if: always() && steps.attempts.outcome != 'skipped' && steps.attempts.outcome != ''
-        timeout-minutes: 15
-        env: *db-credentials
-        run: |
-          python3 -I control/.github/workflows/databricks-ci/attempts.py cleanup \
-            --runtime "$DB_RUNTIME" --mode "$DB_MODE" \
-            --state-dir "$RUNNER_TEMP/db-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DB_RUNTIME-$DB_MODE"
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[]}') }}
+    uses: ./.github/workflows/gpu-ci-lane.yml
+    permissions: {contents: read, actions: write, pull-requests: read}
+    with:
+      row: ${{ toJSON(matrix) }}
+      base-branch: ${{ needs.select.outputs.base-branch }}
+      base-sha: ${{ needs.select.outputs.base }}
+      head-sha: ${{ needs.select.outputs.head }}
+      merge-sha: ${{ needs.select.outputs.merge }}
+      pull-number: ${{ needs.select.outputs.pull-number }}
+      approval-run-id: ${{ format('{0}', github.event.workflow_run.id) }}
+      approval-run-attempt: ${{ format('{0}', github.event.workflow_run.run_attempt) }}
+      title-policy: ${{ needs.select.outputs.policy }}
 
   result:
     if: >-
       always() && github.repository == 'NVIDIA/cudf-spark' &&
       github.event.action == 'completed' && github.event.workflow_run.actor.login == 'copy-pr-bot[bot]'
-    needs: [select, databricks]
+    needs: [select, lane]
     concurrency: *status-lock
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -147,13 +115,14 @@ jobs:
     steps:
       - uses: *checkout
         with: {ref: '${{ github.sha }}', persist-credentials: false}
-      - name: Report the combined GPU CI gate on the tested PR merge
+      - name: Report GPU CI result
         run: python3 -I .github/workflows/databricks-ci/source.py --status result
         env:
           GH_TOKEN: ${{ github.token }}
           PLAN_RESULT: ${{ needs.select.result }}
-          DB_RESULT: ${{ needs.databricks.result }}
-          DB_SELECTED: ${{ needs.select.outputs.run }}
+          LANE_RESULT: ${{ needs.lane.result }}
+          MATRIX: ${{ needs.select.outputs.matrix }}
+          SELECTION_ATTEMPT: ${{ needs.select.outputs.selection-attempt }}
           EXPECTED_BASE: ${{ needs.select.outputs.base }}
           EXPECTED_HEAD: ${{ needs.select.outputs.head }}
           EXPECTED_MERGE: ${{ needs.select.outputs.merge }}

@@ -3,12 +3,13 @@
     ".github/workflows/cpu-ci.yml",
     ".github/workflows/cpu-ci.sh",
     ".github/workflows/databricks-ci.yml",
+    ".github/workflows/databricks-ci-cell.yml",
     ".github/workflows/databricks-cleanup.yml",
     ".github/workflows/databricks-ci/",
+    ".github/workflows/gpu-ci.yml",
+    ".github/workflows/gpu-ci-lane.yml",
     ".github/workflows/gpu-ci/job_receipts.py",
-    "jenkins/databricks/",
-    ".github/actions/spark-archive-cache/archive.py",
-    ".github/actions/spark-archive-cache/releases.json"
+    "jenkins/databricks/"
   ],
   "cluster": {
     "include_regex": [

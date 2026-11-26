@@ -15,9 +15,10 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # Trusted checkout, including under python -I.
 from attempts import PROVIDERS, REPO, WORKFLOW
+from runtimes import runtime_label
 
 JANITOR = ".github/workflows/databricks-cleanup.yml"
-BUILD = "Build and test the approved merge on Databricks"
+BUILD = "Build and test on Databricks"
 CLEANUP = "Confirm cluster cleanup"
 RECONCILE = "Reconcile only clusters owned by finished GHA attempts"
 PROFILES = {f"reconcile ({profile})" for profile in PROVIDERS}
@@ -79,8 +80,11 @@ def reconciled(get, after):
     return False
 
 
-def verify(get, run, attempt, cell):
+def verify(get, run, attempt, runtime, mode):
     require(run > 0 and 1 <= attempt <= 32, "Invalid run or more than 31 previous attempts to check")
+    runtime_label(runtime)
+    require(mode in ("CI_PART1", "CI_PART2"), "Unknown Databricks test part")
+    cell = f"Lane db-{runtime}-part{mode[-1]} / Databricks / Cell"
     if attempt == 1:
         return
     current = get(f"actions/runs/{run}")
@@ -92,7 +96,13 @@ def verify(get, run, attempt, cell):
         history = jobs(get, run, n)
         require(history, f"No job history for controller attempt {n}")
         row = named(history, cell)
-        if not row:  # Failed-only reruns omit successful siblings.
+        if not row:
+            select = named(history, "select")
+            # A failed-only rerun can omit siblings. A full selection must account for the cell.
+            if n == 1 or select:
+                require(select.get("status") == "completed" and
+                        select.get("conclusion") in ("failure", "cancelled", "skipped", "timed_out"),
+                        f"Missing Actions record for {cell}, attempt {n}; prior allocation cannot be verified")
             continue
         require(row["status"] == "completed" and row["conclusion"] in TERMINAL,
                 f"Unknown prior result for {cell}, attempt {n}")
@@ -120,7 +130,7 @@ def verify(get, run, attempt, cell):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runtime", required=True, choices=("17.3", "18.3"))
+    parser.add_argument("--runtime", required=True, type=runtime_label)
     parser.add_argument("--mode", required=True, choices=("CI_PART1", "CI_PART2"))
     args = parser.parse_args()
     require(os.environ["GITHUB_REPOSITORY"] == REPO and os.environ["GITHUB_EVENT_NAME"] == "workflow_run"
@@ -135,8 +145,7 @@ def main():
         return json.loads(subprocess.check_output(["gh", "api", "--method", "GET", f"repos/{REPO}/{path}"],
                                                   timeout=min(15, remaining)))
 
-    verify(get, int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]),
-           f"DBR {args.runtime} / {args.mode}")
+    verify(get, int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]), args.runtime, args.mode)
 
 
 if __name__ == "__main__":

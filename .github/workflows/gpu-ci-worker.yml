@@ -31,7 +31,7 @@ jobs:
       GROUP: ${{ fromJSON(inputs.workload).group }}
       KIND: ${{ fromJSON(inputs.workload).kind }}
     steps:
-      - name: Check coordinator and approved source
+      - name: Verify coordinator and source
         uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
         with:
           request-id: ${{ inputs.request-id }}
@@ -41,43 +41,37 @@ jobs:
           source-sha: ${{ inputs.source-sha }}
 
       # No candidate code or checkout until the coordinator, runner and live PR all match.
-      - name: Check worker definition and current PR merge
+      - name: Locate controller code
+        id: controller
         uses: actions/github-script@v9
         env:
-          SOURCE_REF: ${{ inputs.source-ref }}
-          SOURCE_SHA: ${{ inputs.source-sha }}
           PARENT: ${{ inputs.parent-run-id }}
-          WORKLOAD: ${{ inputs.workload }}
-          WORKER_MINUTES: *worker-minutes
         with:
           script: |
-            const w = JSON.parse(process.env.WORKLOAD);
-            const match = /^refs\/heads\/pull-request\/([1-9]\d*)$/.exec(context.ref);
-            if (!match || context.ref !== process.env.SOURCE_REF || context.sha !== process.env.SOURCE_SHA ||
-                typeof w['parallel-ut'] !== 'boolean') {
-              throw new Error('Expected an approved copied head and a boolean parallel-ut setting');
-            }
-            const arch = w.arch === undefined ? 'amd64' : w.arch;
-            const native = arch === 'amd64' ? 'X64' : arch === 'arm64' ? 'ARM64' : null;
-            if (!native || process.env.RUNNER_ARCH !== native) {
-              throw new Error(`GPU workload architecture ${arch} does not match runner ${process.env.RUNNER_ARCH}`);
-            }
-            core.exportVariable('GPU_ARCH', arch);
             const {data: parent} = await github.rest.actions.getWorkflowRun({
               ...context.repo, run_id: Number(process.env.PARENT),
             });
-            if (parent.path !== '.github/workflows/gpu-ci.yml' || parent.event !== 'push' ||
-                parent.head_branch !== context.ref.slice('refs/heads/'.length) || parent.head_sha !== context.sha) {
-              throw new Error('Dispatch does not belong to the GPU CI coordinator for this copied head');
-            }
-            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: Number(match[1])});
-            if (pr.state !== 'open' || pr.head.sha !== context.sha || pr.base.ref !== w['base-branch'] ||
-                pr.base.sha !== w['base-sha'] || !/^[0-9a-f]{40}$/.test(w['merge-sha']) ||
-                pr.merge_commit_sha !== w['merge-sha']) {
-              throw new Error('PR head, base or merge commit changed; rerun for the current PR');
-            }
-            // Budget includes checkout, image pull and restore. Leave time for cleanup and upload.
-            core.exportVariable('GPU_DEADLINE', Math.floor(Date.now() / 1000) + (Number(process.env.WORKER_MINUTES) - 30) * 60);
+            if (parent.path !== '.github/workflows/databricks-ci.yml' || parent.event !== 'workflow_run' ||
+                parent.head_branch !== 'main' || parent.head_repository?.full_name !== process.env.GITHUB_REPOSITORY ||
+                !/^[0-9a-f]{40}$/.test(parent.head_sha)) throw new Error('Invalid GPU CI controller');
+            core.setOutput('sha', parent.head_sha);
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.controller.outputs.sha }}
+          path: control
+          sparse-checkout: |
+            .github/workflows/gpu-ci/standalone.py
+            .github/workflows/databricks-ci/source.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Check PR revision
+        env:
+          SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          WORKLOAD: ${{ inputs.workload }}
+          WORKER_MINUTES: *worker-minutes
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I control/.github/workflows/gpu-ci/standalone.py worker
 
       - name: Checkout tested merge and pinned submodules
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -96,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$(git rev-parse HEAD)" != "$MERGE_SHA" || "$(git show -s --format=%P HEAD)" != "$BASE_SHA $HEAD_SHA" ]]; then
-            echo "::error::Checked-out revision or parents do not match the approved PR merge."
+            echo "::error::Checkout does not match the expected revision and parents."
             exit 1
           fi
           bash .github/workflows/gpu-ci/verify-group.sh
@@ -123,16 +117,31 @@ jobs:
           IMAGE_CONFIG: ${{ steps.image.outputs.build }}
         run: bash .github/workflows/gpu-ci/build-local-image.sh
 
+      - name: Identify Maven cache
+        id: key
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          IMAGE: ${{ steps.local-image.outputs.image || steps.image.outputs.image }}
+          BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
+          INPUT_HASH: >-
+            ${{ hashFiles('**/pom.xml', 'build/get_buildvers.py', 'dist/build/package-parallel-worlds.py',
+                          'scripts/get_iceberg_versions.py', '.github/actions/maven-cache/*.sh',
+                          '.github/actions/maven-cache/dependency-key.py',
+                          '.github/actions/maven-cache/action.yml',
+                          '.github/workflows/mvn-verify-check.yml', '.github/actions/maven-cache/settings.xml') }}
+          PREMERGE_HASH: ${{ hashFiles('integration_tests/run_unity_catalog_server.sh') }}
+        run: bash .github/workflows/gpu-ci/cache-key.sh >> "$GITHUB_OUTPUT"
       - name: Restore Maven dependencies
         id: cache
-        # Maven caches include native dependencies and must match the actual runner and Scala.
-        if: startsWith(fromJSON(inputs.workload).cache-key, format('spark-maven-{0}-{1}-{2}-', runner.os, runner.arch, env.SCALA))
+        if: steps.key.outcome == 'success' && steps.key.outputs.full != ''
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         timeout-minutes: 40
         with:
           path: ~/.m2/repository
-          key: ${{ fromJSON(inputs.workload).cache-key }}
+          key: ${{ env.KIND == 'integration' && steps.key.outputs.full || format('{0}-verify', steps.key.outputs.stem) }}
+          restore-keys: ${{ env.KIND == 'unit' && format('{0}-premerge-', steps.key.outputs.stem) || '' }}
       - name: Prepare verified Spark distribution for integration tests
         if: env.KIND == 'integration'
         id: spark
@@ -143,7 +152,7 @@ jobs:
         id: test
         env:
           IMAGE: ${{ steps.local-image.outputs.image || steps.image.outputs.image }}
-          CACHE_HIT: ${{ steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit == 'true' && steps.cache.outputs.cache-matched-key == fromJSON(inputs.workload).cache-key }}
+          CACHE_HIT: ${{ steps.cache.outcome == 'success' && (steps.cache.outputs.cache-hit == 'true' || (env.KIND == 'unit' && startsWith(steps.cache.outputs.cache-matched-key, format('{0}-premerge-', steps.key.outputs.stem)))) }}
           PARALLEL_UT: ${{ fromJSON(inputs.workload).parallel-ut }}
           SHIMS: ${{ toJSON(fromJSON(inputs.workload).shims) }}
           SPARK_SHIM: ${{ fromJSON(inputs.workload).shim }}

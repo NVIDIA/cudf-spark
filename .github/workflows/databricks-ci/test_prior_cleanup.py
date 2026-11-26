@@ -9,7 +9,7 @@ spec = importlib.util.spec_from_file_location("prior_cleanup", Path(__file__).wi
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
-CELL = "DBR 17.3 / CI_PART1"
+CELL = "Lane db-17.3-part1 / Databricks / Cell"
 START = "2025-01-01T00:00:00Z"
 END = "2025-01-01T01:00:00Z"
 LATER = "2025-01-01T02:00:00Z"
@@ -48,10 +48,10 @@ class PriorCleanupTest(unittest.TestCase):
                      self.sweep_jobs: listing(*self.swept)}
 
     def verify(self, attempt=2):
-        guard.verify(self.data.__getitem__, 1, attempt, CELL)
+        guard.verify(self.data.__getitem__, 1, attempt, "17.3", "CI_PART1")
 
     def test_first_or_no_allocation_or_confirmed_cleanup_needs_no_janitor(self):
-        guard.verify(lambda _: self.fail("first attempt made an API call"), 1, 1, CELL)
+        guard.verify(lambda _: self.fail("first attempt made an API call"), 1, 1, "17.3", "CI_PART1")
         del self.data[WORKFLOW_RUNS], self.data["actions/runs/1/attempts/1"]
         for row in (job(name="select"), job(outcome="success"), job(outcome="skipped"),
                     dict(job(outcome="cancelled"), started_at=None, runner_id=0),
@@ -60,6 +60,21 @@ class PriorCleanupTest(unittest.TestCase):
             with self.subTest(row=row):
                 self.data[self.controller_jobs] = listing(row)
                 self.verify()
+
+    def test_missing_cell_after_unknown_or_successful_selection_blocks_rerun(self):
+        sibling = job(name="Lane db-17.3-part2 / Databricks / Cell")
+        for rows in (listing(job(name="result")), listing(job(name="select", outcome="success")),
+                     listing(job(name="select", outcome="neutral")), listing(job(name="select", outcome=None)),
+                     listing(job(name="select", outcome="success"), sibling)):
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, "Missing Actions record"):
+                self.data[self.controller_jobs] = rows
+                self.verify()
+        self.current["run_attempt"] = 3
+        self.data[self.controller_jobs] = listing(job(outcome="success"))
+        self.data["actions/runs/1/attempts/2/jobs?per_page=100"] = listing(
+            job(attempt=2, name="select", outcome="success"))
+        with self.assertRaisesRegex(ValueError, "attempt 2"):
+            self.verify(3)
 
     def test_failed_only_retry_cannot_hide_an_earlier_unconfirmed_allocation(self):
         self.current["run_attempt"] = 3

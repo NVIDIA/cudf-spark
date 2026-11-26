@@ -114,14 +114,3 @@ class SparkArchiveTest(unittest.TestCase):
             self.assertTrue(url.startswith("https://archive.apache.org/dist/spark/spark-"))
             self.assertTrue(url.endswith("/" + name))
             self.assertRegex(digest, r"^[0-9a-f]{128}$")
-
-    def test_databricks_smoke_requires_explicit_scala_213_opt_in(self):
-        name = "spark-3.5.0-bin-hadoop3-scala2.13.tgz"
-        expected = archive.archive("2.13", "databricks-smoke")
-        self.assertEqual(expected[:2], (name, "https://archive.apache.org/dist/spark/spark-3.5.0/" + name))
-        self.assertRegex(expected[2], r"^[0-9a-f]{128}$")
-        for scala, version in (("2.12", "3.3.0"), ("2.13", "4.0.1")):
-            self.assertEqual(archive.archive(scala), archive.archive(scala, "standalone"))
-            self.assertEqual(archive.archive(scala)[0], f"spark-{version}-bin-hadoop3.tgz")
-        with self.assertRaisesRegex(ValueError, "Unsupported Spark distribution"):
-            archive.archive("2.12", "databricks-smoke")

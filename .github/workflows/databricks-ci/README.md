@@ -1,11 +1,10 @@
 # Databricks in GPU CI
 
-After standalone GPU CI passes, the trusted workflow on `main` checks the
-same approved merge. A `[databricks]` title or a Databricks path match selects
-DBR 17.3 and 18.3, both test parts. `[reduced-it]` changes the tests, not
+Selected Databricks cells run alongside standalone UT and IT.
+A `[databricks]` title or a Databricks path match
+selects both test parts for each supported DBR. `[reduced-it]` changes the tests, not
 selection; `[skip ci]` wins. A verified no-impact change needs no cluster.
-The combined **GPU CI gate** reports on the tested merge, not the controller's
-`main` commit. Reapprove the current revision if the tested merge changes.
+The combined **GPU CI gate** reports on the PR.
 
 [paths.json](paths.json) separates the CPU helper-test paths from the cluster
 selection rules. The controller reads the cluster rules from trusted `main`.
@@ -20,9 +19,7 @@ cleanup after a runner is lost. An independent [hourly cleanup](../databricks-cl
 rechecks the cluster's CI creator, ownership tags, name, profile and completed
 GitHub attempt before deleting it. It leaves active and unrelated clusters alone.
 
-Use **Re-run failed jobs** in the run linked from the gate. Standalone failures
-link to GPU CI; Databricks failures link to the four-cell Databricks run.
-Both GPU matrices stop on the first failure. If a required cancelled group
+Use **Re-run failed jobs** in the run linked from the gate. If a required cancelled group
 is not picked up on a failed-jobs rerun, use **Re-run all jobs**.
 If a previous cell's cleanup is unconfirmed, wait for a successful hourly
 reconciliation before retrying it.
@@ -42,8 +39,9 @@ reconciliation before retrying it.
   on the driver. Do not expose shared production storage, credentials or
   instance permissions there. The runner needs HTTPS access to the configured
   workspaces and SSH to their drivers, directly or via the pinned bastion.
-- Set the repository variable `DATABRICKS_CI_RUNNER_GROUP` to a dedicated
-  ephemeral Linux runner group restricted to the DB test and cleanup workflows on `main`. Install
+- Set `DATABRICKS_CI_RUNNER_GROUP` to a dedicated ephemeral Linux runner
+  group restricted to [the DB cell](../databricks-ci-cell.yml) and
+  [hourly cleanup](../databricks-cleanup.yml) on `main`. Install
   Git, GitHub CLI, OpenSSH, Bash, Python 3.9+ and Requests. Set
   `DATABRICKS_CI_ENABLED=true` only after these controls are in place.
   Missing configuration fails a required Databricks selection before allocation.

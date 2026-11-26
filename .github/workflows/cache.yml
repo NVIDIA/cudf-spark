@@ -64,8 +64,8 @@ jobs:
       github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
-    # A cold Apache archive can take two hour-long transfers; DB PART1 adds a second archive.
-    timeout-minutes: ${{ matrix.scala == '2.13' && vars.DATABRICKS_CI_ENABLED == 'true' && 360 || 210 }}
+    # A cold standalone Spark archive can take two hour-long transfers.
+    timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
@@ -97,13 +97,4 @@ jobs:
         uses: ./.github/actions/spark-archive-cache
         with:
           scala: ${{ matrix.scala }}
-          save: 'true'
-      - name: Warm upstream Spark for Databricks PART1
-        if: >-
-          !cancelled() && steps.checkout.outcome == 'success' && matrix.scala == '2.13' &&
-          vars.DATABRICKS_CI_ENABLED == 'true'
-        uses: ./.github/actions/spark-archive-cache
-        with:
-          scala: ${{ matrix.scala }}
-          distribution: databricks-smoke
           save: 'true'

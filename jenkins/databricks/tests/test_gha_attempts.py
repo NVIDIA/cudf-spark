@@ -31,6 +31,7 @@ class GhaAttemptsTest(unittest.TestCase):
                                       state_dir=self.root / "row", candidate=self.root / "candidate",
                                       merge_sha="a" * 40)
         self.adapter = Mock()
+        self.discover = self.enter(patch.object(attempts, "discover", return_value={"17.3": "4.0.0"}))
         self.adapter.attempt_env.side_effect = lambda *args: {"DATABRICKS_HOST": "synthetic"}
         self.adapter.cleanup_env.return_value = {"DATABRICKS_HOST": "synthetic"}
         self.adapter.run_workload.return_value = 0
@@ -109,10 +110,21 @@ class GhaAttemptsTest(unittest.TestCase):
         self.args.operation = "cleanup"
         self.run_row()
         self.run_row()
+        self.discover.assert_called_once_with(self.args.candidate, self.args.merge_sha)
         self.assertEqual(self.start, ["aws2-1"])
         self.adapter.cleanup_env.assert_called_once_with("aws2")
         self.assertFalse((self.args.state_dir / "aws2-1").exists())
         self.assertTrue((self.args.state_dir / "cleanup-complete").is_file())
+
+    def test_runtime_must_be_enabled_before_creating_any_attempt_state(self):
+        self.args.runtime = "19.10"
+        with self.assertRaisesRegex(attempts.Failure, "not enabled"):
+            self.run_row()
+        self.assertFalse(self.args.state_dir.exists())
+        self.assertFalse(self.adapter.mock_calls)
+        self.discover.return_value = {"19.10": "4.2.1"}
+        self.run_row()
+        self.assertEqual(self.adapter.attempt_env.call_args.args[:4], ("aws2", "19.10", "4.2.1", "CI_PART2"))
 
     def test_preparation_capacity_is_bounded_and_ordered(self):
         self.plan = [(75, "START", "allocated")] * 6
