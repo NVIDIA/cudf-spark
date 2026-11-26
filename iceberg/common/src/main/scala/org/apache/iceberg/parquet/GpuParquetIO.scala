@@ -18,9 +18,11 @@ package org.apache.iceberg.parquet
 
 import scala.collection.JavaConverters._
 
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
+import com.nvidia.spark.rapids.parquet.ParquetFooterUtils
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.Schema
 import org.apache.iceberg.io.InputFile
@@ -104,10 +106,27 @@ object GpuParquetIO {
   }
 
   /**
-   * Open a shaded `ParquetFileReader`. Footer caching is version-dependent and resolved via
-   * `IcebergShimUtils.openParquetReader`: 1.10.x overrides it to cache via `FileCache`, while
-   * 1.6.x / 1.9.x inherit the no-cache default (their shaded parquet has no way to inject a
-   * pre-parsed footer).
+   * Older Parquet versions cannot accept parsed metadata. Supply the cached footer at its
+   * original file offsets instead, preserving row-group offsets and split filtering. Copying
+   * the small footer to the heap lets the native cache buffer be released before construction,
+   * including when Parquet rejects the footer. The underlying stream is opened only on a body
+   * read (for example, a dictionary page).
+   */
+  def openReaderWithCachedFooter(
+      inputFile: IcebergInputFile,
+      filePath: Path,
+      options: ParquetReadOptions,
+      metrics: Map[String, GpuMetric]): ParquetFileReader = {
+    val footer = withResource(ParquetFooterUtils.getFooterBuffer(
+        inputFile, metrics,
+        ParquetFooterUtils.readFooterBufferFromInputFile(inputFile, filePath))) { buffer =>
+      ParquetFooterUtils.readBytesFromBuffer(buffer, 0, Math.toIntExact(buffer.getLength))
+    }
+    ParquetFileReader.open(new GpuParquetCachedFooterInputFile(inputFile, footer), options)
+  }
+
+  /**
+   * Open a shaded `ParquetFileReader` using the version-appropriate footer-cache adapter.
    */
   def openReader(
       inputFile: IcebergInputFile,
