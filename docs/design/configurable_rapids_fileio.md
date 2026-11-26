@@ -8,10 +8,35 @@ parent: Developer Overview
 
 **Status** Proposed for review. [Feature request #17025](https://github.com/NVIDIA/cudf-spark/issues/17025)
 
-An application may read a Parquet table from HDFS and write its results to S3 in the same Spark
-session. The application should be able to supply its S3 client while keeping the job's Hadoop
-configuration and credentials for HDFS. A session can select one implementation for all files or
-use the built-in `ResolvingRapidsFileIO` to select an implementation for each file it opens.
+## Current behavior
+
+For Spark file-source scans, the GPU Parquet and ORC readers construct `HadoopFileIO` directly
+from the job's Hadoop configuration. The shared GPU file-format writer does the same. A job can
+already read from HDFS and write to S3 when the corresponding Hadoop filesystems and credentials
+are configured. `HadoopFileIO` also provides optional optimized readers for S3 and GCS. The OSS
+Delta reader requires `HadoopFileIO` to open on-disk deletion vectors.
+
+## Proposed behavior
+
+A session can set `spark.sql.rapids.fileio.impl` to choose the `RapidsFileIO` that opens its
+Parquet and ORC data files and creates output files through the shared writer. A custom class can
+handle every such file. With `ResolvingRapidsFileIO`, each call to `newInputFile` or
+`newOutputFile` selects a delegate by URI scheme. For example, a job can route `s3://` files to
+its own S3 client while `hdfs://` files use the job's Hadoop configuration and credentials. A
+session that omits `impl` uses the existing `HadoopFileIO`. OSS Delta reads on-disk deletion
+vectors through the FileIO selected for the scan.
+
+Spark handles path discovery, schema inference, and output commits in both cases. Its filesystem
+and committer must recognize the job's locations even when RAPIDS opens the data through a custom
+client.
+
+### Iceberg table I/O is outside this RFC
+
+GPU reads and writes of an Iceberg table obtain the table's Iceberg `FileIO` from `Table.io()`
+and wrap it in `IcebergFileIO`. Iceberg's catalog and table configuration govern those reads and
+writes, including any credentials supplied by the catalog. A Parquet file read through an
+S3-backed Iceberg table uses the table's FileIO even when the session's resolver routes direct
+`s3://` Parquet reads to the class in `spark.sql.rapids.fileio.s3.impl`.
 
 ## Configuring one implementation
 
@@ -33,7 +58,6 @@ In this example the map contains exactly `key1=value1` and `key2=value2`. RAPIDS
 namespace and consumes the exact key `impl` to select the class. The map is read-only. Key spelling,
 dots inside option names, empty strings, and the original string values are preserved. The
 implementation owns option parsing and can use these options to load additional settings itself.
-Omitting the top-level `impl` selects the existing `HadoopFileIO` with the job's Hadoop configuration.
 
 ## Configuring multiple stores
 
@@ -71,12 +95,6 @@ when the scheme has no configured implementation.
 3. Resolve each URI in `newInputFile` and `newOutputFile`. Create each configured delegate
    on first use and share it across concurrent opens for that scheme within the resolver.
    Unregistered schemes share one Hadoop fallback.
-
-The configuration covers RAPIDS Parquet and ORC data reads and writes through the shared GPU
-file-format writer. OSS Delta on-disk deletion vectors use the scan's FileIO. Spark still owns
-path discovery, schema inference, and output commit operations, so its filesystem and committer
-must recognize the job's locations. Iceberg scans continue to use the catalog-provided FileIO
-and its credentials.
 
 Parquet dictionary and Bloom filter pruning can also read file data. For a configured custom
 FileIO or resolver, these reads use Parquet's input-file API. This path can read the footer a
