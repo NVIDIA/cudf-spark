@@ -1752,7 +1752,9 @@ def test_from_protobuf_malformed_input(
     rows = [(i, row) for i, row in enumerate(valid + [malformed, None])]
 
     def run_on_spark(spark):
-        df = spark.createDataFrame(rows, schema="idx int, bin binary")
+        # Keep the valid, malformed and null rows in one batch, so that hidden-field
+        # validation and the column trimming see them together.
+        df = spark.createDataFrame(rows, schema="idx int, bin binary").coalesce(1)
         decoded = _decode(from_protobuf_fn, desc, message, dict(options, mode=mode))
         return df.select("idx", *_select_paths(decoded, paths))
 
