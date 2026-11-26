@@ -123,10 +123,10 @@ trait DeltaRuntimeShim {
 
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
-  private val DeltaMajorMinor = """^(\d+)\.(\d+)\..*""".r
+  private val DELTA_MAJOR_MINOR = """^(\d+)\.(\d+)\..*""".r
 
   private def isDelta42Plus(deltaVersion: String): Boolean = deltaVersion match {
-    case DeltaMajorMinor(major, minor) =>
+    case DELTA_MAJOR_MINOR(major, minor) =>
       val maj = BigInt(major)
       maj > 4 || (maj == 4 && BigInt(minor) >= 2)
     case _ => false

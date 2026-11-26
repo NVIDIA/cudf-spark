@@ -22,6 +22,8 @@ package com.nvidia.spark.rapids.delta
 
 import java.lang.reflect.InvocationTargetException
 
+import com.nvidia.spark.rapids.RapidsConf
+import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar.mock
@@ -65,6 +67,11 @@ class DeltaProbeImplSuite extends AnyFunSuite {
     when(brokenFormatCheck.isSupportedFormat(classOf[FileFormat])).thenThrow(
       new NoClassDefFoundError("org/apache/spark/sql/delta/DeltaParquetFileFormat"))
     assert(DeltaProbeImpl.providerOrNoDelta(Some(brokenFormatCheck)) eq NoDeltaProvider)
+
+    val brokenDvCheck = mock[DeltaProvider]
+    when(brokenDvCheck.isPushDVPredicateDownEnabled(any(classOf[RapidsConf]))).thenThrow(
+      new NoClassDefFoundError("org/apache/spark/sql/delta/sources/DeltaSQLConf"))
+    assert(DeltaProbeImpl.providerOrNoDelta(Some(brokenDvCheck)) eq NoDeltaProvider)
 
     val fatalHook = mock[DeltaProvider]
     when(fatalHook.getStrategyRules).thenThrow(new OutOfMemoryError("test"))
