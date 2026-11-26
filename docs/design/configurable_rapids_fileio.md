@@ -10,26 +10,20 @@ parent: Developer Overview
 
 ## Background
 
-`RapidsFileIO` is the interface RAPIDS uses to create input and output files for GPU readers and
-writers. A Spark job can already read Parquet from HDFS and write its results to S3 when both
-Hadoop filesystems are configured.
+`RapidsFileIO` is the interface RAPIDS GPU readers and writers use to create input and output
+files. Today `HadoopFileIO` backs every non-Iceberg data-file path through this interface.
+These paths include Parquet and ORC file-source reads, writes through the shared GPU file-format
+writer, and reads of on-disk deletion vectors in open-source Delta Lake. `HadoopFileIO` uses
+the job's Hadoop configuration to access multiple filesystems and can select built-in optimized
+readers.
+
+Iceberg table reads and writes use `IcebergFileIO`, which wraps the table's own `FileIO`.
 
 ## Problem
 
-An application may need its own S3 client for those writes while using the job's Hadoop
-credentials for HDFS. Today, selecting a custom `RapidsFileIO` just for S3 requires a change
-to the plugin.
-
-## Current status
-
-The GPU Parquet and ORC file-source readers and the shared GPU file-format writer construct
-`HadoopFileIO` directly from the job's Hadoop configuration. It provides optional optimized
-readers for S3 and GCS. The open-source Delta Lake reader also requires `HadoopFileIO` to open
-on-disk deletion vectors.
-
-The draft implementation has passed CPU/GPU parity tests for Parquet and ORC and used an
-external Java FileIO to read two schemes in one GPU scan.
-[Implementation and test results](https://github.com/NVIDIA/cudf-spark/pull/17055)
+An application may need to use its own storage backend for some files and the job's configured
+Hadoop filesystems for others. Supplying a `RapidsFileIO` for that backend currently requires
+changing the plugin.
 
 ## Proposed design
 
@@ -112,8 +106,8 @@ also accepts the full class name `com.nvidia.spark.rapids.fileio.ResolvingRapids
   opens the data through a custom client.
 - **Iceberg tables.** Iceberg table I/O is outside this proposal. GPU reads and writes wrap
   `Table.io()` in `IcebergFileIO` and use the table's storage settings, including any credentials
-  supplied by the catalog. An S3-backed Iceberg table uses that FileIO even when the session
-  routes direct `s3://` Parquet reads to a custom class.
+  supplied by the catalog. An Iceberg table and a direct Parquet scan can therefore use different
+  clients for the same URI scheme in one session.
 - **Filtered Parquet scans.** A custom FileIO or resolver uses the selected input file for
   dictionary and Bloom filter pruning. This can read the footer a second time, including when
   the resolver falls back to Hadoop. The default `HadoopFileIO` path can reuse the parsed footer.
