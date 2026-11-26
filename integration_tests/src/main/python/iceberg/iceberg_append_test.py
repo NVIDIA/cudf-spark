@@ -29,9 +29,11 @@ from iceberg import (
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table,
     setup_iceberg_write_default_tables,
-    assert_iceberg_write_only_default_fallback)
+    assert_iceberg_write_only_default_fallback, setup_iceberg_fixed_default_table,
+    check_default_rows)
 from iceberg.defaults import (
-    assert_iceberg_default_file_parity, iceberg_default_file_snapshot, iceberg_file_hashes)
+    assert_iceberg_default_file_parity, assert_iceberg_gpu_writer,
+    iceberg_default_file_snapshot, iceberg_file_hashes)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
 from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
@@ -209,6 +211,44 @@ def test_iceberg_v3_write_default_evolution(spark_tmp_table_factory):
     assert_gpu_and_cpu_are_equal_collect(write, conf=conf)
     with_cpu_session(lambda spark: assert_iceberg_default_file_parity(
         spark, cpu_table, gpu_table), conf=conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                    reason="Remote catalogs can fail on binary/fixed initial defaults. "
+                           "See https://github.com/NVIDIA/cudf-spark/issues/17078.")
+@allow_non_gpu("LocalTableScanExec", "BatchScanExec", "ColumnarToRowExec")
+def test_iceberg_append_initial_only_default(spark_tmp_table_factory):
+    base = get_full_table_name(spark_tmp_table_factory)
+    cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
+    conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
+
+    def setup(spark):
+        for table in (cpu_table, gpu_table):
+            setup_iceberg_fixed_default_table(spark, table, initial_only=True)
+            field = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+                spark._jsparkSession, table).schema().findField("payload")
+            assert field.initialDefaultLiteral() is not None
+            assert field.writeDefaultLiteral() is None
+
+    with_cpu_session(setup)
+
+    def append_and_read(spark):
+        table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
+        assert_iceberg_gpu_writer(
+            spark,
+            lambda: spark.sql(
+                f"INSERT INTO {table} VALUES (2L, CAST(NULL AS BINARY)), (3L, X'0304')").collect(),
+            "GpuAppendDataExec")
+        # Reading the old row's unsupported fixed initial default must fall back independently
+        # of the GPU append above. The scan allowances cannot hide a CPU writer.
+        return spark.table(table).orderBy("id")
+
+    assert_gpu_and_cpu_are_equal_collect(
+        append_and_read, conf=conf,
+        result_canonicalize_func_before_compare=check_default_rows(
+            [(1, bytearray([1, 2])), (2, None), (3, bytearray([3, 4]))]))
 
 
 @iceberg

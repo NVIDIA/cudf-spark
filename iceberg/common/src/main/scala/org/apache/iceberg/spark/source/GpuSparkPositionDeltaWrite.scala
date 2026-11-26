@@ -189,7 +189,9 @@ object GpuSparkPositionDeltaWrite {
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
 
-    // The CPU write context can strip defaults; validate the authoritative table schema.
+    // As with appends, conservatively check table write defaults even for explicit inputs:
+    // Spark resolves omitted inputs before writing, and the write context can strip defaults.
+    // Footer conversion uses the actual write schema; initial defaults do not gate writes.
     // DELETE writes only file/position metadata, so table data defaults do not apply.
     val defaultsSchema = if (command == Command.DELETE) {
       GpuWriteContext.positionDeleteSchema

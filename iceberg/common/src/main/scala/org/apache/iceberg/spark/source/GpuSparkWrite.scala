@@ -294,6 +294,10 @@ object GpuSparkWrite {
     val table: Table = GpuSparkWriteAccess.table(cpuWrite)
     val partitionSpec = table.spec()
 
+    // Keep eligibility conservative at table scope: Spark resolves omitted inputs using table
+    // defaults before writing, and the write schema can lose that default metadata. This also
+    // rejects unsupported write defaults for explicit inputs. Footer conversion preserves only
+    // defaults in the actual write schema; initial defaults do not gate writes.
     IcebergFormatVersionSupport.tagForWriteSchema(table, table.schema(), meta)
     IcebergEncryptionSupport.tagForWrite(table, meta)
 
