@@ -64,6 +64,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   private var partialFileHandle: Option[SpillablePartialFileHandle] = None
   private var storageInitAttempted: Boolean = false
   private var forceFileOnly: Boolean = false
+  private var aborted: Boolean = false
 
   // Track completed partition count for predictive buffer sizing
   private var completedPartitionCount: Int = 0
@@ -128,7 +129,10 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   }
 
   // Try to initialize storage on first partition write
-  private def ensureStorageInitialized(): Unit = {
+  private def ensureStorageInitialized(): Unit = synchronized {
+    if (aborted) {
+      throw new IllegalStateException("Map output writer has been aborted")
+    }
     if (!storageInitAttempted) {
       storageInitAttempted = true
       outputTempFile = Utils.tempFileWith(outputFile)
@@ -219,12 +223,24 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   }
 
   override def abort(error: Throwable): Unit = {
-    partialFileHandle.foreach(_.close())
-    partialFileHandle = None
-    if (outputTempFile != null && outputTempFile.exists() && !outputTempFile.delete()) {
-      logWarning(s"Failed to delete temporary shuffle file at " +
-        s"${outputTempFile.getAbsolutePath}")
+    val (handleToClose, tempFileToDelete) = synchronized {
+      aborted = true
+      val handle = partialFileHandle
+      partialFileHandle = None
+      (handle, outputTempFile)
     }
+    handleToClose.foreach(_.close())
+    if (tempFileToDelete != null && tempFileToDelete.exists() && !tempFileToDelete.delete()) {
+      logWarning(s"Failed to delete temporary shuffle file at " +
+        s"${tempFileToDelete.getAbsolutePath}")
+    }
+  }
+
+  private def currentPartialFileHandle(): Option[SpillablePartialFileHandle] = synchronized {
+    if (aborted) {
+      throw new IllegalStateException("Map output writer has been aborted")
+    }
+    partialFileHandle
   }
 
   /**
@@ -282,13 +298,13 @@ class RapidsLocalDiskShuffleMapOutputWriter(
 
     override def write(b: Int): Unit = {
       verifyNotClosed()
-      partialFileHandle.foreach(_.write(b))
+      currentPartialFileHandle().foreach(_.write(b))
       count += 1
     }
 
     override def write(buf: Array[Byte], pos: Int, length: Int): Unit = {
       verifyNotClosed()
-      partialFileHandle.foreach(_.write(buf, pos, length))
+      currentPartialFileHandle().foreach(_.write(buf, pos, length))
       count += length
     }
 
@@ -327,7 +343,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
         val remaining = src.remaining()
         val temp = new Array[Byte](remaining)
         src.get(temp)
-        partialFileHandle.foreach(_.write(temp, 0, remaining))
+        currentPartialFileHandle().foreach(_.write(temp, 0, remaining))
         count += remaining
         remaining
       }

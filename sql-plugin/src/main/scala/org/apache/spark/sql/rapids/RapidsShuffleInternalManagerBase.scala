@@ -306,6 +306,22 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
   private var shuffleWriteRange: NvtxId = NvtxRegistry.THREADED_WRITER_WRITE.push()
 
+  private val activeBatchesLock = new Object
+  private val activeBatches = new ArrayBuffer[BatchState]()
+  @volatile private var aborted = false
+
+  override protected def onAbort(): Unit = {
+    val batchesToCancel = activeBatchesLock.synchronized {
+      aborted = true
+      val copy = activeBatches.toArray
+      activeBatches.clear()
+      copy
+    }
+    limiter.signalFailure(new IOException("Shuffle write aborted"))
+    // Wait for any in-flight BatchMerger step to finish before map output writers are aborted.
+    batchesToCancel.foreach(_.cancelMerger())
+  }
+
   // Case class for tracking partial sorted files in multi-batch scenario
   private case class PartialFile(
       handle: SpillablePartialFileHandle,
@@ -614,12 +630,25 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     val maxPartitionIdQueued = new AtomicInteger(-1)
     val merger = new BatchMerger(writer, partitionRecords, maxPartitionIdQueued)
 
-    BatchState(
+    val batch = BatchState(
       batchId,
       writer,
       partitionRecords,
       maxPartitionIdQueued,
       merger)
+    val alreadyAborted = activeBatchesLock.synchronized {
+      if (aborted) {
+        true
+      } else {
+        activeBatches += batch
+        false
+      }
+    }
+    if (alreadyAborted) {
+      batch.cancelMerger()
+      throw new IOException("Shuffle write aborted")
+    }
+    batch
   }
 
   override def write(records: Iterator[Product2[K, V]]): Unit = {
@@ -627,7 +656,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       shuffleId,
       mapId,
       numPartitions)
-    mapOutputWriters += mapOutputWriter  // Track for cleanup
+    registerMapOutputWriter(mapOutputWriter)  // Track for cleanup
 
     val partLengths = if (!records.hasNext) {
       val lengths = commitAllPartitions(mapOutputWriter, true)
@@ -703,7 +732,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
 
     try {
       var inputFetchStart = System.nanoTime()
-      while (records.hasNext) {
+      while (!aborted && records.hasNext) {
         val record = records.next()
         inputFetchTimeNs += System.nanoTime() - inputFetchStart
 
@@ -743,7 +772,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             shuffleId,
             mapId,
             numPartitions)
-          mapOutputWriters += newWriter  // Track for cleanup
+          registerMapOutputWriter(newWriter)  // Track for cleanup
           currentBatch = createBatchState(currentBatchId, newWriter)
 
           // Reset to -1 for new batch. This ensures the first record of the new batch
@@ -886,6 +915,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       // Account for the final hasNext call that returned false
       inputFetchTimeNs += System.nanoTime() - inputFetchStart
 
+      if (aborted) {
+        throw new IOException("Shuffle write aborted")
+      }
+
       // Mark end of last batch by setting maxPartitionIdQueued to numPartitions.
       // This signals the merger that all partitions have been queued.
       currentBatch.maxPartitionIdQueued.set(numPartitions)
@@ -929,6 +962,9 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     } finally {
       // Helper to cleanup a single batch
       def cleanupBatch(batch: BatchState): Unit = {
+        activeBatchesLock.synchronized {
+          activeBatches -= batch
+        }
         // Cancel merger completion and any currently scheduled step.
         batch.cancelMerger()
 
@@ -990,7 +1026,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
               shuffleId,
               mapId,
               numPartitions)
-            mapOutputWriters += finalMergeWriter
+            registerMapOutputWriter(finalMergeWriter)
 
             finalMergeWriter match {
               case rapidsWriter: RapidsLocalDiskShuffleMapOutputWriter =>

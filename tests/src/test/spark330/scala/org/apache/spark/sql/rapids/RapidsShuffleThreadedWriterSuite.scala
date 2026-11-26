@@ -1330,5 +1330,46 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     writeThread.join(3000)
     assert(!writeThread.isAlive,
       "Write thread should exit after stop(), merger thread may be stuck")
+    assert(writer.getBytesInFlight == 0L,
+      "Bytes in flight should be released after stop(false)")
+  }
+
+  test("concurrent stop(false) during multi-batch writes exits cleanly without crashing") {
+    // Regression test for #17081: stop(false) while BatchMerger steps are writing compressed
+    // records into SpillablePartialFileHandle must cancel active mergers before aborting writers.
+    (0 until 10).foreach { iter =>
+      val writer = createWriter()
+      val firstRecordQueued = new CountDownLatch(1)
+      val multiBatchIterator = new Iterator[(Int, ColumnarBatch)] {
+        private var count = 0
+        override def hasNext: Boolean = count < 200
+        override def next(): (Int, ColumnarBatch) = {
+          val id = count
+          count += 1
+          if (id == 1) {
+            firstRecordQueued.countDown()
+          }
+          // Partition ID wraps every 7 records to force multi-batch pipelining.
+          (id % 7, createTestBatch(id + 1))
+        }
+      }
+
+      val writeThread = new Thread(() => {
+        try {
+          writer.write(multiBatchIterator)
+        } catch {
+          case _: Throwable => // expected when aborted by stop(false)
+        }
+      }, s"concurrent-stop-writer-$iter")
+      writeThread.start()
+      assert(firstRecordQueued.await(5, TimeUnit.SECONDS))
+      Thread.sleep((iter % 5) * 5L)
+
+      writer.stop(false)
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, s"Write thread stuck after stop(false) on iteration $iter")
+      assert(writer.getBytesInFlight == 0L,
+        s"Bytes in flight leaked after stop(false) on iteration $iter")
+    }
   }
 }

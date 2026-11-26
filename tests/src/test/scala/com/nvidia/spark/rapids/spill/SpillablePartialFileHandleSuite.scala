@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.spill
 
 import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import com.nvidia.spark.rapids.Arm.withResource
@@ -797,6 +798,62 @@ class SpillablePartialFileHandleSuite
     withFinishedFileOnlyHandle() { (handle, _) =>
       assertThrows[IllegalStateException] {
         handle.releaseRead()
+      }
+    }
+  }
+
+  test("concurrent write and close on MEMORY_WITH_SPILL handle fails safely without crashing") {
+    val chunk = new Array[Byte](16 * 1024)
+    Arrays.fill(chunk, 0x5a.toByte)
+
+    (0 until 40).foreach { iter =>
+      val tempFile = File.createTempFile(s"test-concurrent-close-$iter-", ".tmp")
+      val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+        initialCapacity = 32 * 1024,
+        maxBufferSize = 1024 * 1024,
+        memoryThreshold = 0.99,
+        spillFile = tempFile)
+      val writingStarted = new CountDownLatch(1)
+      val unexpectedError = new AtomicReference[Throwable](null)
+
+      val writerThread = new Thread(() => {
+        try {
+          writingStarted.countDown()
+          var i = 0
+          while (i < 512) {
+            handle.write(chunk, 0, chunk.length)
+            i += 1
+          }
+        } catch {
+          case _: IllegalStateException => // expected once close() wins
+          case t: Throwable => unexpectedError.set(t)
+        }
+      }, s"partial-file-writer-$iter")
+
+      try {
+        writerThread.start()
+        assert(writingStarted.await(5, TimeUnit.SECONDS))
+        if (iter % 2 == 0) {
+          Thread.`yield`()
+        }
+        handle.close()
+        writerThread.join(5000)
+        assert(!writerThread.isAlive, s"writer thread stuck on iteration $iter")
+        assert(unexpectedError.get() == null,
+          s"unexpected error on iteration $iter: ${unexpectedError.get()}")
+        assert(handle.isPhysicallyClosed)
+        assert(!tempFile.exists(), s"temp file leaked on iteration $iter")
+        assertThrows[IllegalStateException] {
+          handle.write(chunk, 0, 16)
+        }
+        assertThrows[IllegalStateException] {
+          handle.write(1)
+        }
+      } finally {
+        handle.close()
+        if (tempFile.exists()) {
+          tempFile.delete()
+        }
       }
     }
   }

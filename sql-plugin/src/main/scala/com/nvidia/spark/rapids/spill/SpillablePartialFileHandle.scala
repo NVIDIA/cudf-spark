@@ -288,9 +288,13 @@ class SpillablePartialFileHandle private (
 
   /**
    * Write a single byte to the partial file.
-   * No synchronization needed: write phase is protected from spilling.
+   * Synchronized with close()/doClose() so the backing HostMemoryBuffer cannot be freed
+   * mid-write on abort.
    */
-  def write(b: Int): Unit = {
+  def write(b: Int): Unit = synchronized {
+    if (closed || closeRequested) {
+      throw new IllegalStateException("Partial file handle is closed")
+    }
     if (writeFinished) {
       throw new IllegalStateException("Write phase already finished")
     }
@@ -326,9 +330,13 @@ class SpillablePartialFileHandle private (
 
   /**
    * Write bytes to the partial file.
-   * No synchronization needed: write phase is protected from spilling.
+   * Synchronized with close()/doClose() so the backing HostMemoryBuffer cannot be freed
+   * mid-write on abort.
    */
-  def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
+  def write(bytes: Array[Byte], offset: Int, length: Int): Unit = synchronized {
+    if (closed || closeRequested) {
+      throw new IllegalStateException("Partial file handle is closed")
+    }
     if (writeFinished) {
       throw new IllegalStateException("Write phase already finished")
     }
