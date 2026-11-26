@@ -18,9 +18,9 @@ package com.nvidia.spark.rapids.spill
 import java.io.IOException
 import java.nio.file.Files
 
-import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedByteArrayOutputStream}
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.SegmentedByteArrayOutputStream.OwnedBuffer
+import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -37,10 +37,10 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
   private def record(data: Array[Byte], segment: Int = 7): OwnedBuffer = {
-    val result = new SegmentedByteArrayOutputStream(segment)
-    result.write(data)
-    result.close()
-    result.takeBuffer()
+    withResource(new SegmentedHostOutputStream(segment)) { stream =>
+      stream.write(data)
+      stream.takeBuffer()
+    }
   }
   private def create(file: java.io.File, max: Long = 1048576) = {
     SpillablePartialFileHandle.createMemoryWithSpill(
@@ -83,8 +83,9 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(!file.exists())
   }
 
-  test("mixed writes ignore native capacity and isolate the caller's array") {
-    withResource(create(Files.createTempFile("owned-limit", ".bin").toFile, max = 14)) { h =>
+  test("adopting records above the partial buffer limit keeps them in memory") {
+    val path = Files.createTempDirectory("owned-limit")
+    try withResource(create(path.resolve("partial").toFile, max = 14)) { h =>
       val bytes = Array.tabulate[Byte](9)(_.toByte)
       val suffix = Array.fill[Byte](6)(42)
       h.writeRecord(record(bytes))
@@ -96,9 +97,12 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(h.host.get.capacity > 14)
       assert(h.getExpansionCount == 0)
       h.finishWrite()
+      assert(!Files.exists(path.resolve("partial")))
       val actual = new Array[Byte](17)
       assert(h.read(actual, 0, actual.length) == actual.length)
       assert(actual.sameElements(bytes ++ Array.fill[Byte](6)(42) ++ Array[Byte](43, 43)))
+    } finally {
+      Files.delete(path)
     }
   }
 
@@ -159,7 +163,9 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
       h.close()
       val actual = new Array[Byte](1)
       assert(h.readAt(0, actual, 0, 1) == 1 && actual(0) == 42)
-      intercept[IllegalStateException](h.writeRecord(record(Array[Byte](1))))
+      withResource(record(Array[Byte](1))) { rejected =>
+        intercept[IllegalStateException](h.writeRecord(rejected))
+      }
     } finally {
       h.releaseRead()
       h.close()

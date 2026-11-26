@@ -15,11 +15,11 @@
  */
 package com.nvidia.spark.rapids.spill
 
-import java.io.{BufferedOutputStream, FileOutputStream}
+import java.io.FileOutputStream
 import java.util.ArrayList
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.SegmentedByteArrayOutputStream.OwnedBuffer
+import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 
 /** Storage owned by one partial-file handle. Reads/spills/close use the handle's locks. */
 private[spill] sealed trait PartialFileBuffer extends AutoCloseable {
@@ -96,10 +96,7 @@ private[spill] final class OwnedRecordBuffer extends PartialFileBuffer {
 
   override def writeTo(out: FileOutputStream, length: Long): Unit = {
     require(length == size)
-    // Large arrays bypass this bounded buffer; only small record tails are coalesced.
-    val buffered = new BufferedOutputStream(out, 64 * 1024)
-    records.forEach(_.data.writeTo(buffered))
-    buffered.flush()
+    records.forEach(_.data.writeTo(out))
   }
 
   override def close(): Unit = {

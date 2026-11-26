@@ -31,9 +31,10 @@ import com.nvidia.spark.rapids.NvtxRegistry
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.SegmentedByteArrayOutputStream.OwnedBuffer
+import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 import com.nvidia.spark.rapids.shuffle.{CatalogShuffleRequestHandler, RapidsShuffleServer, RapidsShuffleTransport}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
+import org.apache.commons.io.output.CloseShieldOutputStream
 
 import org.apache.spark.{InterruptibleIterator, MapOutputTracker, ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.executor.ShuffleWriteMetrics
@@ -487,7 +488,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         buffer = record.buffer
         if (record.compressedSize > 0) {
           outputStream match {
-            case sink: SegmentedByteArrayOutputStream.Sink => sink.writeRecord(buffer)
+            case sink: SegmentedHostOutputStream.Sink => sink.writeRecord(buffer)
             case _ => buffer.writeTo(outputStream)
           }
         }
@@ -682,10 +683,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    * Data flow for each record:
    * 1. ColumnarBatch (already copied to host memory, may be split from GPU batches based on
    *    spark.rapids.shuffle.partitioning.maxCpuBatchSize) -> Main thread acquires limiter quota
-   * 2. Writer thread: serialize + compress -> fixed-size segments (JVM heap)
+   * 2. Writer thread: serialize + compress -> fixed-size host memory segments
    * 3. Writer thread: adjust quota to retained output capacity
-   * 4. Merger step: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
-   *    - If MEMORY_WITH_SPILL mode: the handle takes ownership of the original heap arrays
+   * 4. Merger step: owned host segments -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
+   *    - If MEMORY_WITH_SPILL mode: the handle takes ownership of the original host buffers
    *    - If FILE_ONLY mode or spilled: data goes to disk
    * 5. Merger step: release remaining quota after writing to output stream
    * 6. (Multi-batch only) Main thread: mergePartialFiles() combines all batch outputs into
@@ -814,30 +815,22 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                   s"partition $reducePartitionId: cancelled before starting")
             }
             try {
-              withResource(cb) { _ =>
-                // Create a new buffer for this record.
-                // The buffer is closed by the merger thread after writing to disk.
-                val buffer = new SegmentedByteArrayOutputStream(bufferSegmentSize)
-
-                // Serialize + compress + encryption to memory buffer
-                val compressedOutputStream = blockManager.serializerManager.wrapStream(
-                  ShuffleBlockId(shuffleId, mapId, reducePartitionId), buffer)
-
-                val serializationStream = serializerInstance.serializeStream(
-                  compressedOutputStream)
-                withResource(serializationStream) { serializer =>
-                  serializer.writeKey(key.asInstanceOf[Any])
-                  serializer.writeValue(value.asInstanceOf[Any])
+              val stream = closeOnExcept(cb)(_ => new SegmentedHostOutputStream(bufferSegmentSize))
+              withResource(stream) { buffer =>
+                withResource(cb) { _ =>
+                  // Closing the codec must finish the record before its segments change owners.
+                  val encoded = blockManager.serializerManager.wrapStream(
+                    ShuffleBlockId(shuffleId, mapId, reducePartitionId),
+                    CloseShieldOutputStream.wrap(buffer))
+                  withResource(serializerInstance.serializeStream(encoded)) { serializer =>
+                    serializer.writeKey(key.asInstanceOf[Any])
+                    serializer.writeValue(value.asInstanceOf[Any])
+                  }
                 }
-
-                // Codec closure above completes all writes before transferring the segments.
-                val owned = buffer.takeBuffer()
-                closeOnExcept(owned) { _ =>
+                closeOnExcept(buffer.takeBuffer()) { owned =>
                   val compressedSize = owned.getCount
                   totalCompressedSize.addAndGet(compressedSize)
-                  // Trimmed arrays retain exactly the compressed payload size.
-                  // Resizing must not block a worker behind its own unpublished record.
-                  quotaToRelease.resize(compressedSize)
+                  quotaToRelease.resize(owned.getCapacity)
                   CompressedRecord(owned, compressedSize, quotaToRelease)
                 }
               }
@@ -859,6 +852,15 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             }
           }
         }) {
+          override protected def set(record: CompressedRecord): Unit = {
+            try {
+              super.set(record)
+            } finally {
+              // FutureTask discards the result if cancellation wins the race with publication.
+              if (isCancelled) record.buffer.close()
+            }
+          }
+
           override def done(): Unit = {
             try {
               // If call() never ran, win the CAS to close cb (prevents the ref-count leak

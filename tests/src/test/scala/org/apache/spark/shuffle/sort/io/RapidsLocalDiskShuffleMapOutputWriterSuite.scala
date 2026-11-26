@@ -20,7 +20,8 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.file.Files
 
-import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedByteArrayOutputStream, ShimLoader}
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedHostOutputStream, ShimLoader}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
@@ -118,12 +119,13 @@ class RapidsLocalDiskShuffleMapOutputWriterSuite extends AnyFunSuite with Mockit
         assert(handle.isFileOnly == !inMemory)
         val stream = partition.openStream()
         if (retain) {
-          val buffer = new SegmentedByteArrayOutputStream(8192)
-          buffer.write(expected)
-          val record = buffer.takeBuffer()
-          stream.asInstanceOf[SegmentedByteArrayOutputStream.Sink].writeRecord(record)
-          intercept[IllegalStateException](record.takeBuffer())
-          record.close()
+          withResource(new SegmentedHostOutputStream(8192)) { buffer =>
+            buffer.write(expected)
+            withResource(buffer.takeBuffer()) { record =>
+              stream.asInstanceOf[SegmentedHostOutputStream.Sink].writeRecord(record)
+              intercept[IllegalStateException](record.takeBuffer())
+            }
+          }
           assert(handle.getExpansionCount == 0)
         } else {
           stream.write(expected)

@@ -942,7 +942,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMultiThreadedWriterBufferSegmentSize: Int = {
     val entry = SHUFFLE_MULTITHREADED_WRITER_BUFFER_SEGMENT_SIZE
     val size = get(entry)
-    // Zero selects the default segment size; all records use fixed heap segments.
+    // Zero selects the default segment size; all records use fixed-size host segments.
     (if (size == 0) entry.defaultValue else size).toInt
   }
 

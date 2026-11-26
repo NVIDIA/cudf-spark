@@ -23,9 +23,9 @@ import java.nio.channels.FileChannel
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{HostAlloc, SegmentedByteArrayOutputStream}
+import com.nvidia.spark.rapids.{HostAlloc, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.SegmentedByteArrayOutputStream.OwnedBuffer
+import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.GpuTaskMetrics
@@ -49,8 +49,7 @@ private[rapids] final class ClosedPartialFileHandleException
  * This handle is designed for scenarios where:
  * 1. When memory is scarce (usage > threshold), use file-based storage directly
  * 2. When memory is sufficient, use host memory buffer with automatic spill support
- * Owned heap records bypass native capacity and pressure policies while retaining explicit
- * spill, commit, and read-lease support.
+ * Transferred segments stay in memory until an explicit spill, commit, or close.
  *
  * Features:
  * - Unified write/read interface regardless of storage mode
@@ -138,8 +137,7 @@ class SpillablePartialFileHandle private (
       }
       host = Some(buffer)
       this.taskPriority = priority
-      // Retained heap arrays do not consume native memory and must not be selected by the
-      // native allocator's spill requests. Their owner still closes or commits them normally.
+      // The handle adopts existing segments. Keep them in memory until explicit spill or close.
       if (!retainRecords) SpillFramework.stores.hostStore.trackNoSpill(this)
     } catch {
       case e: Exception =>
@@ -164,7 +162,7 @@ class SpillablePartialFileHandle private (
    * Expand host buffer capacity to meet required capacity.
    *
    * Only the contiguous native buffer uses capacity hints, limits and memory-pressure checks.
-   * Owned records append their arrays directly without entering this path.
+   * Owned records append their segments directly without entering this path.
    *
    * Conditions checked before expansion:
    * 1. New capacity does not exceed configured max buffer size limit
@@ -333,9 +331,10 @@ class SpillablePartialFileHandle private (
     }
 
     if (host.exists(_.isInstanceOf[OwnedRecordBuffer])) {
-      val record = new SegmentedByteArrayOutputStream(1)
-      record.write(b)
-      writeRecord(record.takeBuffer())
+      withResource(new SegmentedHostOutputStream(1)) { stream =>
+        stream.write(b)
+        withResource(stream.takeBuffer())(writeRecord)
+      }
       return
     }
     if (shouldUseFile) {
@@ -385,9 +384,10 @@ class SpillablePartialFileHandle private (
     if (host.exists(_.isInstanceOf[OwnedRecordBuffer])) {
       // Ordinary OutputStream callers retain their array. Copy only the incoming bytes;
       // existing segments remain untouched and subsequent writes append new segments.
-      val record = new SegmentedByteArrayOutputStream(length)
-      record.write(bytes, offset, length)
-      writeRecord(record.takeBuffer())
+      withResource(new SegmentedHostOutputStream(length)) { stream =>
+        stream.write(bytes, offset, length)
+        withResource(stream.takeBuffer())(writeRecord)
+      }
       return
     }
     if (shouldUseFile) {
@@ -1020,8 +1020,8 @@ object SpillablePartialFileHandle extends Logging {
   /**
    * Create a memory-with-spill handle.
    * Ordinary writes use a native buffer that expands up to maxBufferSize and can spill
-   * under native memory pressure. With retainRecords, arrays are retained on the heap
-   * without native capacity limits, expansion, or host-store pressure spilling. Both
+   * under native memory pressure. With retainRecords, the handle takes ownership of existing
+   * host segments without expanding a partial buffer or triggering a spill. Both
    * representations support explicit spill and commit.
    *
    * @param initialCapacity Initial off-heap allocation when retainRecords is false
@@ -1030,7 +1030,7 @@ object SpillablePartialFileHandle extends Logging {
    * @param spillFile File to use when spilling is required
    * @param priority Spill priority
    * @param syncWrites Whether to force outstanding writes to disk
-   * @param retainRecords Retain transferred record arrays instead of copying into native memory.
+   * @param retainRecords Take ownership of the serialized host segments.
    * @param capacityHintProvider Optional capacity hint, only used for contiguous storage.
    *                             Signature: (currentBytesWritten, requiredCapacity) =>
    *                             suggestedCapacity. When provided, buffer expansion will

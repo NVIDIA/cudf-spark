@@ -35,17 +35,17 @@ class KudoSegmentedOutputStreamSuite extends AnyFunSuite {
             GpuColumnVector.from(Array[DataType](IntegerType, StringType)))
           val columns = Array(ints, strings)
           val contiguous = new OpenByteArrayOutputStream()
-          val segmented = new SegmentedByteArrayOutputStream(segmentSize)
           val expected = serializer.writeToStreamWithMetrics(columns, contiguous, 1, 5)
-          val actual = serializer.writeToStreamWithMetrics(columns, segmented, 1, 5)
-          segmented.close()
-          val bytes = new ByteArrayOutputStream()
-          withResource(segmented.takeBuffer()) { owned =>
-            owned.writeTo(bytes)
+          withResource(new SegmentedHostOutputStream(segmentSize)) { segmented =>
+            val actual = serializer.writeToStreamWithMetrics(columns, segmented, 1, 5)
+            assert(actual.getWrittenBytes == expected.getWrittenBytes)
+            withResource(segmented.takeBuffer()) { owned =>
+              assert(owned.getCount == contiguous.getCount)
+              val bytes = new ByteArrayOutputStream()
+              owned.writeTo(bytes)
+              assert(bytes.toByteArray.sameElements(contiguous.toByteArray))
+            }
           }
-          assert(actual.getWrittenBytes == expected.getWrittenBytes)
-          assert(segmented.getCount == contiguous.getCount)
-          assert(bytes.toByteArray.sameElements(contiguous.toByteArray))
       }
     }
   }

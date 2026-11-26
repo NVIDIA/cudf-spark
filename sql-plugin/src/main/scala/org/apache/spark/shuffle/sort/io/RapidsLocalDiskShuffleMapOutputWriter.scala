@@ -21,7 +21,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.WritableByteChannel
 import java.util.Optional
 
-import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedByteArrayOutputStream}
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 
 import org.apache.spark.SparkConf
@@ -128,7 +128,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
     forceFileOnly = true
   }
 
-  /** Retain record arrays on the heap, independently of native buffer limits and pressure. */
+  /** Take ownership of serialized host segments for in-memory partial output. */
   def setRecordBufferMode(): Unit = {
     if (storageInitAttempted) {
       throw new IllegalStateException("Cannot change record storage after initialization")
@@ -151,7 +151,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
           outputTempFile, syncWrites)
         partialFileHandle = Some(handle)
       } else if (retainRecords || HostAlloc.isUsageBelowThreshold(memoryThreshold)) {
-        // Heap records do not allocate native memory or use its predictive capacity policy.
+        // Adopted records already have backing storage.
         try {
           val handle = SpillablePartialFileHandle.createMemoryWithSpill(
             initialCapacity = initialBufferSize,
@@ -164,7 +164,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
             retainRecords = retainRecords)
           partialFileHandle = Some(handle)
           if (retainRecords) {
-            logDebug(s"Retaining heap records for shuffle $shuffleId map $mapId")
+            logDebug(s"Retaining host segments for shuffle $shuffleId map $mapId")
           } else {
             logDebug(s"Using memory-with-spill mode for shuffle $shuffleId map $mapId " +
               s"with predictive sizing (initial=${initialBufferSize / 1024 / 1024}MB, " +
@@ -290,13 +290,13 @@ class RapidsLocalDiskShuffleMapOutputWriter(
 
   // Unified stream writer using SpillablePartialFileHandle
   private class PartitionWriterStream(partitionId: Int)
-      extends OutputStream with SegmentedByteArrayOutputStream.Sink {
+      extends OutputStream with SegmentedHostOutputStream.Sink {
     private var count = 0L
     private var isClosed = false
 
     def getCount(): Long = count
 
-    override def writeRecord(record: SegmentedByteArrayOutputStream.OwnedBuffer): Unit = {
+    override def writeRecord(record: SegmentedHostOutputStream.OwnedBuffer): Unit = {
       verifyNotClosed()
       val length = record.getCount
       partialFileHandle.get.writeRecord(record)
