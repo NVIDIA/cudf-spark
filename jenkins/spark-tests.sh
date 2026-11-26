@@ -340,7 +340,7 @@ run_delta_lake_tests() {
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
       DELTA_LAKE_VERSIONS="4.1.0"
       if [[ "$SPARK_VER" == "4.1.1" ]]; then
-        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
+        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.1"
       fi
     else
       echo "Skipping Delta Lake 4.1.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
@@ -352,7 +352,7 @@ run_delta_lake_tests() {
   else
     for v in $DELTA_LAKE_VERSIONS; do
       echo "Running Delta Lake tests for Delta Lake version $v"
-      if [[ "$v" == "4.2.0" || "$v" == "4.3.0" ]]; then
+      if [[ "$v" == "4.2.0" || "$v" == "4.3.0" || "$v" == "4.3.1" || "$v" == "4.3.2.2" ]]; then
         DELTA_SPARK_LINE=${SPARK_VER%.*}
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then
@@ -721,16 +721,20 @@ fi
 if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
   run_delta_lake_tests
 fi
+DELTA_43_UC_VERSION="4.3.0"
+if [[ "$SPARK_VER" == "4.1.1" ]]; then
+  DELTA_43_UC_VERSION="4.3.1"
+fi
 if [[ "$TEST_MODE" == "DEFAULT" ]]; then
   run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py \
     "catalog_managed_ctas_insert_and_deletion_vector_scan"
-  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
+  run_delta_lake_uc_tests "$DELTA_43_UC_VERSION" delta_lake_catalog_rest_test.py
 fi
 
 # Delta Lake catalog-managed table tests
 if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
   run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py
-  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
+  run_delta_lake_uc_tests "$DELTA_43_UC_VERSION" delta_lake_catalog_rest_test.py
 fi
 
 # Iceberg tests

@@ -21,6 +21,7 @@ from pyspark.sql import Row
 from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_collect, \
     assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
+import delta_lake_utils
 from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, \
     deletion_vector_values_with_xfail_reasons, read_delta_path_with_cdf, delta_reorg_xfail
 from marks import allow_non_gpu, allow_non_gpu_conditional, delta_lake, ignore_order
@@ -2146,3 +2147,31 @@ def test_delta_deletion_vector_count_star_after_empty_batch(
         conf=conf)
     gpu_ids = with_gpu_session(lambda spark: spark.sql(data_query).collect(), conf=conf)
     assert sorted(row.id for row in gpu_ids) == expected_ids
+
+
+@delta_lake
+@pytest.mark.parametrize(
+    "version,is_db,expected_43,expected_42_or_43,expected_41_to_43,expected_40_to_43", [
+        ("4.0.1", False, False, False, False, True),
+        ("4.1.0", False, False, False, True, True),
+        ("4.2.0", False, False, True, True, True),
+        ("4.3.0", False, True, True, True, True),
+        ("4.3.1", False, True, True, True, True),
+        ("4.3.2.2", False, True, True, True, True),
+        ("4.3.2", False, False, False, False, False),
+        ("4.3.3", False, False, False, False, False),
+        ("4.3.", False, False, False, False, False),
+        ("4.3.x", False, False, False, False, False),
+        ("4.4.0", False, False, False, False, False),
+        (None, False, False, False, False, False),
+        ("4.3.0", True, False, False, False, False),
+    ])
+def test_oss_delta_lake_version_classifiers(
+        monkeypatch, version, is_db,
+        expected_43, expected_42_or_43, expected_41_to_43, expected_40_to_43):
+    monkeypatch.setattr(delta_lake_utils, "is_databricks_runtime", lambda: is_db)
+    monkeypatch.setattr(delta_lake_utils, "_loaded_delta_lake_version", lambda: version)
+    assert delta_lake_utils.is_supported_oss_delta_lake_43() is expected_43
+    assert delta_lake_utils.is_oss_delta_lake_42_or_43() is expected_42_or_43
+    assert delta_lake_utils.is_oss_delta_lake_41_to_43() is expected_41_to_43
+    assert delta_lake_utils.is_oss_delta_lake_40_to_43() is expected_40_to_43

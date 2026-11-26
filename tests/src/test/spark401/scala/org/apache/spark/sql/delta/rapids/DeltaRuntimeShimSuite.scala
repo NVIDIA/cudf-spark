@@ -21,16 +21,23 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 
 import java.lang.reflect.Modifier
+import java.util
 
-import com.nvidia.spark.rapids.{GpuOverrides, RapidsConf, SparkQueryCompareTestSuite}
+import scala.annotation.nowarn
+
+import com.nvidia.spark.rapids.{GpuOverrides, RapidsConf, SparkQueryCompareTestSuite, TestUtils}
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
-import org.apache.spark.SPARK_VERSION
+import org.apache.spark.{SPARK_VERSION, SparkConf}
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
+import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, DeltaParquetFileFormat, NumRecordsStats}
 import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
+import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
 import org.apache.spark.sql.execution.FileSourceScanExec
@@ -40,6 +47,22 @@ import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
+  private def isDelta43: Boolean = DeltaRuntimeShim.isSupportedDelta43Version(io.delta.VERSION)
+
+  test("Delta 4.3 test profile selects the required runtime") {
+    sys.props.get("rapids.test.delta43.version") match {
+      case Some(expectedVersion) =>
+        assert(isDelta43,
+          s"delta43-tests must run against a supported Delta 4.3 version, " +
+            s"found ${io.delta.VERSION}")
+        assert(io.delta.VERSION == expectedVersion)
+      case None =>
+        assert(!isDelta43,
+          s"rapids.test.delta43.version must be set when testing Delta ${io.delta.VERSION}")
+        cancel("delta43-tests profile is not active")
+    }
+  }
+
   test("delta provider resolves from the installed Delta Lake version") {
     val provider = DeltaProvider()
     assert(provider ne NoDeltaProvider)
@@ -47,7 +70,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       case "4.0.0" | "4.0.1" => "Delta40xProvider"
       case "4.1.0" => "Delta41xProvider"
       case "4.2.0" => "Delta42xProvider"
-      case "4.3.0" => "Delta43xProvider"
+      case _ if isDelta43 => "Delta43xProvider"
       case _ => fail(s"Unexpected Delta Lake version: ${io.delta.VERSION}")
     }
     assert(provider.getClass.getSimpleName == s"$expectedProvider$$")
@@ -74,9 +97,17 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
-      val shimClassName = DeltaRuntimeShim.getDelta42PlusShimClassName("4.3.0", sparkVersion)
+    val supportedDelta43 = Seq("4.3.0", "4.3.1", "4.3.2.2")
+    for {
+      sparkVersion <- Seq("4.0.1", "4.1.1")
+      deltaVersion <- supportedDelta43
+    } {
+      val shimClassName = DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, sparkVersion)
       assert(shimClassName.exists(_.contains("delta43x")))
+    }
+    supportedDelta43.foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getShimClassName(deltaVersion).exists(_.contains("delta43x")),
+        deltaVersion)
     }
   }
 
@@ -85,12 +116,21 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("4.3.0", "4.0.0"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
-      ("4.3.1", "4.0.1"))
+      ("4.3.2.2", "4.1.2"),
+      ("4.3.2", "4.0.1"),
+      ("4.3.3", "4.1.1"),
+      ("4.3.0-SNAPSHOT", "4.0.1"),
+      ("4.3.", "4.0.1"),
+      ("4.3.x", "4.0.1"),
+      ("4.3", "4.0.1"),
+      ("4.4.0", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
       assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, sparkVersion).isEmpty)
     }
-    assert(DeltaRuntimeShim.getShimClassName("4.3.1").isEmpty)
+    Seq("4.3.2", "4.3.3", "4.3.", "4.3.x").foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getShimClassName(deltaVersion).isEmpty, deltaVersion)
+    }
   }
 
   test("existing Delta versions use the pre-4.2 runtime shim selection") {
@@ -134,7 +174,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.2 and 4.3 GPU writes use the runtime-specific GPU implementation") {
-    assume(Seq("4.2.0", "4.3.0").contains(io.delta.VERSION))
+    assume(io.delta.VERSION == "4.2.0" || isDelta43)
     val deltaLog = mock[DeltaLog]
     val cpuWrite = WriteIntoDelta(
       deltaLog,
@@ -148,7 +188,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
 
     val expectedClass = io.delta.VERSION match {
       case "4.2.0" => "GpuWriteIntoDelta42x"
-      case "4.3.0" => "GpuWriteIntoDelta43x"
+      case _ if isDelta43 => "GpuWriteIntoDelta43x"
       case version => fail(s"Unexpected Delta Lake version: $version")
     }
     assert(gpuWrite.getClass.getSimpleName == expectedClass)
@@ -164,7 +204,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 DELETE and UPDATE validate mismatched record counts") {
-    assume(io.delta.VERSION == "4.3.0")
+    assume(isDelta43)
     val deltaLog = mock[DeltaLog]
     val mismatchStats = NumRecordsStats(
       numLogicalRecordsAddedPartial = 2L,
@@ -191,7 +231,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 GPU transactions use the 4.3 writer behavior") {
-    assume(io.delta.VERSION == "4.3.0")
+    assume(isDelta43)
     val parquetOutputTimestampType = "spark.sql.parquet.outputTimestampType"
     val parquetWriterVersion = "parquet.writer.version"
 
@@ -215,7 +255,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
         val resolvedOptions = getWriterOptions.invoke(txn, Some(writeOptions))
           .asInstanceOf[Map[String, String]]
 
-        assert(resolvedOptions(parquetOutputTimestampType) == "TIMESTAMP_MICROS")
+        assert(CaseInsensitiveMap(resolvedOptions)(parquetOutputTimestampType) ==
+          "TIMESTAMP_MICROS")
         assert(resolvedOptions(parquetWriterVersion) == "v1")
 
         val encodeVariantStatsIfNeeded = txn.getClass.getDeclaredMethods
@@ -231,6 +272,85 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
           statsCollector)
         assert(encodeVariantStatsIfNeeded.invoke(txn, variantSchema, statsCollector)
           .getClass.getSimpleName == "EncodeNestedVariantAsZ85String")
+      }
+    }
+  }
+
+  test("Delta 4.3 is_managed_location filtering applies to 4.3.1 and 4.3.2.2") {
+    Seq("4.2.0", "4.3.", "4.3.x", "4.3.0", "4.3.0-rc1", "4.3.0-SNAPSHOT", "4.3.2", "4.3.3",
+      "4.4.0").foreach { version =>
+      assert(!DeltaRuntimeShim.shouldFilterIsManagedLocationProperty(version), version)
+    }
+    Seq("4.3.1", "4.3.2.2").foreach { version =>
+      assert(DeltaRuntimeShim.shouldFilterIsManagedLocationProperty(version), version)
+    }
+    if (isDelta43) {
+      assert(DeltaRuntimeShim.filterIsManagedLocationProperty ==
+        DeltaRuntimeShim.shouldFilterIsManagedLocationProperty(io.delta.VERSION))
+    } else {
+      assert(!DeltaRuntimeShim.filterIsManagedLocationProperty)
+    }
+  }
+
+  test("GPU Delta catalog matches CPU is_managed_location metadata behavior") {
+    val schema = StructType(Seq(StructField("id", IntegerType)))
+    withTempPath { rootDir =>
+      val warehouseDir = new java.io.File(rootDir, "warehouse")
+      val conf = new SparkConf()
+        .set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .set("spark.sql.warehouse.dir", warehouseDir.getAbsolutePath)
+      TestUtils.withGpuSparkSession(conf) { spark =>
+        val catalogObj = spark.sessionState.catalogManager.catalog("spark_catalog")
+        assert(catalogObj.isInstanceOf[DeltaCatalog],
+          s"Expected DeltaCatalog for spark_catalog, got ${catalogObj.getClass.getName}")
+        val cpuCatalog = catalogObj.asInstanceOf[DeltaCatalog]
+        val gpuCatalog = DeltaRuntimeShim.getGpuDeltaCatalog(
+          cpuCatalog, new RapidsConf(spark.sessionState.conf))
+
+        val cpuDir = new java.io.File(rootDir, "cpu_tbl")
+        val gpuDir = new java.io.File(rootDir, "gpu_tbl")
+        val suffix = java.util.UUID.randomUUID().toString.replace("-", "")
+        val cpuName = s"delta_mloc_cpu_$suffix"
+        val gpuName = s"delta_mloc_gpu_$suffix"
+
+        def makeProps(dir: java.io.File): util.Map[String, String] = {
+          val props = new util.HashMap[String, String]()
+          props.put(TableCatalog.PROP_PROVIDER, "delta")
+          props.put(TableCatalog.PROP_LOCATION, dir.toURI.toString)
+          props.put(TableCatalog.PROP_IS_MANAGED_LOCATION, "true")
+          props.put("custom_prop", "abc")
+          props
+        }
+
+        try {
+          val cpuStaged = (cpuCatalog.stageCreate(
+            Identifier.of(Array("default"), cpuName),
+            schema,
+            Array.empty[Transform],
+            makeProps(cpuDir)): @nowarn("msg=stageCreate.*is deprecated"))
+          cpuStaged.commitStagedChanges()
+
+          val gpuStaged = (gpuCatalog.stageCreate(
+            Identifier.of(Array("default"), gpuName),
+            schema,
+            Array.empty[Transform],
+            makeProps(gpuDir)): @nowarn("msg=stageCreate.*is deprecated"))
+          gpuStaged.commitStagedChanges()
+
+          val cpuCfg = DeltaLog.forTable(spark, cpuDir.getAbsolutePath)
+            .unsafeVolatileSnapshot.metadata.configuration
+          val gpuCfg = DeltaLog.forTable(spark, gpuDir.getAbsolutePath)
+            .unsafeVolatileSnapshot.metadata.configuration
+
+          assert(gpuCfg == cpuCfg)
+          assert(gpuCfg.get("custom_prop").contains("abc"))
+          assert(gpuCfg.contains(TableCatalog.PROP_IS_MANAGED_LOCATION) ==
+            !DeltaRuntimeShim.shouldFilterIsManagedLocationProperty(io.delta.VERSION))
+        } finally {
+          spark.sql(s"DROP TABLE IF EXISTS default.$cpuName")
+          spark.sql(s"DROP TABLE IF EXISTS default.$gpuName")
+        }
       }
     }
   }

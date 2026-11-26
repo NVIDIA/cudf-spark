@@ -227,6 +227,8 @@ abstract class GpuDeltaCatalogBase(
       case TableCatalog.PROP_COMMENT => false
       case TableCatalog.PROP_OWNER => false
       case TableCatalog.PROP_EXTERNAL => false
+      case TableCatalog.PROP_IS_MANAGED_LOCATION =>
+        !DeltaRuntimeShim.filterIsManagedLocationProperty
       case "path" => false
       case "option.path" => false
       case _ => true

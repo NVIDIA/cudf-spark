@@ -161,7 +161,7 @@ def test_delta_merge_check_overflow_in_table_write_error(
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="MERGE record-count validation was added in OSS Delta 4.3")
 def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_factory):
     updates_view = spark_tmp_table_factory.get()
@@ -1897,7 +1897,7 @@ def test_delta_dv_dml_operation_logging(
         return spark.sql(statements[command]).collect()
 
     expected_command = {"DELETE": "GpuDeleteCommand", "UPDATE": "GpuUpdateCommand",
-                        "MERGE": "GpuMergeIntoCommand43x" if is_oss_delta_lake_43()
+                        "MERGE": "GpuMergeIntoCommand43x" if is_supported_oss_delta_lake_43()
                             else "GpuMergeIntoCommand42x"}[command]
     assert_gpu_and_cpu_writes_are_equal_collect(
         run_command, lambda spark, path: read_delta_path(spark, path).orderBy("id"),
@@ -1977,7 +1977,7 @@ def test_delta_merge_dv_clauses(spark_tmp_path, use_cdf, persistent_dv, merge_ca
         assert result[0][0] == affected[merge_case]
         return result
 
-    expected_command = "GpuMergeIntoCommand43x" if is_oss_delta_lake_43() \
+    expected_command = "GpuMergeIntoCommand43x" if is_supported_oss_delta_lake_43() \
         else "GpuMergeIntoCommand42x"
     # Mixed clauses always write data, so also exercise the helper's default write check.
     # Other cases include no-ops and full-file deletion without replacement Parquet data.

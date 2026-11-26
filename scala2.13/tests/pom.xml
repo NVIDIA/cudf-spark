@@ -35,6 +35,7 @@
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
         <parallelForkCount>4</parallelForkCount>
         <parallelSparkConfs/>
+        <parallelExtraJvmArgs/>
         <!-- Per-suite hang watchdog: a suite exceeding this many seconds gets a thread dump
              captured and its JVM killed, failing the run instead of hanging it. -->
         <parallelSuiteTimeout>1800</parallelSuiteTimeout>
@@ -190,7 +191,7 @@
                                         <argument>suffixes=${suffixes}</argument>
                                         <argument>testsFilter=${tests}</argument>
                                         <argument>argLine=${argLine}</argument>
-                                        <argument>testJvmArgs=-ea -Xmx4g -Xss4m ${extraJavaTestArgs}</argument>
+                                        <argument>testJvmArgs=-ea -Xmx4g -Xss4m ${extraJavaTestArgs} ${parallelExtraJvmArgs}</argument>
                                         <argument>shuffleManagerOverride=${rapids.shuffle.manager.override}</argument>
                                         <argument>allocationFraction=${rapids.test.gpu.allocFraction}</argument>
                                         <argument>maxAllocationFraction=${rapids.test.gpu.maxAllocFraction}</argument>
@@ -357,6 +358,31 @@
                     </exclusions>
                 </dependency>
             </dependencies>
+        </profile>
+        <profile>
+            <id>delta43-tests</id>
+            <properties>
+                <delta.test.spark.artifactId>${delta43x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta43x.version}</delta.test.version>
+                <parallelSparkConfs>spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</parallelSparkConfs>
+                <parallelExtraJvmArgs>-Drapids.test.delta43.version=${delta.test.version}</parallelExtraJvmArgs>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <configuration>
+                            <systemProperties>
+                                <rapids.test.delta43.version>${delta.test.version}</rapids.test.delta43.version>
+                            </systemProperties>
+                            <environmentVariables>
+                                <SPARK_CONF>spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</SPARK_CONF>
+                            </environmentVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
         <!-- #endif scala-2.13 -->
 
