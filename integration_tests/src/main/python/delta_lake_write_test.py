@@ -341,7 +341,7 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
                "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Materialized partition columns were added in OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode,source", [
     ("append", "properties"), ("ctas", "properties"), ("rtas", "properties"),
@@ -397,7 +397,7 @@ def test_delta_43_materialized_partition_columns_fallback(
                *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Materialized partition columns were added in OSS Delta 4.3")
 def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
         spark_tmp_table_factory):
@@ -430,7 +430,7 @@ def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
                "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43() or not is_spark_41x(),
                     reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
 @pytest.mark.parametrize("write_mode,source", [
     ("append", "properties"), ("ctas", "properties"), ("rtas", "properties"),
@@ -1331,7 +1331,7 @@ def test_delta_sql_insert_v1_write(spark_tmp_table_factory, spark_tmp_path, over
                *delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 writer option validation")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 V2 writer option validation")
 @pytest.mark.parametrize("option_name, error", [
     ("replaceUsing", "replaceUsing requires targetAlias"),
     ("replaceOn", "Expected a Project node"),
@@ -3076,7 +3076,7 @@ def _dpo_normalization_test(spark_tmp_path, case_name, spellings, confs, expecte
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 @pytest.mark.parametrize("case_name, spelling, tz", _dpo_normalization_params())
 def test_delta_dpo_partition_value_normalization(spark_tmp_path, case_name, spelling, tz):
@@ -3089,7 +3089,7 @@ def test_delta_dpo_partition_value_normalization(spark_tmp_path, case_name, spel
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 @pytest.mark.parametrize("entry_point", ["session_conf", "insert_into", "save_as_table"])
 def test_delta_dpo_partition_value_normalization_entry_points(spark_tmp_path, entry_point):
@@ -3103,7 +3103,7 @@ def test_delta_dpo_partition_value_normalization_entry_points(spark_tmp_path, en
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 def test_delta_dpo_partition_value_normalization_renamed_column(spark_tmp_path):
     confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": "America/Los_Angeles"})
@@ -3114,7 +3114,7 @@ def test_delta_dpo_partition_value_normalization_renamed_column(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 def test_delta_dpo_partition_value_normalization_disabled(spark_tmp_path):
     # With parsing disabled Delta compares raw strings. Every stored non-null string is respelled,
@@ -3129,7 +3129,7 @@ def test_delta_dpo_partition_value_normalization_disabled(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 def test_delta_dpo_empty_replacement(spark_tmp_path):
     confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": "UTC"})
@@ -3180,7 +3180,7 @@ def _unparseable_overwrite(spark, path, replacement):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 def test_delta_dpo_unparseable_partition_value_falls_back_to_strings(spark_tmp_path):
     confs = copy_and_update(_delta_confs, {
@@ -3210,7 +3210,7 @@ def test_delta_dpo_unparseable_partition_value_falls_back_to_strings(spark_tmp_p
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 def test_delta_dpo_unparseable_partition_value_fails_when_configured(spark_tmp_path):
     confs = copy_and_update(_delta_confs, {
@@ -3247,7 +3247,7 @@ def test_delta_dpo_unparseable_partition_value_fails_when_configured(spark_tmp_p
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DPO partition value normalization is available in Delta 4.3")
 @pytest.mark.parametrize("timestamp_spelling", ["session_local", "utc_trimmed"])
 def test_delta_dpo_sql_insert_overwrite_multiple_partition_columns(spark_tmp_path,
@@ -3354,7 +3354,7 @@ def test_delta_compaction(spark_tmp_path, enable_deletion_vectors):
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec", "EmptyRelationExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 @pytest.mark.parametrize("option_name,matching_condition", [
     ("replaceOn", "target.id = source.id"),
     ("replaceOn", "target.id <=> source.id"),
@@ -3414,7 +3414,7 @@ def test_delta_selective_replace_save(spark_tmp_path, option_name, matching_cond
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 atomic replacement classification")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 atomic replacement classification")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_overrides_session_dynamic_overwrite(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_SESSION_DPO"
@@ -3454,7 +3454,7 @@ def test_delta_selective_replace_overrides_session_dynamic_overwrite(spark_tmp_p
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement DVs")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement DVs")
 @pytest.mark.parametrize("option_name,matching_condition", [
     ("replaceOn", "target.id = source.id"),
     ("replaceOn", "target.id <=> source.id"),
@@ -3537,7 +3537,7 @@ def test_delta_selective_replace_existing_dvs(spark_tmp_path, option_name, match
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 @pytest.mark.parametrize("source_format", ["delta", "parquet"])
 @pytest.mark.parametrize("materialize", ["auto", "all"])
@@ -3609,7 +3609,7 @@ def test_delta_selective_replace_file_source_composite_keys(
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 scoped DELETE validation")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 scoped DELETE validation")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_preserves_subquery_validation(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_SUBQUERY_SCOPE"
@@ -3659,7 +3659,7 @@ def test_delta_selective_replace_preserves_subquery_validation(spark_tmp_path, o
 
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 materialized replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 materialized replacement")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 @pytest.mark.parametrize("aqe_enabled", [False, True])
 def test_delta_selective_replace_materialized_shuffle_error_is_atomic(
@@ -3716,7 +3716,7 @@ def test_delta_selective_replace_materialized_shuffle_error_is_atomic(
                "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 command fallback")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 command fallback")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_command_fallback(spark_tmp_path, spark_tmp_table_factory, option_name):
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_COMMAND_FALLBACK"
@@ -3756,7 +3756,7 @@ def test_delta_selective_replace_command_fallback(spark_tmp_path, spark_tmp_tabl
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 internal DELETE fallback")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 internal DELETE fallback")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 @pytest.mark.parametrize("enable_deletion_vectors", [False, True])
 def test_delta_selective_replace_matching_fallback(spark_tmp_path, spark_tmp_table_factory,
@@ -3833,7 +3833,7 @@ def _selective_replace_matching_classes(option_name, condition, empty_source=Fal
                "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 @pytest.mark.parametrize("option_name,matching_condition", [
     ("replaceOn", "target.id = source.id"), ("replaceOn", "target.id = 1"),
     ("replaceOn", "true"), ("replaceOn", "target.id IN (SELECT 1)"),
@@ -3889,7 +3889,7 @@ def test_delta_selective_replace_table_apis(spark_tmp_path, spark_tmp_table_fact
 
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 @pytest.mark.parametrize("options,error", [
     ({"replaceUsing": ""}, "must not contain empty column names"),
     ({"replaceUsing": "id,"}, "must not contain empty column names"),
@@ -3923,7 +3923,7 @@ def test_delta_selective_replace_errors(spark_tmp_path, options, error):
 
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_constraint_violation(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_CONSTRAINT"
@@ -3951,7 +3951,7 @@ def test_delta_selective_replace_constraint_violation(spark_tmp_path, option_nam
 
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 def test_delta_selective_replace_using_misaligned_insert(spark_tmp_path, spark_tmp_table_factory):
     table = spark_tmp_table_factory.get()
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_MISALIGNED"
@@ -3974,7 +3974,7 @@ def test_delta_selective_replace_using_misaligned_insert(spark_tmp_path, spark_t
 @allow_non_gpu(*delta_meta_allow, "RDDScanExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_preserves_clustering(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_CLUSTERING"
@@ -4015,7 +4015,7 @@ def test_delta_selective_replace_preserves_clustering(spark_tmp_path, option_nam
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 target alias resolution")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 target alias resolution")
 @pytest.mark.parametrize("data_columns_enabled", [False, True])
 def test_delta_selective_replace_where_alias(spark_tmp_path, data_columns_enabled):
     data_path = spark_tmp_path + "/REPLACE_WHERE_ALIAS"
@@ -4039,7 +4039,7 @@ def test_delta_selective_replace_where_alias(spark_tmp_path, data_columns_enable
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 writer feature gates")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 writer feature gates")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 @pytest.mark.parametrize("api", ["save", "v2_overwrite", "v2_append", "v2_dpo"])
 def test_delta_selective_replace_disabled_option(spark_tmp_path, option_name, api):
@@ -4075,7 +4075,7 @@ def test_delta_selective_replace_disabled_option(spark_tmp_path, option_name, ap
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 write origin parity")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 write origin parity")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 @pytest.mark.parametrize("api", ["v2_overwrite", "sql_overwrite"])
 def test_delta_selective_replace_plain_writer_rejected(
@@ -4109,7 +4109,7 @@ def test_delta_selective_replace_plain_writer_rejected(
 @allow_non_gpu(*delta_meta_allow, "CollectLimitExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 replaceOn parity")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 V2 replaceOn parity")
 def test_delta_selective_replace_v2_constant_on(spark_tmp_path):
     data_path = spark_tmp_path + "/V2_CONSTANT_ON"
     def setup_tables(spark):
@@ -4126,7 +4126,7 @@ def test_delta_selective_replace_v2_constant_on(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 append ignores replacement")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 append ignores replacement")
 @pytest.mark.parametrize("api", ["v2_append", "insert_into"])
 def test_delta_selective_replace_plain_append(spark_tmp_path, api):
     data_path = spark_tmp_path + "/PLAIN_APPEND"
@@ -4146,7 +4146,7 @@ def test_delta_selective_replace_plain_append(spark_tmp_path, api):
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 validation order")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 validation order")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_ignore_invalid_options(spark_tmp_path, option_name):
     path = spark_tmp_path + "/IGNORE_REPLACEMENT"
@@ -4164,7 +4164,7 @@ def test_delta_selective_replace_ignore_invalid_options(spark_tmp_path, option_n
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 validation precedence")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 validation precedence")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 @pytest.mark.parametrize("mode,error", [("errorifexists", "DELTA_PATH_EXISTS"),
                                        ("overwrite", "schema mismatch")])
@@ -4182,7 +4182,7 @@ def test_delta_selective_replace_validation_precedence(spark_tmp_path, option_na
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 option validation")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 V2 option validation")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_selective_replace_v2_rejected(spark_tmp_path, spark_tmp_table_factory, option_name):
     table = spark_tmp_table_factory.get()
@@ -4205,7 +4205,7 @@ def test_delta_selective_replace_v2_rejected(spark_tmp_path, spark_tmp_table_fac
                "BroadcastExchangeExec", "BroadcastHashJoinExec")
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 replaceOn expression resolution")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 replaceOn expression resolution")
 @pytest.mark.parametrize("condition", [
     "target.id IN (SELECT 1)", "target.id = 1", "true", "false",
     "CAST(NULL AS BOOLEAN)", "source.id = 3",
@@ -4483,7 +4483,7 @@ def _page_types_and_rows(base_table, conf):
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
 @pytest.mark.parametrize("version", ["2.12.0", "2.99.1"])
@@ -4503,7 +4503,7 @@ def test_delta_43_parquet_format_version_v2_fallback(spark_tmp_table_factory, wr
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
 @pytest.mark.parametrize("version", ["1.0.0", None, "2.5.0"], ids=["v1", "absent", "resolves_to_v1"])
@@ -4526,7 +4526,7 @@ def test_delta_43_parquet_format_version_v1_on_gpu(spark_tmp_table_factory, writ
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_writer_version_conf_fallback(spark_tmp_table_factory):
     """Without a table property Delta falls back to the parquet.writer.version session conf."""
@@ -4543,7 +4543,7 @@ def test_delta_43_parquet_writer_version_conf_fallback(spark_tmp_table_factory):
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("spelling", [
     ("TBLPROPERTIES ('delta.parquet.format.version' = '{v}')", {}),
@@ -4573,7 +4573,7 @@ def test_delta_43_parquet_format_version_new_table_spellings(
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("mode", ["append", "overwrite"])
 @pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
@@ -4599,7 +4599,7 @@ def test_delta_43_parquet_format_version_new_path_default(spark_tmp_path, mode, 
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("mode", ["append", "overwrite"])
 @pytest.mark.parametrize("case", [
@@ -4630,7 +4630,7 @@ def test_delta_43_parquet_format_version_new_path_option(spark_tmp_path, mode, c
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
 @pytest.mark.parametrize("case", [
@@ -4659,7 +4659,7 @@ def test_delta_43_parquet_format_version_explicit_property_beats_default(
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
 @pytest.mark.parametrize("api", ["sql_options", "dataframe_writer_v2"])
@@ -4695,7 +4695,7 @@ def test_delta_43_parquet_writer_version_option_ctas_rtas(
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
 @pytest.mark.parametrize("version", ["v1", "v2"], ids=["v1", "v2"])
@@ -4729,7 +4729,7 @@ def test_delta_43_parquet_writer_version_property(
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_stored_writer_version_property_beats_format_version(
         spark_tmp_table_factory):
@@ -4758,7 +4758,7 @@ def test_delta_43_parquet_format_version_stored_writer_version_property_beats_fo
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
 @pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
@@ -4784,7 +4784,7 @@ def test_delta_43_parquet_format_version_property_option_dataframe_writer_v2(
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("api", ["sql_insert", "dataframe_append"])
 def test_delta_43_parquet_format_version_existing_table_ignores_creation_default(
@@ -4811,7 +4811,7 @@ def test_delta_43_parquet_format_version_existing_table_ignores_creation_default
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("mode", ["append", "overwrite"])
 @pytest.mark.parametrize("primed_default,default", [("1.0.0", "2.12.0"), ("2.12.0", "1.0.0")],
@@ -4840,7 +4840,7 @@ def test_delta_43_parquet_format_version_new_path_default_cached_by_other_sessio
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
 @pytest.mark.parametrize("table_property,option", [("1.0.0", "2.12.0"), ("2.12.0", "1.0.0")],
@@ -4883,7 +4883,7 @@ _parquet_format_version_options = [
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("case", _parquet_format_version_options, ids=[
     "property_beats_conf", "option_beats_property", "option_v1_beats_property_v2",
@@ -4938,7 +4938,7 @@ def _assert_cpu_write_plan(plans, cpu_exec):
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("source", ["property", "option"])
 @pytest.mark.parametrize("version", ["invalid", "v3", "0.9.0"])
@@ -4981,7 +4981,7 @@ def test_delta_43_parquet_format_version_invalid(spark_tmp_path, source, version
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_mixed_table_and_checkpoint(spark_tmp_path):
     """A table may mix page versions. The GPU reads both, and checkpoints written by Delta."""
@@ -5021,7 +5021,7 @@ def test_delta_43_parquet_format_version_mixed_table_and_checkpoint(spark_tmp_pa
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_metadata_changed_after_planning(spark_tmp_path):
     """A write planned on the GPU from a v1 snapshot fails, instead of committing DataPageV1 files
@@ -5101,7 +5101,7 @@ _parquet_format_version_writers = {
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Materialized partition columns were added in OSS Delta 4.3")
 @pytest.mark.parametrize("mode", ["append", "overwrite"])
 def test_delta_43_new_path_materialized_partition_option_fallback(spark_tmp_path, mode):
@@ -5119,7 +5119,7 @@ def test_delta_43_new_path_materialized_partition_option_fallback(spark_tmp_path
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43() or not is_spark_41x(),
                     reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
 @pytest.mark.parametrize("mode", ["append", "overwrite"])
 def test_delta_43_new_path_variant_shredding_option_fallback(spark_tmp_path, mode):
@@ -5137,7 +5137,7 @@ def test_delta_43_new_path_variant_shredding_option_fallback(spark_tmp_path, mod
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_save_as_table_overwrite_keeps_properties(
         spark_tmp_table_factory):
@@ -5161,7 +5161,7 @@ def test_delta_43_parquet_format_version_save_as_table_overwrite_keeps_propertie
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_save_as_table_overwrite_ignores_explicit_version(
         spark_tmp_table_factory):
@@ -5185,7 +5185,7 @@ def test_delta_43_parquet_format_version_save_as_table_overwrite_ignores_explici
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 def test_delta_43_parquet_format_version_invalid_creation_default_stale_snapshot(spark_tmp_path):
     """Delta can hold a snapshot saying a table does not exist after the table was created
@@ -5310,7 +5310,7 @@ def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, op
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("name", [
     pytest.param(name, marks=delta_reorg_xfail) if name == "reorg_purge" else name
@@ -5335,7 +5335,7 @@ def test_delta_43_parquet_format_version_dml(
 
 @allow_non_gpu(*_parquet_format_version_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="delta.parquet.format.version is supported by OSS Delta 4.3")
 @pytest.mark.parametrize("name", list(_parquet_format_version_writers))
 @pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])

@@ -173,7 +173,7 @@ def test_delta_merge_check_overflow_in_table_write_error(
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="MERGE record-count validation was added in OSS Delta 4.3")
 def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_factory):
     updates_view = spark_tmp_table_factory.get()
@@ -298,7 +298,7 @@ def _assert_merge_succeeds_on_gpu_like_cpu(
 
 
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 MERGE test helper coverage")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 MERGE test helper coverage")
 @pytest.mark.parametrize("path, expected", [
     ("/tmp//warehouse//GPU", "/tmp/warehouse/GPU"),
     ("file:///tmp//warehouse//GPU", "file:/tmp/warehouse/GPU"),
@@ -331,7 +331,7 @@ duplicate_insert_columns_merge_sql = (
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="MERGE into an empty-schema target error was added in OSS Delta 4.3")
 @pytest.mark.parametrize("merge_sql", empty_schema_error_merge_sqls,
                          ids=["not_matched_insert_star", "not_matched_insert_columns",
@@ -348,7 +348,7 @@ def test_delta_merge_empty_schema_target_error(
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
 @pytest.mark.parametrize("auto_merge", [False, True], ids=["no_schema_evolution", "schema_evolution"])
 @pytest.mark.parametrize("column_kind", ["generated", "identity"])
@@ -363,7 +363,7 @@ def test_delta_merge_case_variant_duplicate_insert_columns_error(
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="MERGE into an empty-schema target was changed in OSS Delta 4.3")
 def test_delta_merge_empty_schema_target_with_schema_evolution(
         spark_tmp_path, spark_tmp_table_factory):
@@ -378,7 +378,7 @@ def test_delta_merge_empty_schema_target_with_schema_evolution(
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
 def test_delta_merge_case_variant_duplicate_insert_columns_plain_table(
         spark_tmp_path, spark_tmp_table_factory):
@@ -3002,7 +3002,7 @@ def test_delta_dv_dml_operation_logging(
         return spark.sql(statements[command]).collect()
 
     expected_command = {"DELETE": "GpuDeleteCommand", "UPDATE": "GpuUpdateCommand",
-                        "MERGE": "GpuMergeIntoCommand43x" if is_oss_delta_lake_43()
+                        "MERGE": "GpuMergeIntoCommand43x" if is_supported_oss_delta_lake_43()
                             else "GpuMergeIntoCommand42x"}[command]
     assert_gpu_and_cpu_writes_are_equal_collect(
         run_command, lambda spark, path: read_delta_path(spark, path).orderBy("id"),
@@ -3088,7 +3088,7 @@ def test_delta_merge_dv_clauses(spark_tmp_path, use_cdf, persistent_dv, merge_ca
     if is_databricks_runtime():
         expected_command = "GpuMergeIntoCommand"
     else:
-        expected_command = "GpuMergeIntoCommand43x" if is_oss_delta_lake_43() \
+        expected_command = "GpuMergeIntoCommand43x" if is_supported_oss_delta_lake_43() \
             else "GpuMergeIntoCommand42x"
     # Mixed clauses always write data, so also exercise the helper's default write check.
     # Other cases include no-ops and full-file deletion without replacement Parquet data.

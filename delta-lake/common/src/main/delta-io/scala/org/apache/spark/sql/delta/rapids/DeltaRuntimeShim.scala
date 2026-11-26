@@ -111,6 +111,8 @@ trait DeltaRuntimeShim {
 
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog
 
+  def filterIsManagedLocationProperty: Boolean = false
+
   /**
    * Detect a DataFrameWriter V1 mode("overwrite").saveAsTable operation so it retains the
    * existing table metadata. Delta versions before 4.1 require stack-trace inspection.
@@ -124,6 +126,9 @@ trait DeltaRuntimeShim {
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
   private val DELTA_MAJOR_MINOR = """^(\d+)\.(\d+)\..*""".r
+  private val SUPPORTED_DELTA_43_VERSIONS = Set("4.3.0", "4.3.1", "4.3.2.2")
+  private val DELTA_43_FILTER_IS_MANAGED_LOCATION_VERSIONS =
+    SUPPORTED_DELTA_43_VERSIONS - "4.3.0"
 
   private def isDelta42Plus(deltaVersion: String): Boolean = deltaVersion match {
     case DELTA_MAJOR_MINOR(major, minor) =>
@@ -132,13 +137,20 @@ object DeltaRuntimeShim {
     case _ => false
   }
 
+  private[rapids] def isSupportedDelta43Version(deltaVersion: String): Boolean =
+    SUPPORTED_DELTA_43_VERSIONS.contains(deltaVersion)
+
+  private[rapids] def shouldFilterIsManagedLocationProperty(deltaVersion: String): Boolean =
+    DELTA_43_FILTER_IS_MANAGED_LOCATION_VERSIONS.contains(deltaVersion)
+
   private[rapids] def getDelta42PlusShimClassName(
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
     (deltaVersion, sparkVersion) match {
       case ("4.2.0", SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4")) =>
         Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
-      case ("4.3.0", SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4")) =>
+      case (_, SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4"))
+          if isSupportedDelta43Version(deltaVersion) =>
         Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
       case _ => None
     }
@@ -284,4 +296,7 @@ object DeltaRuntimeShim {
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog = {
     shimInstance.getGpuDeltaCatalog(cpuCatalog, rapidsConf)
   }
+
+  def filterIsManagedLocationProperty: Boolean =
+    shimInstance.filterIsManagedLocationProperty
 }

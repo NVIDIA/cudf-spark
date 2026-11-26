@@ -43,7 +43,9 @@ jobs:
           mvn -B -f scala2.13/pom.xml -pl tests -am
           -Dbuildver=411 -Pdelta43-tests -DskipTests install
       - name: Run Delta 4.3 factory and materialization lifecycle tests
-        run: >-
-          mvn -B -f scala2.13/pom.xml -pl tests
-          -Dbuildver=411 -Pdelta43-tests
-          -Dsuites=org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite test
+        run: |
+          for version in 4.3.0 4.3.1; do
+            mvn -B -f scala2.13/pom.xml -pl tests \
+              -Dbuildver=411 -Pdelta43-tests -Ddelta.test.version="$version" \
+              -Dsuites=org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite test
+          done
