@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@ package com.nvidia.spark.rapids
 import org.apache.spark.sql.connector.read.Scan
 
 trait GpuScan extends Scan with ScanWithMetrics {
+  /** Whether the physical plan should coalesce batches produced by this scan. */
+  def coalesceAfter: Boolean = false
+
   /** Create a version of this scan with input file name support */
   def withInputFile(): GpuScan
 }
