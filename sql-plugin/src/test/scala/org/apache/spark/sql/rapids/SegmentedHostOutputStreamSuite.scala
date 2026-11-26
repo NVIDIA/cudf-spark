@@ -34,15 +34,15 @@ import org.apache.spark.storage.ShuffleBlockId
 class SegmentedHostOutputStreamSuite extends AnyFunSuite {
   private val segmentKey = "spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize"
 
-  test("segment configuration defaults to 128 KiB and accepts only 8 KiB through 32 MiB") {
+  test("segment configuration defaults to 128 KiB and requires 8 KiB multiples up to 32 MiB") {
     assert(new RapidsConf(Map.empty[String, String]).shuffleMultiThreadedWriterBufferSegmentSize ==
       128 * 1024)
     for ((value, expected) <- Seq(
-        "8192" -> 8192, "8193" -> 8193, "128k" -> 131072, "32m" -> 33554432)) {
+        "8192" -> 8192, "24k" -> 24576, "128k" -> 131072, "32m" -> 33554432)) {
       assert(new RapidsConf(Map(segmentKey -> value)).shuffleMultiThreadedWriterBufferSegmentSize ==
         expected)
     }
-    for (value <- Seq("-1", "0", "0k", "5k", "8191", "33554433", "1g", "5x")) {
+    for (value <- Seq("-8k", "0", "0k", "8191", "8193", "12k", "33554431", "33m", "1g", "5x")) {
       intercept[IllegalArgumentException] {
         new RapidsConf(Map(segmentKey -> value)).shuffleMultiThreadedWriterBufferSegmentSize
       }
