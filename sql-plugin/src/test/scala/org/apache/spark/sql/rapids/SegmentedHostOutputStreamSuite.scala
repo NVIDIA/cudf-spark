@@ -90,7 +90,7 @@ class SegmentedHostOutputStreamSuite extends AnyFunSuite {
       new Random(19).nextBytes(bytes)
       val serialized = new ByteArrayOutputStream()
       withResource(new SegmentedHostOutputStream(128 * 1024)) { buffer =>
-        val encoded = manager.wrapStream(block, CloseShieldOutputStream.wrap(buffer))
+        val encoded = manager.wrapStream(block, new CloseShieldOutputStream(buffer))
         withResource(encoded)(_.write(bytes))
         withResource(buffer.takeBuffer())(_.writeTo(serialized))
       }

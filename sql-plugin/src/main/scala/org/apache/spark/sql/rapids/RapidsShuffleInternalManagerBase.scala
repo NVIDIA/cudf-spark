@@ -821,7 +821,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                   // Closing the codec must finish the record before its segments change owners.
                   val encoded = blockManager.serializerManager.wrapStream(
                     ShuffleBlockId(shuffleId, mapId, reducePartitionId),
-                    CloseShieldOutputStream.wrap(buffer))
+                    new CloseShieldOutputStream(buffer))
                   withResource(serializerInstance.serializeStream(encoded)) { serializer =>
                     serializer.writeKey(key.asInstanceOf[Any])
                     serializer.writeValue(value.asInstanceOf[Any])
