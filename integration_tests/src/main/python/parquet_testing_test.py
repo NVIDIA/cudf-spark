@@ -22,8 +22,7 @@ from data_gen import copy_and_update, non_utc_allow
 from marks import allow_non_gpu
 from pathlib import Path
 import pytest
-from spark_session import (
-    is_before_spark_340, is_databricks143, is_spark_350_or_later, is_spark_411_or_later)
+from spark_session import is_before_spark_340, is_spark_350_or_later, is_spark_411_or_later
 import warnings
 
 _rebase_confs = {
@@ -62,9 +61,9 @@ if is_before_spark_340():
     _xfail_files["delta_length_byte_array.parquet"] = (
         "https://issues.apache.org/jira/browse/SPARK-40128")
 
-# LZ4_RAW requires Spark 3.5+ and is absent from DBR 14.3's Parquet 1.12.
+# LZ4_RAW requires Spark 3.5+.
 # Both GPU footer readers also decode the footer through ParquetFileReader.
-if not is_spark_350_or_later() or is_databricks143():
+if not is_spark_350_or_later():
     _error_files["lz4_raw_compressed.parquet"] = "Exception"
     _error_files["lz4_raw_compressed_larger.parquet"] = "Exception"
 
