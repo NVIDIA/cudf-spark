@@ -51,7 +51,7 @@ def affected_suites(root, base, merge, paths):
             # Include runtime scripts/config: e.g. filecache-enabled and locale-specific invocations.
             # This module's examples and human-readable docs are not suite consumers.
             refs = subprocess.run(["git", "grep", "-q", "-I", "-F", "-w", "-e", name, base, merge, "--",
-                                   f":(exclude){path}", ":(exclude).github/workflows/gpu-ci/unit_impact.py",
+                                   f":(exclude){path}", ":(exclude).github/workflows/gpu-ci/ut_impact.py",
                                    ":(exclude)*.md", ":(exclude)*.rst", ":(exclude)*.adoc"], cwd=root)
             if refs.returncode != 1:  # A reference or a failed lookup keeps full coverage.
                 return []

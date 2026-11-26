@@ -58,7 +58,7 @@ def gpu_matrix(root, suites, base=None, merge=None):
     if any(set(shards) != {1, 2} for shards in it_shards.values()):
         raise ValueError("Each integration-test shim requires both case partitions")
     if base and merge:
-        from impact import select_impact
+        from select_impact import select_impact
 
         plan = select_impact(root, base, merge, runtime="standalone")
         if plan["mode"] == "integration" and it_shards:
