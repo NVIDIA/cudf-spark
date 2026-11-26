@@ -30,7 +30,7 @@ from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
     is_spark_320_or_later, is_spark_340_or_later, is_spark_350_or_later, \
     supports_delta_lake_deletion_vectors, is_spark_412_or_later, \
-    gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
+    gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks143, is_databricks173_or_later
 
 _conf = {'spark.rapids.sql.explain': 'ALL'}
 
@@ -1065,8 +1065,8 @@ def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
-                    reason="Mapped filter pushdown requires the OSS Delta 3.3+ V1 reader")
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="Mapped filter pushdown requires OSS Delta 3.3 or later")
 def test_delta_renamed_column_range_or_null_pushdown(spark_tmp_path):
     path = spark_tmp_path + "/renamed_column"
     conf = {
@@ -1087,7 +1087,11 @@ def test_delta_renamed_column_range_or_null_pushdown(spark_tmp_path):
         spark.sql(f"ALTER TABLE delta.`{path}` RENAME COLUMN score TO rating")
         files = spark.read.format("delta").load(path).inputFiles()
         assert len(files) == len(rows)
-        physical_columns = spark.read.parquet(files[0]).columns
+        jvm = spark.sparkContext._jvm
+        footer = jvm.org.apache.parquet.hadoop.ParquetFileReader.readFooter(
+            spark.sparkContext._jsc.hadoopConfiguration(), jvm.org.apache.hadoop.fs.Path(files[0]))
+        physical_columns = {field.getName()
+                            for field in footer.getFileMetaData().getSchema().getFields()}
         assert {"score", "rating"}.isdisjoint(physical_columns), physical_columns
 
     with_cpu_session(setup, conf=conf)
@@ -1099,7 +1103,10 @@ def test_delta_renamed_column_range_or_null_pushdown(spark_tmp_path):
     expected = [Row(id=1), Row(id=3), Row(id=4)]
     assert sorted(with_cpu_session(lambda spark: read(spark).collect(), conf=conf)) == expected
 
+    row_groups_fetched = None
+
     def check_pushdown(_cpu_plan, gpu_plan):
+        nonlocal row_groups_fetched
         scans = [node for node in collect_plan_nodes(gpu_plan)
                  if node.getClass().getSimpleName() == "GpuFileSourceScanExec"]
         assert len(scans) == 1, gpu_plan
@@ -1107,10 +1114,14 @@ def test_delta_renamed_column_range_or_null_pushdown(spark_tmp_path):
         pushed = scan.metadata().apply("PushedFilters").replace(" ", "")
         assert "Or(IsNull(rating),And(GreaterThanOrEqual(rating,10),LessThan(rating,20)))" in pushed
         assert plan_metric(scan, "numFiles") == 6
-        assert plan_metric(scan, "rowGroupsFetched") == 3
+        row_groups_fetched = plan_metric(scan, "rowGroupsFetched")
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         read, conf=conf, gpu_plan_assertion=check_pushdown)
+    # Keep the result comparison active on DBR 14.3 while its PERFILE reader disables pushdown.
+    if is_databricks143() and row_groups_fetched == 6:
+        pytest.xfail("https://github.com/NVIDIA/cudf-spark/issues/17154")
+    assert row_groups_fetched == 3
 
 
 @allow_non_gpu(*delta_meta_allow)
