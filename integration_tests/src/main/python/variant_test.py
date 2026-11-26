@@ -28,13 +28,9 @@ from conftest import is_databricks_runtime, is_not_utc, spark_jvm
 from data_gen import idfn
 from marks import (allow_non_gpu, allow_non_gpu_conditional, ignore_order, incompat,
                    validate_execs_in_gpu_plan)
-from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
+from spark_session import (is_before_spark_400, is_spark_40x,
                            is_spark_410_or_later, is_spark_411_or_later, with_cpu_session,
                            with_gpu_session)
-
-pytestmark = pytest.mark.skipif(
-    is_databricks_runtime() and not is_databricks173_or_later(),
-    reason='Variant extraction is supported for Databricks 17.3+')
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
