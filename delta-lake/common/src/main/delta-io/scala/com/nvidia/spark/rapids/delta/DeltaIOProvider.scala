@@ -372,6 +372,7 @@ object DeltaProbeImpl extends Logging {
   // Non-Delta queries touch these shared registration and probe hooks during planning, so link
   // them up front while failures can still fall back to NoDeltaProvider.
   private def validateForPlanning(provider: DeltaProvider): Unit = {
+    provider.getScans
     provider.getCreatableRelationRules
     provider.getExecRules
     provider.getRunnableCommandRules
@@ -381,6 +382,7 @@ object DeltaProbeImpl extends Logging {
     provider.isSupportedFormat(classOf[FileFormat])
     provider.isSupportedWrite(classOf[SupportsWrite])
     provider.isSupportedCatalog(classOf[StagingTableCatalog])
+    provider.isPushDVPredicateDownEnabled(new RapidsConf(Map.empty[String, String]))
   }
 
   // The shim is created reflectively, which wraps anything its constructor throws, including

@@ -123,9 +123,14 @@ trait DeltaRuntimeShim {
 
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
+  private val DeltaMajorMinor = """^(\d+)\.(\d+)\..*""".r
 
-  private def isDelta42Plus(deltaVersion: String): Boolean =
-    deltaVersion.startsWith("4.2.") || deltaVersion.startsWith("4.3.")
+  private def isDelta42Plus(deltaVersion: String): Boolean = deltaVersion match {
+    case DeltaMajorMinor(major, minor) =>
+      val maj = BigInt(major)
+      maj > 4 || (maj == 4 && BigInt(minor) >= 2)
+    case _ => false
+  }
 
   private[rapids] def getDelta42PlusShimClassName(
       deltaVersion: String,

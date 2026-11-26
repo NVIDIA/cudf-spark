@@ -106,6 +106,11 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, sparkVersion).isEmpty)
     }
     assert(DeltaRuntimeShim.getShimClassName("4.3.1").isEmpty)
+    Seq("4.4.0", "4.4.1", "5.0.0").foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, "4.0.1").isEmpty,
+        deltaVersion)
+      assert(DeltaRuntimeShim.getShimClassName(deltaVersion).isEmpty, deltaVersion)
+    }
   }
 
   test("existing Delta versions use the pre-4.2 runtime shim selection") {

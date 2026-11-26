@@ -51,6 +51,11 @@ class DeltaProbeImplSuite extends AnyFunSuite {
   }
 
   test("planning-hook linkage failures after shim construction fall back to NoDeltaProvider") {
+    val brokenScans = mock[DeltaProvider]
+    when(brokenScans.getScans).thenThrow(
+      new NoClassDefFoundError("io/delta/spark/internal/v2/read/SparkScan"))
+    assert(DeltaProbeImpl.providerOrNoDelta(Some(brokenScans)) eq NoDeltaProvider)
+
     val brokenExecRules = mock[DeltaProvider]
     when(brokenExecRules.getExecRules).thenThrow(
       new NoClassDefFoundError("org/apache/spark/sql/delta/commands/DeleteCommand"))
