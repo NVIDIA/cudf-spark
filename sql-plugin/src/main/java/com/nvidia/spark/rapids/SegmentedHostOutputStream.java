@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Objects;
 
 import ai.rapids.cudf.HostMemoryBuffer;
+import com.nvidia.spark.rapids.utils.ResourceUtil;
 
 /** Writes a shuffle record into fixed-size host buffers owned by the producer until handoff. */
 public final class SegmentedHostOutputStream extends OutputStream {
@@ -101,20 +102,20 @@ public final class SegmentedHostOutputStream extends OutputStream {
   }
 
   private static void closeSegments(List<HostMemoryBuffer> buffers) {
-    RuntimeException failure = null;
+    Throwable failure = null;
     for (HostMemoryBuffer buffer : buffers) {
       try {
         buffer.close();
-      } catch (RuntimeException e) {
+      } catch (RuntimeException | Error e) {
         if (failure == null) {
           failure = e;
-        } else {
+        } else if (failure != e) {
           failure.addSuppressed(e);
         }
       }
     }
     if (failure != null) {
-      throw failure;
+      throw ResourceUtil.propagate(failure);
     }
   }
 

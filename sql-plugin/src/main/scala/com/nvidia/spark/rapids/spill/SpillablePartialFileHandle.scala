@@ -724,9 +724,9 @@ class SpillablePartialFileHandle private (
       spilledToDisk = true
       spillCount += 1
       SpillFramework.removeFromHostStore(this)
-      bufferToSpill.close()
       host = None
       currentBufferCapacity = 0L
+      bufferToSpill.close()
 
       if (!commit) {
         // if we are not committing, we want to account for these bytes
@@ -901,7 +901,7 @@ class SpillablePartialFileHandle private (
     var interrupted = false
     try {
       // Collect resources to close under lock, then close them outside lock
-      val (bos, fos, bis, fis, fc, raf) = synchronized {
+      val (buffer, bos, fos, bis, fis, fc, raf) = synchronized {
         // Wait for any in-progress spill to complete before closing buffer.
         // close() has already committed this handle's closed state, so cleanup must finish even
         // if this thread is interrupted while waiting. Restore the interrupt flag after cleanup.
@@ -927,7 +927,7 @@ class SpillablePartialFileHandle private (
         }
 
         // Collect streams/channels to close
-        val result = (bufferedOutputStream, fileOutputStream,
+        val result = (host, bufferedOutputStream, fileOutputStream,
           bufferedInputStream, fileInputStream, fileChannel, randomAccessFile)
 
         // Clear references
@@ -938,29 +938,33 @@ class SpillablePartialFileHandle private (
         fileChannel = None
         randomAccessFile = None
 
-        // Release host buffer (removes from SpillFramework tracking and closes buffer)
-        releaseHostResource()
+        SpillFramework.removeFromHostStore(this)
+        host = None
         currentBufferCapacity = 0L
 
         result
       }
 
-      // Close streams outside lock (IO operations can be slow)
-      tryClose(bos, "bufferedOutputStream")
-      tryClose(fos, "fileOutputStream")
-      tryClose(bis, "bufferedInputStream")
-      tryClose(fis, "fileInputStream")
-      tryClose(fc, "fileChannel")
-      tryClose(raf, "randomAccessFile")
+      try {
+        // Close streams outside lock (IO operations can be slow)
+        tryClose(bos, "bufferedOutputStream")
+        tryClose(fos, "fileOutputStream")
+        tryClose(bis, "bufferedInputStream")
+        tryClose(fis, "fileInputStream")
+        tryClose(fc, "fileChannel")
+        tryClose(raf, "randomAccessFile")
 
-      // Delete file if it exists
-      if (file != null && file.exists()) {
-        try {
-          file.delete()
-        } catch {
-          case e: Exception =>
-            logWarning(s"Failed to delete file ${file.getAbsolutePath}", e)
+        // Delete file if it exists
+        if (file != null && file.exists()) {
+          try {
+            file.delete()
+          } catch {
+            case e: Exception =>
+              logWarning(s"Failed to delete file ${file.getAbsolutePath}", e)
+          }
         }
+      } finally {
+        buffer.foreach(_.close())
       }
     } finally {
       if (interrupted) {

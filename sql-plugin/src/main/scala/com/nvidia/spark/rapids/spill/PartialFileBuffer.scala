@@ -103,9 +103,20 @@ private[spill] final class OwnedRecordBuffer extends PartialFileBuffer {
   }
 
   override def close(): Unit = {
-    records.forEach(_.data.close())
-    records.clear()
-    size = 0L
-    allocatedBytes = 0L
+    var failure: Throwable = null
+    try {
+      records.forEach { record =>
+        try {
+          record.data.close()
+        } catch {
+          case t: Throwable => failure = SpillFramework.addFailure(failure, t)
+        }
+      }
+    } finally {
+      records.clear()
+      size = 0L
+      allocatedBytes = 0L
+    }
+    if (failure != null) throw failure
   }
 }

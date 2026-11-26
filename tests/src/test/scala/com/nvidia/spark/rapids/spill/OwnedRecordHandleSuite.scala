@@ -18,7 +18,9 @@ package com.nvidia.spark.rapids.spill
 import java.io.IOException
 import java.nio.file.Files
 
-import ai.rapids.cudf.{PageableMemoryPool, PinnedMemoryPool}
+import scala.collection.mutable.ArrayBuffer
+
+import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryAllocator, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool}
 import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
@@ -182,6 +184,42 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
       val actual = new Array[Byte](4)
       assert(h.read(actual, 0, 4) == 4)
       assert(actual.sameElements(Array[Byte](1, 2, 3, 4)))
+    }
+  }
+
+  test("close releases all segments and records after native close callbacks fail") {
+    val allocator = DefaultHostMemoryAllocator.get
+    val allocated = ArrayBuffer.empty[HostMemoryBuffer]
+    val first = new AssertionError("first segment")
+    val second = new IllegalStateException("second record")
+    val file = Files.createTempFile("owned-close", ".bin").toFile
+    val handle = create(file)
+    DefaultHostMemoryAllocator.set(new HostMemoryAllocator {
+      override def allocate(bytes: Long): HostMemoryBuffer = allocate(bytes, false)
+      override def allocate(bytes: Long, preferPinned: Boolean): HostMemoryBuffer = {
+        val segment = allocator.allocate(bytes, preferPinned)
+        allocated += segment
+        segment
+      }
+    })
+    try {
+      handle.writeRecord(record(Array[Byte](1, 2), segment = 1))
+      handle.writeRecord(record(Array[Byte](3), segment = 1))
+      handle.writeRecord(record(Array[Byte](4), segment = 1))
+      handle.finishWrite()
+      assert(allocated.size == 4)
+      HostAlloc.addEventHandler(allocated(0), _ => throw first)
+      HostAlloc.addEventHandler(allocated(2), _ => throw second)
+      assert(intercept[AssertionError](handle.close()) eq first)
+      assert(first.getSuppressed.toSeq == Seq(second))
+      handle.close()
+      assert(allocated.forall(_.getRefCount == 0))
+      assert(handle.host.isEmpty && SpillFramework.stores.hostStore.totalSize == 0)
+      assert(!file.exists())
+    } finally {
+      DefaultHostMemoryAllocator.set(allocator)
+      handle.close()
+      allocated.filter(_.getRefCount > 0).foreach(_.close())
     }
   }
 
