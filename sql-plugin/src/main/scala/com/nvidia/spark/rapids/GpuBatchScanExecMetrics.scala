@@ -18,13 +18,14 @@ package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
 
-import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
 trait GpuBatchScanExecMetrics extends GpuExec {
   import GpuMetric._
 
-  def scan: Scan
+  def scan: GpuScan
+
+  override def coalesceAfter: Boolean = scan.coalesceAfter
 
   override def supportsColumnar = true
 
@@ -59,7 +60,7 @@ trait GpuBatchScanExecMetrics extends GpuExec {
 
   // Delta V2 and Iceberg scans don't register these yet, so their row group counts are dropped.
   private lazy val parquetRowGroupMetrics: Map[String, GpuMetric] = scan match {
-    case _: GpuParquetScan => createParquetRowGroupMetrics()
+    case _: GpuParquetScan => createParquetRowGroupMetrics() ++ createHybridScanGdsMetrics()
     case _ => Map.empty
   }
 

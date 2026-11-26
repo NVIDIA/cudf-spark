@@ -497,6 +497,9 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                    reason="Remote catalogs can fail on binary/fixed initial defaults. "
+                           "See https://github.com/NVIDIA/cudf-spark/issues/17078.")
 def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
     _setup_iceberg_v3_defaults_table(table_name)
@@ -607,6 +610,9 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 @pytest.mark.parametrize("project_default", [False, True], ids=["unprojected", "projected"])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                    reason="Remote catalogs can fail on binary/fixed initial defaults. "
+                           "See https://github.com/NVIDIA/cudf-spark/issues/17078.")
 def test_iceberg_v3_unsupported_initial_defaults_fallback(
         spark_tmp_table_factory, unsupported_column, project_default, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -1151,6 +1157,7 @@ def _append_external_parquet(spark, table, path, row_count):
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="External Parquet files require a local catalog")
 def test_iceberg_unmapped_validity_helper_id(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -1217,6 +1224,7 @@ def test_iceberg_unmapped_validity_helper_id(
     not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="External Parquet files require a local catalog")
 def test_iceberg_legacy_list_initial_defaults(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)

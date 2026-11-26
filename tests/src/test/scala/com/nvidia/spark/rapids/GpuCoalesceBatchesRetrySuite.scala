@@ -279,7 +279,8 @@ class GpuCoalesceBatchesRetrySuite
       NoopMetric,
       NoopMetric,
       "test",
-      false)
+      false,
+      inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
     with CoalesceIteratorMocks {
 
     override def populateCandidateBatches(): Boolean = {

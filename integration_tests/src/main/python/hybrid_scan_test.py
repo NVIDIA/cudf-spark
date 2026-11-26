@@ -19,17 +19,18 @@ parquet-mr path and still returns the right answer, so `hybrid_conf` makes a fal
 query instead; a test that is meant to fall back uses `fallback_conf`.
 """
 
+import os
 import pytest
 
 from datetime import date, datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
     assert_gpu_and_cpu_row_counts_equal, assert_spark_exception, collect_plan_nodes, plan_metric
 from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
-from marks import allow_non_gpu, inject_oom
+from marks import allow_non_gpu, ignore_order, inject_oom
 from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf, \
     rebase_write_legacy_conf
 from spark_session import with_cpu_session, with_gpu_session
@@ -275,6 +276,69 @@ def test_hybrid_scan_reader_runs(spark_tmp_path, reader_mode):
         lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
         conf=_metrics_conf(reader_mode),
         gpu_plan_assertion=check)
+
+
+def _local_paths(spark, data_path):
+    """The local paths of the Parquet files under `data_path`, or None if any is not local."""
+    files = [urlparse(f) for f in spark.read.parquet(data_path).inputFiles()]
+    if not all(f.scheme == 'file' for f in files):
+        return None
+    return sorted(unquote(f.path) for f in files)
+
+
+def _checksum_file(local_path):
+    """The `.crc` sidecar Hadoop's local filesystem writes beside each file."""
+    head, tail = os.path.split(local_path)
+    return os.path.join(head, '.' + tail + '.crc')
+
+
+@_metric_reader_modes
+def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
+    """A local file's bytes are all read with KvikIO, and any other file's with none. The local
+    files' checksum sidecars are removed, since a file with one is read through Hadoop."""
+    def check(cpu_plan, gpu_plan):
+        scan = [node for node in collect_plan_nodes(gpu_plan)
+                if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
+        bytes_requested = plan_metric(scan, 'hybridScanBytesRequested')
+        assert bytes_requested > 0, 'no column chunks were requested'
+        native_bytes = plan_metric(scan, 'hybridScanNativeHostBytesRead')
+        if is_local:
+            assert native_bytes == bytes_requested, \
+                'requested {} bytes, read {} with KvikIO'.format(bytes_requested, native_bytes)
+        else:
+            assert native_bytes in (-1, 0), 'read {} bytes of a remote file with KvikIO'.format(
+                native_bytes)
+
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
+    local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
+    is_local = local_paths is not None
+    for path in local_paths or []:
+        if os.path.exists(_checksum_file(path)):
+            os.remove(_checksum_file(path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
+        conf=_metrics_conf(reader_mode),
+        gpu_plan_assertion=check)
+
+
+@_metric_reader_modes
+def test_hybrid_scan_local_checksum(spark_tmp_path, reader_mode):
+    """A local file changed after Spark wrote it fails the read on its checksum, as it does
+    through Hadoop, rather than returning the changed data."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=2))
+    local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
+    if local_paths is None or not os.path.exists(_checksum_file(local_paths[0])):
+        pytest.skip('only a checksummed local filesystem writes checksum sidecars')
+    # Flip a byte of the first column chunk, which starts after the 4-byte magic.
+    with open(local_paths[0], 'r+b') as f:
+        f.seek(4)
+        changed = bytes([f.read(1)[0] ^ 0xFF])
+        f.seek(4)
+        f.write(changed)
+    assert_gpu_and_cpu_error(lambda spark: spark.read.parquet(data_path).collect(),
+                             _metrics_conf(reader_mode), 'ChecksumException')
 
 
 @_metric_reader_modes
@@ -852,3 +916,35 @@ def test_hybrid_scan_corrupt_file(spark_tmp_path, ignore_corrupt):
         assert_gpu_and_cpu_are_equal_collect(read, conf=conf)
     else:
         assert_gpu_and_cpu_error(lambda spark: read(spark).collect(), conf, 'SparkException')
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
+def test_hybrid_scan_dotted_column_collision(spark_tmp_path, reader_mode):
+    projection = ["c", "`a.b`"]
+    path = spark_tmp_path + "/dotted_collision"
+    gens = [
+        ("a", StructGen([("b", IntegerGen(min_val=5, max_val=6, nullable=False))],
+                        nullable=False)),
+        ("a.b", IntegerGen(min_val=1000, max_val=2000, nullable=False)),
+        ("c", IntegerGen(min_val=100, max_val=200, nullable=False)),
+    ]
+    with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=2)
+                     .write.parquet(path))
+    options = {"spark.rapids.sql.format.parquet.reader.type": reader_mode,
+               "spark.sql.parquet.fieldId.read.enabled": "false"}
+    queries = [
+        lambda spark: spark.read.parquet(path).selectExpr(*projection),
+        lambda spark: spark.read.parquet(path).filter("`a.b` >= 1500").select("c"),
+    ]
+    # Both a projected dotted root and a filter-only dotted root must safely fall back.
+    # fallback_conf enables hybrid; hybrid_conf additionally fails if fallback occurs.
+    for query in queries:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=fallback_conf(**options))
+        assert_spark_exception(
+            lambda: with_gpu_session(lambda spark: query(spark).collect(),
+                                     conf=hybrid_conf(**options)),
+            error_message="column a.b contains a literal dot")
+    # Pruning the dotted root and its predicate still permits hybrid execution.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).select("c"), conf=hybrid_conf(**options))

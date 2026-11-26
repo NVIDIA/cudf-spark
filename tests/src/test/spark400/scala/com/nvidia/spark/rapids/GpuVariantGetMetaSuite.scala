@@ -28,16 +28,15 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DecimalType, DoubleType,
-  FloatType, IntegerType, LongType, ShortType, StringType, TimestampNTZType, TimestampType,
-  VariantType}
+import org.apache.spark.sql.types.{DataType, DecimalType, IntegerType, TimestampNTZType,
+  TimestampType, VariantType}
 
 class GpuVariantGetMetaSuite extends AnyFunSuite {
   private def loadClass(name: String): Class[_] = Class.forName(name, false,
     Thread.currentThread().getContextClassLoader)
 
-  test("cached decimal status capability uses the provider loader rather than the context loader") {
-    val moduleName = "com.nvidia.spark.rapids.GpuVariantExtraction$"
+  test("cached status capability uses the expression loader rather than the context loader") {
+    val moduleName = "com.nvidia.spark.rapids.GpuVariantGet$"
     val parent = classOf[GpuVariantGet].getClassLoader
     val resource = parent.getResourceAsStream(moduleName.replace('.', '/') + ".class")
     assert(resource != null)
@@ -52,8 +51,11 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     try {
       thread.setContextClassLoader(new ClassLoader(null) {})
       val module = moduleClass.getField("MODULE$").get(null)
-      val available = moduleClass.getMethod("isAvailable").invoke(module)
-      assert(available == java.lang.Boolean.TRUE)
+      Seq("isVariantCudfAvailable", "isVariantDecimalCudfAvailable").foreach { probe =>
+        withClue(probe) {
+          assert(moduleClass.getMethod(probe).invoke(module) == java.lang.Boolean.TRUE)
+        }
+      }
     } finally {
       thread.setContextClassLoader(original)
     }
@@ -62,8 +64,9 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
   private def fixtureApis(
       utils: Class[_] = classOf[Utils],
       result: Class[_] = classOf[Result],
-      status: Class[_] = classOf[Status]): Boolean = {
-    GpuVariantExtraction.hasRequiredApis {
+      status: Class[_] = classOf[Status],
+      check: (String => Class[_]) => Boolean = GpuVariantExtraction.hasDecimalApis): Boolean = {
+    check {
       case "ai.rapids.cudf.VariantUtils" => utils
       case "ai.rapids.cudf.VariantOperationResult" => result
       case "ai.rapids.cudf.VariantOperationStatus" => status
@@ -73,108 +76,86 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
 
   test("coordinated reflection fixtures satisfy every required API") {
     assert(fixtureApis())
+    assert(fixtureApis(check = GpuVariantExtraction.hasRequiredApis))
   }
 
-  test("legacy scalar capability does not probe decimal status availability") {
-    Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType,
-      StringType).foreach { target =>
-      var calls = 0
-      assert(GpuVariantGet.isVariantCudfAvailable(target, () => {
-        calls += 1
-        true
-      }, () => fail("legacy target must not probe decimal APIs")), target.toString)
-      assert(calls == 1)
-      assert(!GpuVariantGet.isVariantCudfAvailable(target, () => false,
-        () => fail("legacy target must not probe decimal APIs")), target.toString)
+  // Each rejected fixture differs from the accepted one in one member. Checking the accepted
+  // fixtures in the same call shows that the rejection is not a failure to load the fixtures.
+  private def assertFixtureRejected(
+      utils: Class[_] = classOf[Utils],
+      result: Class[_] = classOf[Result],
+      status: Class[_] = classOf[Status]): Unit = {
+    assert(fixtureApis())
+    assert(!fixtureApis(utils, result, status))
+    assert(!fixtureApis(utils, result, status, GpuVariantExtraction.hasRequiredApis))
+  }
+
+  test("plain cast must be static, accept a value and type, and return ColumnVector") {
+    Seq(classOf[StatusCastOnlyUtils], classOf[WrongCastParametersUtils],
+      classOf[WrongCastReturnUtils], classOf[NonStaticCastUtils]).foreach { utils =>
+      withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
     }
   }
 
-  test("decimal status capability does not probe legacy value-only availability") {
-    Seq(DecimalType(10, 2), DecimalType(38, 38)).foreach { target =>
-      var calls = 0
-      assert(GpuVariantGet.isVariantCudfAvailable(target,
-        () => fail("decimal target must not probe legacy APIs"), () => {
-          calls += 1
-          true
-        }))
-      assert(calls == 1)
-      assert(!GpuVariantGet.isVariantCudfAvailable(target,
-        () => fail("decimal target must not probe legacy APIs"), () => false))
-    }
-  }
-
-  test("unavailable decimal APIs reject decimal planning without disabling legacy targets") {
-    Seq(DecimalType(10, 2), IntegerType).foreach { target =>
-      val expression = VariantGet(BoundReference(0, VariantType, nullable = true),
-        Literal("$.id"), target, failOnError = false, timeZoneId = Some("UTC"))
-      val conf = new RapidsConf(Map(
-        RapidsConf.ENABLE_CPU_BRIDGE.key -> "true",
-        RapidsConf.INCOMPATIBLE_OPS.key -> "true"))
-      val rule = GpuOverrides.expressions(classOf[VariantGet])
-      val meta = new GpuVariantGetMeta(expression, conf, None, rule) {
-        override protected def isCudfAvailable: Boolean =
-          GpuVariantGet.isVariantCudfAvailable(target, () => true, () => false)
+  test("only decimal needs a static status cast that takes the prior status") {
+    // A cuDF without a usable status cast keeps every other target on the GPU.
+    Seq(classOf[PlainCastUtils], classOf[WrongStatusCastParametersUtils],
+      classOf[WrongStatusCastReturnUtils], classOf[NonStaticStatusCastUtils]).foreach { utils =>
+      withClue(utils.getSimpleName) {
+        assert(fixtureApis())
+        assert(!fixtureApis(utils = utils))
+        assert(fixtureApis(utils = utils, check = GpuVariantExtraction.hasRequiredApis))
       }
-      meta.tagForGpu()
-      assert(meta.canThisBeReplaced == (target == IntegerType), target.toString)
     }
   }
 
-  test("production decimal capability routing is independent of the context loader") {
-    val thread = Thread.currentThread()
-    val original = thread.getContextClassLoader
-    try {
-      thread.setContextClassLoader(new ClassLoader(null) {})
-      // This exercises the public wrapper's real supplier wiring, not only its injected router.
-      // Decimal availability must not depend on this unrelated context loader.
-      assert(GpuVariantGet.isVariantCudfAvailable(DecimalType(10, 2)))
-    } finally {
-      thread.setContextClassLoader(original)
-    }
-  }
-
-  test("decimal extraction and cast APIs must be static and return the expected result owner") {
-    Seq(classOf[WrongExtractionReturnUtils], classOf[NonStaticExtractionUtils],
-      classOf[NonStaticCastUtils]).foreach { utils =>
-      withClue(utils.getSimpleName) { assert(!fixtureApis(utils = utils)) }
-    }
-  }
-
-  test("status cast must accept the prior status and return the expected result owner") {
-    Seq(classOf[ExtractionOnlyUtils], classOf[WrongCastParametersUtils],
-      classOf[WrongCastReturnUtils]).foreach { utils =>
-      withClue(utils.getSimpleName) { assert(!fixtureApis(utils = utils)) }
+  test("extraction must be static and return the result owner") {
+    Seq(classOf[WrongExtractionReturnUtils], classOf[NonStaticExtractionUtils]).foreach { utils =>
+      withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
     }
   }
 
   test("result must implement AutoCloseable even if it declares close") {
-    assert(!fixtureApis(utils = classOf[NonOwningUtils], result = classOf[NonOwningResult]))
+    assertFixtureRejected(utils = classOf[NonOwningUtils], result = classOf[NonOwningResult])
+    // An AutoCloseable already inherits close():void, so a missing/wrong close return cannot
+    // be isolated with a legal Java fixture after the assignability check succeeds.
   }
 
   test("result value getter must exist and return ColumnVector") {
     Seq((classOf[MissingValueUtils], classOf[MissingValueResult]),
       (classOf[WrongValueUtils], classOf[WrongValueResult])).foreach { case (utils, result) =>
-      withClue(result.getSimpleName) { assert(!fixtureApis(utils = utils, result = result)) }
+      withClue(result.getSimpleName) { assertFixtureRejected(utils = utils, result = result) }
     }
   }
 
   test("result status getter must exist and return ColumnVector") {
     Seq((classOf[MissingStatusUtils], classOf[MissingStatusResult]),
       (classOf[WrongStatusUtils], classOf[WrongStatusResult])).foreach { case (utils, result) =>
-      withClue(result.getSimpleName) { assert(!fixtureApis(utils = utils, result = result)) }
+      withClue(result.getSimpleName) { assertFixtureRejected(utils = utils, result = result) }
     }
   }
 
   test("status native ID must exist and return primitive int") {
     Seq(classOf[MissingNativeIdStatus], classOf[WrongNativeIdStatus]).foreach { status =>
-      withClue(status.getSimpleName) { assert(!fixtureApis(status = status)) }
+      withClue(status.getSimpleName) { assertFixtureRejected(status = status) }
     }
   }
 
   test("each required status field must exist and have the status type") {
-    Seq(classOf[MissingSuccessStatus], classOf[WrongSuccessStatus],
-      classOf[MissingRowNullStatus], classOf[WrongRowNullStatus]).foreach { status =>
-      withClue(status.getSimpleName) { assert(!fixtureApis(status = status)) }
+    Seq(classOf[MissingVariantNullStatus], classOf[WrongVariantNullStatus],
+      classOf[MissingMalformedStatus], classOf[WrongMalformedStatus]).foreach { status =>
+      withClue(status.getSimpleName) { assertFixtureRejected(status = status) }
+    }
+  }
+
+  test("only decimal needs a ROW_NULL status field of the status type") {
+    // The decimal decoder reads ROW_NULL; no other target does.
+    Seq(classOf[MissingRowNullStatus], classOf[WrongRowNullStatus]).foreach { status =>
+      withClue(status.getSimpleName) {
+        assert(fixtureApis())
+        assert(!fixtureApis(status = status))
+        assert(fixtureApis(status = status, check = GpuVariantExtraction.hasRequiredApis))
+      }
     }
   }
 
@@ -215,7 +196,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     assert(!meta.canThisBeReplaced)
   }
 
-  test("decimal support does not enable timestamps, strict mode, or bypass existing gates") {
+  test("timestamps, strict mode, and disabled gates stay on the CPU") {
     Seq(TimestampType, TimestampNTZType).foreach { target =>
       assertRejected(targetType = target)
     }

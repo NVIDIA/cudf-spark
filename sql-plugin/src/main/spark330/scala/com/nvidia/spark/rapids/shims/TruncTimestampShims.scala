@@ -15,7 +15,7 @@
  */
 /*** spark-rapids-shim-json-lines
 {"spark":["330","350","400"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -23,7 +23,11 @@ package com.nvidia.spark.rapids.shims
 import ai.rapids.cudf.{ColumnVector, Scalar}
 
 object TruncTimestampShims {
-  def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {}
+  def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {
+    // Preserve truncation behavior on Spark versions without checked subtraction.
+  }
 
-  def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {}
+  def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {
+    // Preserve truncation behavior on Spark versions without checked subtraction.
+  }
 }

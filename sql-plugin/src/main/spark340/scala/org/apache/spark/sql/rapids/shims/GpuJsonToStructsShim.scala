@@ -16,7 +16,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.shims
@@ -31,6 +31,7 @@ import org.apache.spark.sql.rapids.ExceptionTimeParserPolicy
 
 object GpuJsonToStructsShim {
   def tagDateFormatSupport(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
+    // Date format support is checked by GpuTextBasedDateUtils.tagCudfFormat; no extra checks.
   }
 
   def castJsonStringToDate(input: ColumnView, options: JSONOptions): ColumnVector = {
@@ -49,6 +50,7 @@ object GpuJsonToStructsShim {
   }
 
   def tagDateFormatSupportFromScan(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
+    // GpuJsonScan checks date format support before calling this hook.
   }
 
   def castJsonStringToDateFromScan(input: ColumnView, dt: DType,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,8 @@ package com.nvidia.spark.rapids.delta
 
 import com.nvidia.spark.rapids.RapidsMeta
 
-import org.apache.spark.sql.delta.DeltaLog
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.delta.{DeltaLog, Snapshot}
 import org.apache.spark.sql.internal.SQLConf
 
 trait DeltaConfigChecker {
@@ -32,6 +33,18 @@ trait DeltaConfigChecker {
       sqlConf: SQLConf,
       options: Map[String, String]
   ): Unit
+
+  /**
+   * Check the table being written, using the session that planned the write. The snapshot is
+   * only read when a version needs to check it. A snapshot of a table that does not exist yet has
+   * a negative version, and Delta creates that table with the session's table property defaults.
+   * Accepts everything by default.
+   */
+  def checkTableProperties(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      snapshot: => Snapshot): Unit = {}
 }
 
 object AcceptAllConfigChecker extends DeltaConfigChecker {

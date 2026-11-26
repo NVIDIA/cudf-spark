@@ -17,29 +17,41 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400"],"carryForward":"all"}
-{"spark":["350db143"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
-import org.apache.spark.sql.catalyst.expressions.{Add, Divide, EvalMode, Expression, Multiply, Remainder, Subtract}
+import com.nvidia.spark.rapids.GpuEvalMode
+
+import org.apache.spark.sql.catalyst.expressions.{Add, BinaryArithmetic, Divide, EvalMode, Expression, Multiply, Remainder, Subtract}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{Average, Sum}
 
 object TryModeShim {
-  /**
-   * Check if an expression is in TRY mode.
-   */
-  def isTryMode(expr: Expression): Boolean = {
+  private def toGpuEvalMode(evalMode: EvalMode.Value): GpuEvalMode.Value = evalMode match {
+    case EvalMode.LEGACY => GpuEvalMode.LEGACY
+    case EvalMode.ANSI => GpuEvalMode.ANSI
+    case EvalMode.TRY => GpuEvalMode.TRY
+  }
+
+  def getEvalMode(expr: BinaryArithmetic): GpuEvalMode.Value = {
     val evalMode = expr match {
       case add: Add => add.evalMode
       case sub: Subtract => sub.evalMode
       case mul: Multiply => mul.evalMode
       case div: Divide => div.evalMode
       case mod: Remainder => mod.evalMode
-      case avg: Average => avg.evalMode
-      case sum: Sum => sum.evalMode
-      case _ => throw new RuntimeException(s"Unsupported expression $expr in TRY mode")
+      case _ => throw new RuntimeException(s"Unsupported expression $expr for eval mode")
     }
-    evalMode == EvalMode.TRY
+    toGpuEvalMode(evalMode)
+  }
+
+  /**
+   * Check if an expression is in TRY mode.
+   */
+  def isTryMode(expr: Expression): Boolean = expr match {
+    case arith: BinaryArithmetic => getEvalMode(arith) == GpuEvalMode.TRY
+    case avg: Average => avg.evalMode == EvalMode.TRY
+    case sum: Sum => sum.evalMode == EvalMode.TRY
+    case _ => throw new RuntimeException(s"Unsupported expression $expr in TRY mode")
   }
 }

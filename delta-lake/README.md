@@ -19,9 +19,8 @@ and directory contains the corresponding support code.
 | 3.3.x              | Spark 3.5.[3-]  | `delta-33x`        |
 | 4.0.x              | Spark 4.0.x     | `delta-40x`        |
 | 4.1.0              | Spark 4.1.0, 4.1.1 | `delta-41x`     |
-| 4.2.0              | Spark 4.0.1, 4.1.1 | `delta-42x`     |
-| 4.3.0              | Spark 4.0.1, 4.1.1 | `delta-43x`     |
-| Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
+| 4.2.0              | Spark 4.0.1, 4.0.5, 4.1.1, 4.1.4 | `delta-42x` |
+| 4.3.0              | Spark 4.0.1, 4.0.5, 4.1.1, 4.1.4 | `delta-43x` |
 | Databricks 17.3    | Databricks 17.3 | `delta-spark400db173` |
 | Databricks 18.3 | Databricks 18.3 | `delta-spark410db183` |
 
@@ -47,22 +46,11 @@ The following table details how the common subdirectories map to Delta Lake vers
 | `common/src/main/databricks` | Delta Lake on all Databricks platforms     |
 | `common/src/main/delta-io`   | Delta Lake on all non-Databricks platforms |
 | `delta-lake/src/main/delta*` | Directories supporting various version ranges |
-| `common/src/main/db-350db143-400db173/scala` | DBR 14.3 and 17.3 |
-| `common/src/main/db-350db143-410db183/scala` | DBR 14.3, 17.3 and 18.3 |
 | `common/src/main/db-400db173-410db183/{scala,java}` | DBR 17.3 and 18.3 |
 
-These directories provide source roots, not independently built modules. The full
-`db-400db173-410db183` source set requires `db-350db143-410db183`; their command and
-base-class implementations reference one another.
-
-- `db-400db173-410db183` needs compatible `GpuOptimisticTransaction`,
-  `GpuWriteIntoDeltaBase`, and `GpuCreateDeltaTableCommandBase` implementations.
-  Its commands use `GpuDeleteCommandBase`, `GpuUpdateCommandBase`,
-  `GpuOptimizeExecutorBase`, and `PartitionedBin` from `db-350db143-410db183`.
-- `db-350db143-410db183` needs compatible `GpuOptimisticTransactionBase`,
-  `GpuCreateDeltaTableCommand`, `GpuDeleteCommand`, `GpuWriteIntoDelta`, and
-  `UpdateCommandShims` implementations. DBR 17.3 and 18.3 obtain the latter four
-  from `db-400db173-410db183`; DBR 14.3 supplies its own implementations.
+These directories provide source roots that the Databricks modules compile together with their
+runtime-specific implementations. The create-table and write-command base classes live in
+the respective DBR modules because their Databricks APIs differ.
 
 DBR 17.3 and 18.3 share the native deletion-vector reader core, legacy Parquet reader,
 low-shuffle MERGE command, provider base, write commands, MERGE command metadata shim,

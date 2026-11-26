@@ -107,6 +107,20 @@
                     <version>2.1.210</version>
                     <scope>test</scope>
                 </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-hive_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-tags_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
             </dependencies>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -317,32 +331,6 @@
             </properties>
             <modules>
                 <module>delta-lake/delta-24x</module>
-                <module>iceberg/iceberg-stub</module>
-            </modules>
-        </profile>
-        --><!-- #endif scala-2.12 -->
-
-        <!-- Note Databricks requires 2 properties -Ddatabricks and -Dbuildver=3*db -->
-        <!-- #if scala-2.12 --><!--
-        <profile>
-            <id>release350db143</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>350db143</value>
-                </property>
-            </activation>
-            <properties>
-                <spark.version.classifier>spark350db143</spark.version.classifier>
-                <spark.version>${spark350db143.version}</spark.version>
-                <hadoop.client.version>3.3.1</hadoop.client.version>
-                <rat.consoleOutput>true</rat.consoleOutput>
-                <parquet.hadoop.version>1.12.0</parquet.hadoop.version>
-                <rapids.delta.artifactId1>cudf-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
-            </properties>
-            <modules>
-                <module>shim-deps/databricks</module>
-                <module>delta-lake/delta-spark350db143</module>
                 <module>iceberg/iceberg-stub</module>
             </modules>
         </profile>
@@ -766,7 +754,11 @@
                 <shim.source.inherits>404</shim.source.inherits>
                 <spark.version>${spark405.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-42x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-43x</rapids.delta.artifactId3>
+                <delta42x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta42x.spark.artifactId>
+                <delta43x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta43x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
@@ -774,7 +766,9 @@
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
-                <module>delta-lake/delta-stub</module>
+                <module>delta-lake/delta-40x</module>
+                <module>delta-lake/delta-42x</module>
+                <module>delta-lake/delta-43x</module>
                 <module>iceberg/iceberg-1-10-x</module>
                 <module>iceberg/iceberg-1-11-x</module>
             </modules>
@@ -965,7 +959,11 @@
                 <shim.source.inherits>413</shim.source.inherits>
                 <spark.version>${spark414.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-42x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-43x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-43x</rapids.delta.artifactId3>
+                <delta42x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta42x.spark.artifactId>
+                <delta43x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta43x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
                 <rapids.iceberg.artifactId>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
@@ -973,7 +971,8 @@
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
-                <module>delta-lake/delta-stub</module>
+                <module>delta-lake/delta-42x</module>
+                <module>delta-lake/delta-43x</module>
                 <module>iceberg/iceberg-1-11-x</module>
             </modules>
             <build>
@@ -1298,7 +1297,6 @@
         <spark342.version>3.4.2</spark342.version>
         <spark343.version>3.4.3</spark343.version>
         <spark344.version>3.4.4</spark344.version>
-        <spark350db143.version>3.5.0-databricks-143</spark350db143.version>
         <spark350.version>3.5.0</spark350.version>
         <spark351.version>3.5.1</spark351.version>
         <spark352.version>3.5.2</spark352.version>
@@ -1396,7 +1394,8 @@
         </premergeUTF8.buildvers>
         <premergeScala213.buildvers>
             350,
-            401
+            401,
+            420
         </premergeScala213.buildvers>
         <jdk11.buildvers>
             331,
@@ -2127,8 +2126,8 @@ This will force full Scala code rebuild in downstream modules.
                         <!-- #if scala-2.12 --><!--
                         <requireProperty>
                           <property>buildver</property>
-                          <regex>^(33[0-4]|34[0-4]|35[0-9]|350db143)$</regex>
-                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 404, 405, 412, 413, 414, 420, or 421.</regexMessage>
+                          <regex>^(33[0-4]|34[0-4]|35[0-9])$</regex>
+                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 404, 405, 412, 413, 414, 420, or 421.</regexMessage>
                         </requireProperty>
                         --><!-- #endif scala-2.12 -->
                         <!-- #if scala-2.13 -->

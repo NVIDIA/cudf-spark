@@ -35,7 +35,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjectio
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader,
   PartitionReaderFactory}
-import org.apache.spark.sql.execution.datasources.FilePartition
+import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.internal.SQLConf
@@ -323,6 +323,29 @@ object ScanSplitHeuristic extends Logging {
       override def currentMetricsValues(): Array[CustomTaskMetric] = reader.currentMetricsValues()
     }
   }
+
+  /**
+   * Wraps a per-file read function to record each file when it is read to the end: its decoded
+   * bytes, and its own length as the listed bytes. Returns `read` unchanged when `totals` is
+   * empty, which is while history is off.
+   *
+   * @param decoded only evaluated when `totals` is defined
+   */
+  def observeFileRead[T](
+      read: PartitionedFile => Iterator[T],
+      totals: Option[SplitTotals],
+      decoded: => GpuMetric): PartitionedFile => Iterator[T] =
+    totals.fold(read) { t =>
+      val metric = decoded
+      file => {
+        val record = recordSplitOnExhaustion(file.length, metric, t)
+        val rows = read(file)
+        new Iterator[T] {
+          override def hasNext: Boolean = record(rows.hasNext)
+          override def next(): T = rows.next()
+        }
+      }
+    }
 
   /**
    * sum(decoded) / sum(listed) over the splits read to the end, if at least `planned` were read.

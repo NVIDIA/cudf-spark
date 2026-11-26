@@ -176,8 +176,7 @@ case class GpuBatchScanExec(
               // SPARK-48949. Inert here: the `...v2.bucketing.partition.filter.enabled` config
               // that makes `commonPartitionValues` an intersection instead of a union does not
               // exist before Spark 4.0, so this filter can never drop a group on the versions
-              // this shim serves. Kept identical to the spark350db143 copy so the next SPJ
-              // audit diff between the two stays cheap.
+              // this shim serves.
               val filteredGroupedPartitions = groupedPartitions.filter {
                 case (partValues, _) =>
                   commonPartValuesMap.keySet.contains(

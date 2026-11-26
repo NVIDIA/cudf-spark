@@ -958,22 +958,24 @@ def assert_spark_exception(df_fun, error_message):
 
 def assert_consistent_gpu_cpu_behavior(df_fun, conf, error_message, only_if_cpu_fails=False):
     """
-    Assert that GPU and CPU execution behave consistently - either both fail with the same error
-    or both succeed with identical results.
+    Assert CPU and GPU behavior. When only_if_cpu_fails is false, both executions must fail with
+    the expected error. When it is true, both must either fail with the expected error or succeed
+    with identical results.
     
     :param df_fun: a function to be verified
     :param conf: Spark config
     :param error_message: a string such as the one produce by java.lang.Exception.toString
-    :param only_if_cpu_fails: if true, we only expect the GPU job to fail if the CPU job fails,
-           otherwise we expect both CPU and GPU to fail when error_message is provided.
+    :param only_if_cpu_fails: if true, require the GPU job to fail only when the CPU job fails;
+           otherwise require both CPU and GPU jobs to fail.
     :return: Assertion failure if GPU and CPU behaviors are inconsistent (different errors or 
              different results when both succeed)
     """
+    expect_cpu_exception = None if only_if_cpu_fails else True
     (cpu_failed, from_cpu) = collect_data_or_exception(
-        lambda: with_cpu_session(df_fun, conf), error_message)
+        lambda: with_cpu_session(df_fun, conf), error_message,
+        expect_exception=expect_cpu_exception)
     (gpu_failed, from_gpu) = collect_data_or_exception(
-        lambda: with_gpu_session(df_fun, conf), error_message, 
-        expect_exception=cpu_failed or not only_if_cpu_fails)
+        lambda: with_gpu_session(df_fun, conf), error_message, expect_exception=cpu_failed)
 
     if cpu_failed is False and gpu_failed is False:
         assert_equal(from_cpu, from_gpu)

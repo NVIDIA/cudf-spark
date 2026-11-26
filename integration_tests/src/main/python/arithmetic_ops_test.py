@@ -1353,33 +1353,17 @@ def _div_overflow_exception_when(expr, ansi_enabled, is_lit=False):
             func=lambda spark: _get_div_overflow_df(spark, expr),
             conf=ansi_conf)
 
-# Only run this test for Spark v3.2.0 and later to verify IntegralDivide will
-# throw exceptions for overflow when ANSI mode is enabled.
-@pytest.mark.skipif(is_before_spark_320(), reason='https://github.com/apache/spark/pull/32260')
 @pytest.mark.parametrize('expr', ['a DIV CAST(-1 AS INT)', 'a DIV b'])
 @pytest.mark.parametrize('ansi_enabled', [False, True])
 def test_div_overflow_exception_when_ansi(expr, ansi_enabled):
     _div_overflow_exception_when(expr, ansi_enabled)
 
-# Only run this test for Spark v3.2.0 and later to verify IntegralDivide will
-# throw exceptions for overflow when ANSI mode is enabled.
 # We have split this test from test_div_overflow_exception_when_ansi because Spark 3.4
 # throws a different exception for literals
-@pytest.mark.skipif(is_before_spark_320(), reason='https://github.com/apache/spark/pull/32260')
 @pytest.mark.parametrize('expr', ['CAST(-9223372036854775808L as LONG) DIV -1'])
 @pytest.mark.parametrize('ansi_enabled', [False, True])
 def test_div_overflow_exception_when_ansi_literal(expr, ansi_enabled):
     _div_overflow_exception_when(expr, ansi_enabled, is_lit=True)
-
-# Only run this test before Spark v3.2.0 to verify IntegralDivide will NOT
-# throw exceptions for overflow even ANSI mode is enabled.
-@pytest.mark.skipif(not is_before_spark_320(), reason='https://github.com/apache/spark/pull/32260')
-@pytest.mark.parametrize('expr', ['CAST(-9223372036854775808L as LONG) DIV -1', 'a DIV CAST(-1 AS INT)', 'a DIV b'])
-@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
-def test_div_overflow_no_exception_when_ansi(expr, ansi_enabled):
-    assert_gpu_and_cpu_are_equal_collect(
-        func=lambda spark: _get_div_overflow_df(spark, expr),
-        conf={'spark.sql.ansi.enabled': ansi_enabled})
 
 _data_type_expr_for_add_overflow = [
     ([127], ByteType(), 'a + 1Y'),

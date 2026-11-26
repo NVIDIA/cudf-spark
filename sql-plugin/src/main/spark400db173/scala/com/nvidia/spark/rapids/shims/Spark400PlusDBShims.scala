@@ -28,6 +28,8 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Expression, KnownNotContainsNull}
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.adaptive.TableCacheQueryStageExec
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
@@ -62,8 +64,9 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
         .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
-          "types and may differ from Spark casts. Malformed or noncanonical Variant encodings " +
-          "may differ from Spark")
+          "types and may differ from Spark casts. For those targets, object field ids that are " +
+          "unsorted or outside the metadata dictionary, which the Variant spec forbids, can " +
+          "return NULL where Spark returns a value or raises an error")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
@@ -88,5 +91,12 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
 
   override def getPartitionFiles(partition: FilePartition): Seq[PartitionedFile] = {
     partition.filesWithAbsolutePaths.toSeq
+  }
+
+  override def getTableCacheNonQueryStagePlan(plan: SparkPlan): Option[SparkPlan] = {
+    plan match {
+      case tcqs: TableCacheQueryStageExec => Some(tcqs.plan)
+      case _ => None
+    }
   }
 }

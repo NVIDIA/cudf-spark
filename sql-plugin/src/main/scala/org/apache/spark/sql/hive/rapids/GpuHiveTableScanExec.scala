@@ -281,13 +281,17 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
       selectedPartitions, maxSplitBytes)
 
     val filePartitions = FilePartition.getFilePartitions(sparkSession, splitFiles, maxSplitBytes)
-    plannedListed =
-      filePartitions.map(p => FilePartitionShims.getFiles(p).map(_.length).sum).toArray
+    splitBytes.foreach { _ =>
+      plannedSplits = filePartitions.map(p => FilePartitionShims.getFiles(p).length).sum
+    }
 
     // TODO [future]: Handle small-file optimization.
     //                (https://github.com/NVIDIA/spark-rapids/issues/7017)
     //                Currently assuming per-file reading.
-    SparkShimImpl.getFileScanRDD(sparkSession, readFile, filePartitions, readSchema)
+    SparkShimImpl.getFileScanRDD(sparkSession,
+                                 ScanSplitHeuristic.observeFileRead(readFile, splitBytes,
+                                   gpuLongMetric(GPU_OUTPUT_BATCH_BYTES)),
+                                 filePartitions, readSchema)
                  .asInstanceOf[RDD[ColumnarBatch]]
   }
 
@@ -345,8 +349,8 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
   @transient private lazy val splitBytes: Option[SplitTotals] =
     historyKey.map(_ => SplitTotals.create(sparkContext))
 
-  /** Listed bytes of each planned partition; RDD partition i reads partition i. */
-  @transient private var plannedListed: Array[Long] = Array.empty
+  /** Files planned to be read; 0 while history is off. */
+  @transient private var plannedSplits: Int = 0
 
   lazy val inputRDD: RDD[ColumnarBatch] = {
     // Assume Delimited text.
@@ -384,25 +388,19 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val scanTime = gpuLongMetric(SCAN_TIME)
-    val decoded = gpuLongMetric(GPU_OUTPUT_BATCH_BYTES)
+    // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
     val rdd = inputRDD
-    val splits = splitBytes
     // Per execution: a re-run plan reuses `inputRDD`.
-    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed.length, splits, sparkContext)
-    // A local copy, so the task closure holds the array and not this scan.
-    val listedByPartition = plannedListed
-    rdd.mapPartitionsWithIndexInternal { (index, batches) =>
-      val listed = listedByPartition.lift(index).getOrElse(0L)
-      val record = splits.map(ScanSplitHeuristic.recordSplitOnExhaustion(listed, decoded, _))
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
+    rdd.mapPartitionsInternal { batches =>
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {
           // The `FileScanRDD` returns an iterator which scans the file during the `hasNext` call.
-          val res = scanTime.ns {
-            batches.hasNext
+          scanTime.ns {
+            val res = batches.hasNext
+            res
           }
-          record.foreach(_(res))
-          res
         }
 
         override def next(): ColumnarBatch = {

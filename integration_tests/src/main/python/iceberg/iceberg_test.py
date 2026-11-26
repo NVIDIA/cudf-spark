@@ -23,7 +23,8 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
 from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, is_not_utc
 from data_gen import *
 from iceberg import (
-    iceberg_format_versions, iceberg_read_enabled_conf, iceberg_read_format_versions,
+    iceberg_format_versions, iceberg_mor_format_versions, iceberg_read_enabled_conf,
+    iceberg_read_format_versions, runtime_iceberg_version,
     iceberg_table_properties_sql, get_full_table_name, iceberg_unsupported_mark, _build_tblprops,
     _BASE_TBLPROPS_SQL, create_iceberg_table, iceberg_write_enabled_conf, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
@@ -57,6 +58,76 @@ rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 _NO_FANOUT = _BASE_TBLPROPS_SQL
 
 pytestmark = iceberg_unsupported_mark
+
+
+def _create_small_files_table(spark_tmp_table_factory, format_version, with_deletes=False):
+    table = get_full_table_name(spark_tmp_table_factory)
+    props = {'read.split.open-file-cost': '0', 'read.split.target-size': '268435456'}
+    if with_deletes:
+        props['write.delete.mode'] = 'merge-on-read'
+
+    def file_data(spark, partition, rows):
+        return gen_df(spark, [('id', UniqueLongGen()), ('p', SetValuesGen(StringType(), [partition]))],
+                      length=rows, num_slices=1)
+
+    create_iceberg_table(table, partition_col_sql='p', table_prop=props, format_version=format_version,
+                         df_gen=lambda spark: file_data(spark, None, 0))
+
+    def populate(spark):
+        for partition, rows in [('alpha', 2), ('beta', 3), (None, 1), ('alpha', 7)]:
+            file_data(spark, partition, rows).writeTo(table).append()
+        if with_deletes:
+            # Only the beta file has a delete. The other files still have different constants.
+            spark.sql(f"DELETE FROM {table} WHERE p = 'beta' AND id = 2")
+            assert spark.table(f"{table}.delete_files").count() > 0
+
+    with_cpu_session(populate)
+    return table
+
+
+def _assert_coalesced_reads(table, reader_type, format_version):
+    conf = {**iceberg_read_enabled_conf,
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.rapids.sql.reader.batchSizeRows': '5'}
+
+    constant_columns = '_spec_id, _partition'
+    # Iceberg 1.10 on Spark 3.5 also exposes the sequence number as null on v1 and v2 tables.
+    if int(format_version) >= 3 or (
+            is_spark_35x() and (runtime_iceberg_version or '').startswith('1.10.')):
+        constant_columns += ', _last_updated_sequence_number'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT {constant_columns}, _file, _pos FROM {table}"),
+        exist_classes='GpuBatchScanExec', conf=conf, require_non_empty=True)
+
+    # Each expression keeps a project above the scan without introducing a shuffle.
+    for projection in ('_partition.p', '_partition.p, id', 'length(p)'):
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.sql(f"SELECT {projection} FROM {table}"),
+            exist_classes='GpuBatchScanExec,GpuCoalesceBatches', conf=conf, require_non_empty=True)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('format_version', iceberg_read_format_versions)
+def test_iceberg_coalesce_after_scan(
+        spark_tmp_table_factory, format_version, reader_type):
+    table = _create_small_files_table(spark_tmp_table_factory, format_version)
+    _assert_coalesced_reads(table, reader_type, format_version)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT id + 1 FROM {table}"),
+        exist_classes='GpuBatchScanExec,GpuProjectExec', non_exist_classes='GpuCoalesceBatches',
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type},
+        require_non_empty=True)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('format_version', iceberg_mor_format_versions)
+def test_iceberg_coalesce_after_scan_with_deletes(spark_tmp_table_factory, format_version, reader_type):
+    table = _create_small_files_table(spark_tmp_table_factory, format_version, with_deletes=True)
+    _assert_coalesced_reads(table, reader_type, format_version)
 
 
 def _is_spark_patch_at_least(version, minimum):
@@ -1127,8 +1198,8 @@ def test_iceberg_input_meta(format_version, spark_tmp_table_factory, reader_type
             f"AS SELECT * FROM {tmpview}")
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : spark.sql(
-            "SELECT a, input_file_name(), input_file_block_start(), input_file_block_length() " + \
+        lambda spark: spark.sql(
+            "SELECT a, _file, input_file_name(), input_file_block_start(), input_file_block_length() "
             f"FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
@@ -1934,3 +2005,14 @@ def test_iceberg_metadata_only_with_add_files_identity_partition(
     _set_iceberg_open_file_cost_to_zero(table)
     # Selecting only `a` requires no physical columns from the imported Parquet files.
     _assert_iceberg_metadata_only_small_file_combine(table, 'a', reader_type)
+
+    # The imported files still supply a from partition values after the current spec drops it.
+    def evolve_spec(spark):
+        spark.sql(f"ALTER TABLE {table} DROP PARTITION FIELD a")
+        spark.sql(f"INSERT INTO {table} (a, b) VALUES (7, 'unpartitioned')")
+
+    with_cpu_session(evolve_spec)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT a + 1 FROM {table}"),
+        exist_classes='GpuBatchScanExec,GpuCoalesceBatches', require_non_empty=True,
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
