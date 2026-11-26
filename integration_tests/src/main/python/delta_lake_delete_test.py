@@ -217,8 +217,6 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
     ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), \
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_with_deletion_vectors(
         spark_tmp_path, use_cdf, use_metadata_row_index):
     expect_cpu_fallback = is_oss_delta_lake_24()
@@ -607,8 +605,7 @@ def test_delta_delete_partitions(spark_tmp_path, use_cdf, partition_columns, ena
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
-                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values, ids=idfn)
 def test_delta_delete_rows(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
     # Databricks changes the number of files being written, so we cannot compare logs unless there's only one slice
     num_slices_to_test = 1 if is_databricks_runtime() else 10
@@ -1026,8 +1023,6 @@ def _assert_tracked_delete_log_parity(
 @pytest.mark.parametrize("use_chunked_reader", [True, False], ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_before_spark_353(),
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
     """Regression test for https://github.com/NVIDIA/spark-rapids/issues/14442.
     The second DELETE on a DV-enabled table accesses _metadata.file_path and _metadata.row_index
@@ -1083,8 +1078,7 @@ def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
-                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values, ids=idfn)
 def test_delta_delete_dataframe_api(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
     from delta.tables import DeltaTable
     data_path = spark_tmp_path + "/DELTA_DATA"
