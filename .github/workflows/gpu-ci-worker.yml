@@ -52,9 +52,15 @@ jobs:
             const w = JSON.parse(process.env.WORKLOAD);
             const match = /^refs\/heads\/pull-request\/([1-9]\d*)$/.exec(context.ref);
             if (!match || context.ref !== process.env.SOURCE_REF || context.sha !== process.env.SOURCE_SHA ||
-                process.env.RUNNER_ARCH !== 'X64' || typeof w['parallel-ut'] !== 'boolean') {
-              throw new Error('Expected an approved copied head, an AMD64 runner and a boolean parallel-ut setting');
+                typeof w['parallel-ut'] !== 'boolean') {
+              throw new Error('Expected an approved copied head and a boolean parallel-ut setting');
             }
+            const arch = w.arch === undefined ? 'amd64' : w.arch;
+            const native = arch === 'amd64' ? 'X64' : arch === 'arm64' ? 'ARM64' : null;
+            if (!native || process.env.RUNNER_ARCH !== native) {
+              throw new Error(`GPU workload architecture ${arch} does not match runner ${process.env.RUNNER_ARCH}`);
+            }
+            core.exportVariable('GPU_ARCH', arch);
             const {data: parent} = await github.rest.actions.getWorkflowRun({
               ...context.repo, run_id: Number(process.env.PARENT),
             });
@@ -79,6 +85,7 @@ jobs:
           submodules: true
           persist-credentials: false
       - name: Verify merge parents, Parquet test data and requested group
+        id: group
         env:
           MERGE_SHA: ${{ fromJSON(inputs.workload).merge-sha }}
           BASE_SHA: ${{ fromJSON(inputs.workload).base-sha }}
@@ -90,11 +97,28 @@ jobs:
           [[ "$(git show -s --format=%P HEAD)" == "$BASE_SHA $HEAD_SHA" ]]
           [[ "$(git -C thirdparty/parquet-testing rev-parse HEAD)" == "$(git rev-parse HEAD:thirdparty/parquet-testing)" ]]
           compgen -G 'thirdparty/parquet-testing/data/*.parquet' >/dev/null
-          python3 .github/workflows/gpu-ci/groups.py "$(jq -cn '[env.KIND]')" | jq -e --argjson w "$WORKLOAD" '
-            ($w | if .kind == "unit" then {kind, group, scala, shims}
-                  elif .kind == "integration" then {kind, group, scala, shim, shard}
-                  else error("Unknown GPU workload kind") end) as $row |
-            any(.include[]; . == $row)' >/dev/null
+          suites=$(jq -cn '[env.KIND]')
+          row=$(jq -ce '
+            if .kind == "unit" then {kind, group, scala, shims}
+            elif .kind == "integration" then {kind, group, scala, shim, shard}
+            else error("Unknown GPU workload kind") end | .arch = env.GPU_ARCH' <<< "$WORKLOAD")
+          if ! python3 .github/workflows/gpu-ci/groups.py "$suites" | jq -e --argjson row "$row" '
+            any(.include[]; ({arch: "amd64"} + .) == $row)' >/dev/null; then
+            echo "::error::Dispatched group does not match the $GPU_ARCH merge catalog or the catalog could not be read."
+            exit 1
+          fi
+          if jq -e 'has("targets")' <<< "$WORKLOAD" >/dev/null; then
+            targets=$(jq -ce 'if .kind == "integration" and
+              (.targets | type == "array" and length > 0 and all(.[]; type == "string"))
+              then .targets else error("Expected nonempty integration test targets") end' <<< "$WORKLOAD")
+            if ! python3 .github/workflows/gpu-ci/groups.py "$suites" --base "$BASE_SHA" --merge "$MERGE_SHA" |
+              jq -e --argjson row "$row" --argjson targets "$targets" '
+                any(.include[]; . == ($row + {targets: $targets}))' >/dev/null; then
+              echo "::error::Could not verify targets for $GROUP against $BASE_SHA..$MERGE_SHA."
+              exit 1
+            fi
+            printf 'targets=%s\n' "$targets" >> "$GITHUB_OUTPUT"
+          fi
       - name: Checkout the shared image recipe helper
         uses: NVIDIA/spark-rapids-common/checkout@main
         with:
@@ -122,13 +146,15 @@ jobs:
           trap 'rm -rf -- "$home"' EXIT
           env -i PATH="$PATH" HOME="$home" DOCKER_CONFIG="$home" DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}" \
             IMAGE_CONFIG="$IMAGE_CONFIG" PUBLISH_IMAGE=false bash .ci-common/container-image/image.sh
-          image=$(docker image inspect --format '{{.Id}}' "image-validation:$(jq -er .tag <<< "$IMAGE_CONFIG")")
+          image=$(docker image inspect "image-validation:$(jq -er .tag <<< "$IMAGE_CONFIG")" |
+            jq -er --arg arch "$GPU_ARCH" '.[0] | select(.Os == "linux" and .Architecture == $arch) | .Id')
           [[ $image =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Restore Maven dependencies
         id: cache
-        if: fromJSON(inputs.workload).cache-key != ''
+        # Maven caches include native dependencies and must match the actual runner and Scala.
+        if: startsWith(fromJSON(inputs.workload).cache-key, format('spark-maven-{0}-{1}-{2}-', runner.os, runner.arch, env.SCALA))
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         timeout-minutes: 40
@@ -152,6 +178,7 @@ jobs:
           SHARD: ${{ fromJSON(inputs.workload).shard }}
           SPARK_TARBALL: ${{ steps.spark.outputs.path }}
           REDUCED_IT: ${{ fromJSON(inputs.workload).reduced-it }}
+          TARGETS_JSON: ${{ steps.group.outputs.targets }}
         run: bash .github/workflows/gpu-ci/run-group.sh
       - name: Upload group JUnit results
         if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}

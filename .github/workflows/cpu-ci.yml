@@ -19,10 +19,12 @@ concurrency:
 
 jobs:
   select:
-    name: Select Dockerfiles
+    name: Select CPU checks
     runs-on: ubuntu-latest
     outputs:
       validate: ${{ steps.title.outputs.skip == 'true' && '[]' || steps.recipes.outputs.validate }}
+      maven: ${{ steps.maven.outputs.mode }}
+      required: ${{ steps.required.outputs.jobs }}
     steps:
       - name: Read the current PR title
         id: title
@@ -46,13 +48,22 @@ jobs:
             end' <<< "$pr")
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
           if [[ $skip == true ]]; then
-            echo 'CPU CI skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Docker validation skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: NVIDIA/spark-rapids-common/checkout@main
-        if: steps.title.outputs.skip == 'false'
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Select hosted Maven checks
+        id: maven
+        shell: bash
+        run: |
+          mode=$(python3 .github/workflows/mvn-verify-impact.py)
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Hosted Maven checks: $mode" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check licenses for standalone pytest edits
+        if: steps.maven.outputs.mode == 'rat'
+        run: mvn --batch-mode -s .github/actions/maven-cache/settings.xml -N -f integration_tests/pom.xml apache-rat:check
       - name: Select image recipes
         id: recipes
         if: steps.title.outputs.skip == 'false'
@@ -60,6 +71,25 @@ jobs:
       - name: Test image CI
         if: steps.recipes.outputs.run-tests == 'true'
         run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
+      - name: Set required jobs
+        id: required
+        shell: bash
+        env:
+          VALIDATE: ${{ steps.title.outputs.skip == 'true' && '[]' || steps.recipes.outputs.validate }}
+          MAVEN: ${{ steps.maven.outputs.mode }}
+        run: |
+          jobs=$(jq -cne --argjson images "$VALIDATE" --arg maven "$MAVEN" '
+            if ($images | type) != "array" or (["full","rat","skip"] | index($maven)) == null
+            then error("Invalid CPU selection")
+            else ["select", (if ($images | length) > 0 then "validate" else empty end),
+                 (if $maven == "full" then "maven" else empty end)] end')
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+
+  maven:
+    name: Maven Verify
+    needs: select
+    if: needs.select.outputs.maven == 'full'
+    uses: ./.github/workflows/mvn-verify-check.yml
 
   validate:
     name: Validate ${{ matrix.image.id }}
@@ -76,10 +106,45 @@ jobs:
   result:
     name: CPU CI gate
     if: always()
-    needs: [select, validate]
+    needs: [select, validate, maven]
     runs-on: ubuntu-latest
     steps:
       - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: ${{ needs.select.outputs.validate == '[]' && '["select"]' || '["select","validate"]' }}
+          required-jobs: ${{ needs.select.outputs.required || '["select","validate","maven"]' }}
+
+  # Remove after main and release branch rules require CPU CI gate instead.
+  legacy-maven-check:
+    name: ${{ matrix.context }}
+    needs: [select, maven]
+    if: always()
+    runs-on: ubuntu-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        context:
+          - package-tests (340, false)
+          - package-tests (356, false)
+          - package-tests-scala213 (400, false)
+          - verify-213-modules (400, 17)
+        include: >-
+          ${{ fromJSON(github.base_ref == 'main' &&
+          '[{"context":"package-tests (333, false)"},{"context":"package-tests-scala213 (350, false)"},{"context":"package-tests-scala213 (356, false)"}]'
+          || '[]') }}
+    steps:
+      - name: Check the selected Maven result
+        shell: bash
+        env:
+          SELECT: ${{ needs.select.result }}
+          MAVEN: ${{ needs.maven.result }}
+          MODE: ${{ needs.select.outputs.maven }}
+          CONTEXT: ${{ matrix.context }}
+          VERIFIED: ${{ needs.maven.outputs.contexts }}
+        run: |
+          case "$SELECT:$MODE:$MAVEN" in
+            success:full:success)
+              jq -en --arg context "$CONTEXT" --argjson verified "$VERIFIED" '$verified | index($context) != null' ;;
+            success:rat:skipped|success:skip:skipped) echo "Full Maven Verify not selected ($MODE)." ;;
+            *) echo "::error::Maven check $CONTEXT: selector=$SELECT mode=$MODE workload=$MAVEN"; exit 1 ;;
+          esac

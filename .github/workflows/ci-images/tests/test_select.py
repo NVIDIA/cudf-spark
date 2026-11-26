@@ -183,6 +183,15 @@ class ImageSelectorTest(unittest.TestCase):
                               ["spark-build", "shuffle-ubuntu-rdma"])
         self.assertEqual(jobs["publish"], [])
 
+    def test_cpu_coordinator_runs_selector_tests_without_selecting_every_image(self):
+        self.git("switch", "-qc", "topic")
+        self.write(".github/workflows/cpu-ci.yml", "# change a sibling CPU check\n")
+        self.commit("Change the coordinator")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
+        self.assertEqual(self.invoke(event="pull_request", ref="17/merge"),
+                         {"validate": [], "publish": [], "run-tests": True})
+
     def test_push_selects_only_recipes_using_changed_input(self):
         before = self.git("rev-parse", "HEAD")
         self.write(INPUT, "# new requirement\n")

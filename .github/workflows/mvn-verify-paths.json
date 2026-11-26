@@ -1,0 +1,18 @@
+{
+  "maven_inputs": [
+    "docs/configs.md",
+    "docs/additional-functionality/advanced_configs.md",
+    "docs/dev/nvtx_ranges.md",
+    "docs/supported_ops.md",
+    "integration_tests/README.md"
+  ],
+  "skip": {
+    "filename": "*.md",
+    "directories": ["."],
+    "subtrees": ["docs", ".github"]
+  },
+  "rat": {
+    "filename": "*_test.py",
+    "directories": ["integration_tests/src/main/python"]
+  }
+}

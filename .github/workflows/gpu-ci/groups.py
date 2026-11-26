@@ -3,14 +3,14 @@
 
 """Validate selected shim assignments before reserving any GPU runners."""
 
+import argparse
 import json
 from pathlib import Path
 import re
-import sys
 import xml.etree.ElementTree as ET
 
 
-def gpu_matrix(root, suites):
+def gpu_matrix(root, suites, base=None, merge=None):
     catalog = json.loads((root / ".github/gpu-ci-suites.json").read_text())
     archives = json.loads((root / ".github/actions/spark-archive-cache/releases.json").read_text())
     groups = []
@@ -28,6 +28,8 @@ def gpu_matrix(root, suites):
         groups.extend(dict(row, kind=kind) for row in catalog["suites"][kind]["groups"])
     for row in groups:
         name, scala = row["group"], row["scala"]
+        if row.setdefault("arch", "amd64") not in ("amd64", "arm64"):
+            raise ValueError(f"{name}: unsupported GPU architecture {row['arch']}")
         if not re.fullmatch(r"[a-z0-9-]+", name) or name in seen_groups:
             raise ValueError(f"Invalid or duplicate GPU group: {name}")
         if scala not in profiles:
@@ -55,8 +57,22 @@ def gpu_matrix(root, suites):
             seen_shims.add((scala, shim))
     if any(set(shards) != {1, 2} for shards in it_shards.values()):
         raise ValueError("Each integration-test shim requires both case partitions")
+    if base and merge and it_shards:
+        from impact import affected_cases
+
+        cases = affected_cases(root, base, merge)
+        if cases:
+            groups = [dict(row, targets=cases[row["shard"]]) for row in groups
+                      if row["kind"] == "integration" and row["shard"] in cases]
     return {"include": groups}
 
 
 if __name__ == "__main__":
-    print(json.dumps(gpu_matrix(Path.cwd(), json.loads(sys.argv[1])), separators=(",", ":")))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("suites", type=json.loads)
+    parser.add_argument("--base")
+    parser.add_argument("--merge")
+    args = parser.parse_args()
+    if bool(args.base) != bool(args.merge):
+        parser.error("--base and --merge must be supplied together")
+    print(json.dumps(gpu_matrix(Path.cwd(), args.suites, args.base, args.merge), separators=(",", ":")))

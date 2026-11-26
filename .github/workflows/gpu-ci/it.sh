@@ -42,22 +42,34 @@ finish() {
 }
 trap finish EXIT
 run_phase() {
-  local phase=$1
+  local phase=$1 report_status=0
   shift
   find "$target" -maxdepth 2 -type f -name 'TEST-pytest-*.xml' > "$before"
   active=$phase
   "$@"
   active=
-  python3 "$it" reports "$target" "$out" "$phase" "$before"
+  python3 "$it" reports "$target" "$out" "$phase" "$before" || report_status=$?
+  if [[ $phase == targeted && $report_status == 42 ]]; then
+    needs_full_shard=true
+  else
+    return "$report_status"
+  fi
 }
 
 unset TEST TESTS TEST_TAGS RUN_DIR
 launcher=./integration_tests/run_pyspark_from_build.sh
+if [[ -n ${TARGETS_JSON+x} ]]; then
+  # Do not sample explicit node IDs. A runtime-specific skip falls back to this shard.
+  needs_full_shard=false
+  run_phase targeted env REDUCED_IT=false RANDOM_SELECT='' TESTS="$files" TEST_TAGS='' "$launcher"
+  if [[ $needs_full_shard == false ]]; then exit 0; fi
+  unset TARGETS_JSON
+  files=$(python3 "$it" files "$IT_SHARD")
+fi
 tags=''
 if [[ $SCALA_BINARY_VER == 2.13 ]]; then tags='not premerge_ci_1'; fi
 run_phase baseline env TESTS="$files" TEST_TAGS="$tags" "$launcher"
 
-# Reuse the Blossom helpers without starting a legacy premerge lane.
 source jenkins/spark-premerge-build.sh
 source jenkins/shuffle-common.sh
 MVN="mvn -s $settings -Dmaven.wagon.http.retryHandler.count=3"

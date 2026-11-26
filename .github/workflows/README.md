@@ -2,22 +2,23 @@
 
 ## CPU CI
 
-[CPU CI](cpu-ci.yml) runs the checks affected by a PR to `main` or
-`release/YY.MM`. The gate passes when selection and all selected checks pass.
-Currently it checks [Docker images](ci-images/README.md). Markdown-only PRs
-and PRs titled with `[skip ci]` pass without building images.
+[CPU CI](cpu-ci.yml) gates the selected [Maven Verify](mvn-verify-check.yml)
+and [Docker image](ci-images/README.md) checks on PRs to `main` or `release/YY.MM`.
+Standalone pytest-only changes need a license check instead of the Maven build
+matrix. Documentation used by Maven still gets verified. The Docker title
+skip does not bypass Maven checks.
 
 ## GPU CI
 
-[GPU CI](gpu-ci.yml) is an opt-in standalone test workflow alongside Blossom.
-Copy-pr-bot approval of the current PR head starts it; the workers test that
-head merged with its target. Documentation-only or Skills-only changes and a
-`[skip ci]` title skip these jobs. Other changes run all eight groups. Blossom
-remains required and still handles Skills and Databricks.
+[GPU CI](gpu-ci.yml) tests the approved PR head merged with its target.
+Documentation-only or Skills-only changes and a `[skip ci]` title skip these
+jobs. Isolated edits to eligible Python integration tests run the affected cases;
+shared or uncertain changes run all eight groups. The selection job lists what will run.
 
 [GPU CI suites](../gpu-ci-suites.json) assigns four unit-test runners by Scala
-version and Spark shim, independently of Blossom's Maven property lists. Each
-Scala version also has two integration-test runners for the Spark distribution
+version and Spark shim. Groups default to AMD64; set `"arch": "arm64"` on an
+individual group to use a native ARM64 worker. Each Scala version also has two
+integration-test runners for the Spark distribution
 in the [archive catalog](../actions/spark-archive-cache/releases.json).
 Each group has its own result, so a failed group can be rerun without repeating
 successful groups. Rebalance from measured group times, not the number of shims.

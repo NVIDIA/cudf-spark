@@ -17,6 +17,12 @@
       "paths": ["**"],
       "exclude_paths": ["skills/", "**/*.md", "**/*.rst", "**/*.adoc", "docs/img/"],
       "jobs": ["gpu-test"],
+      "shard_overrides": {
+        "array_test.py": 1,
+        "conditionals_test.py": 2,
+        "hash_aggregate_test.py": 2,
+        "parquet_test.py": 2
+      },
       "groups": [
         {"group": "it-212-1", "scala": "2.12", "shim": "330", "shard": 1},
         {"group": "it-212-2", "scala": "2.12", "shim": "330", "shard": 2},

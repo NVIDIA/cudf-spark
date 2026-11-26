@@ -16,11 +16,19 @@
 name: mvn[compile,RAT,scalastyle,docgen]
 
 on:
+  workflow_call:
+    outputs:
+      contexts:
+        description: Required-check aliases backed by successful Maven matrix jobs
+        value: ${{ jobs.result.outputs.contexts }}
+  # CPU CI calls this workflow on main and release PRs. Other bases retain Verify only.
   pull_request:
+    branches-ignore: [main, 'release/[0-9][0-9].[0-9][0-9]']
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # CPU CI handles PR supersession and isolates manual reruns; do not cancel its other run.
+  group: maven-${{ github.workflow }}-${{ github.workflow == 'CPU CI' && github.run_id || github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:
@@ -496,3 +504,29 @@ jobs:
           name: with-resource-nesting-audit
           path: ${{ runner.temp }}/with-resource-nesting-audit.json
           if-no-files-found: ignore
+
+  result:
+    name: Maven Verify result
+    if: always()
+    needs: [shim-source-graph-tests, cache-dependencies, package-tests, cache-dependencies-scala213, package-tests-scala213, verify-213-modules, verify-all-212-modules, install-modules, validate-iceberg-matrix, with-resource-nesting-audit]
+    runs-on: ubuntu-slim
+    outputs:
+      contexts: ${{ steps.verified.outputs.contexts }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: '["shim-source-graph-tests","cache-dependencies","package-tests","cache-dependencies-scala213","package-tests-scala213","verify-213-modules","verify-all-212-modules","install-modules","validate-iceberg-matrix","with-resource-nesting-audit"]'
+      - name: Report verified matrix contexts for existing branch rules
+        id: verified
+        shell: bash
+        env:
+          PACKAGES_212: ${{ needs.cache-dependencies.outputs.sparkTailVersions }}
+          PACKAGES_213: ${{ needs.cache-dependencies-scala213.outputs.scala213Versions }}
+          VERIFY_213: ${{ needs.cache-dependencies-scala213.outputs.sparkJDK17Versions }}
+        run: |
+          contexts=$(jq -cn --argjson a "$PACKAGES_212" --argjson b "$PACKAGES_213" --argjson c "$VERIFY_213" '
+            [($a.include[] | select(.isSnapshot == false) | "package-tests (\(."spark-version"), false)"),
+             ($b.include[] | select(.isSnapshot == false) | "package-tests-scala213 (\(."spark-version"), false)"),
+             ($c.include[] | "verify-213-modules (\(."spark-version"), \(."java-version"))")]')
+          echo "contexts=$contexts" >> "$GITHUB_OUTPUT"

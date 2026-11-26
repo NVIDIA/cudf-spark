@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -euo pipefail
+arch=${GPU_ARCH-amd64}
+case "$arch" in
+  amd64|arm64) ;;
+  *) echo "::error::Unsupported GPU architecture: $arch"; exit 2 ;;
+esac
 scratch=$(mktemp -d "${RUNNER_TEMP:?}/gpu-group.XXXXXXXX")
 home="$scratch/home"
 name="spark-ci-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
@@ -32,6 +37,24 @@ if [[ ${CACHE_HIT:-false} == true ]]; then
 fi
 mkdir -p "$home/.m2/repository"
 cp .github/actions/maven-cache/settings.xml "$home/.m2/settings.xml"
+if [[ $arch == arm64 ]]; then
+  # Both Scala POMs use the arm64 profile for native JNI and UCX artifacts.
+  python3 - "$home/.m2/settings.xml" <<'PY'
+import sys
+from xml.etree import ElementTree as ET
+
+path = sys.argv[1]
+tree = ET.parse(path)
+root = tree.getroot()
+ns = "http://maven.apache.org/SETTINGS/1.0.0"
+ET.register_namespace("", ns)
+profiles = root.find(f"{{{ns}}}activeProfiles")
+if profiles is None:
+    profiles = ET.SubElement(root, f"{{{ns}}}activeProfiles")
+ET.SubElement(profiles, f"{{{ns}}}activeProfile").text = "arm64"
+tree.write(path, encoding="utf-8", xml_declaration=True)
+PY
+fi
 
 # Hadoop resolves the process identity through passwd; do not depend on the daemon's UID map.
 uid=$(id -u)
@@ -40,6 +63,10 @@ printf 'sparkci:x:%s:%s::/home/ci:/bin/bash\n' "$uid" "$gid" > "$scratch/passwd"
 printf 'sparkci:x:%s:\n' "$gid" > "$scratch/group"
 run_in_image() {
   local remaining
+  local -a target_env=()
+  if [[ $KIND == integration && -n ${TARGETS_JSON:-} ]]; then
+    target_env=(-e TARGETS_JSON)
+  fi
   remaining=$(( GPU_DEADLINE - $(date +%s) ))
   if ((remaining <= 0)); then
     echo "::error::GPU worker time budget exhausted before Spark $SPARK_SHIM"
@@ -49,16 +76,16 @@ run_in_image() {
   rm -f -- "$scratch/cid"
   # PATH is expanded in the image, not on the runner.
   # shellcheck disable=SC2016
-  timeout -k 30s "${remaining}s" docker run --rm --init --pull=never --platform linux/amd64 \
+  timeout -k 30s "${remaining}s" docker run --rm --init --pull=never --platform "linux/$arch" \
     --gpus all --shm-size=2g --name "$name" --cidfile "$scratch/cid" --user "$uid:$gid" \
     --mount "type=bind,src=$PWD,dst=/workspace" --workdir /workspace \
     --mount "type=bind,src=$home,dst=/home/ci" \
     --mount "type=bind,src=$scratch/passwd,dst=/etc/passwd,readonly" \
     --mount "type=bind,src=$scratch/group,dst=/etc/group,readonly" \
     -e HOME=/home/ci -e WORKSPACE=/workspace -e SPARK_LOCAL_IP=127.0.0.1 \
-    -e JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 -e CLASSIFIER=cuda12 \
+    -e JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$arch" -e CLASSIFIER=cuda12 \
     -e SCALA_BINARY_VER="$SCALA" -e SPARK_SHIM -e UNIT_TEST_MODE -e PARALLEL_UT \
-    -e SPARK_HOME -e IT_SHARD -e REDUCED_IT \
+    -e SPARK_HOME -e IT_SHARD -e REDUCED_IT "${target_env[@]}" \
     -e MVN_SETTINGS=/home/ci/.m2/settings.xml \
     -e 'MAVEN_OPTS=-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository -DsecondaryCacheDir=/home/ci/.m2/repository/.sbt/1.0/zinc/org.scala-sbt' \
     --entrypoint /bin/bash "$IMAGE" -c 'export PATH="$JAVA_HOME/bin:$PATH"; exec bash "$@"' bash "$@"

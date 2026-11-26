@@ -42,7 +42,7 @@ jobs:
             const base = pr.base.ref;
             const release = /^release\/(\d{2}\.\d{2})$/.exec(base);
             if (base !== 'main' && !(release && release[1] >= '27.02')) {
-              core.notice('This target branch still uses Blossom only');
+              core.notice('Standalone GPU CI is not enabled for this target branch');
               return;
             }
             if (/\[skip ci\]/i.test(pr.title)) {
@@ -87,9 +87,11 @@ jobs:
           BASE_SHA: ${{ steps.pr.outputs.base-sha }}
           MERGE_SHA: ${{ steps.pr.outputs.merge-sha }}
         run: |
+          revisions=(--base "$BASE_SHA" --merge "$MERGE_SHA")
           if [[ $SELECT_OUTCOME != success || -z $SUITES ]]; then
             echo "::warning::Could not establish changed-file scope; running all configured GPU suites"
             SUITES=$(jq -ce '[.suites | to_entries[] | select(.value.enabled != false) | .key] | select(length > 0)' .github/gpu-ci-suites.json)
+            revisions=()
           fi
           if [[ $SUITES == '[]' ]]; then
             # A docs-only result must belong to the original merge, even if the base moved.
@@ -99,7 +101,9 @@ jobs:
               { echo "::error::Cannot confirm the current PR merge for the no-test decision"; exit 1; }
             exit 0
           fi
-          matrix=$(python3 .github/workflows/gpu-ci/groups.py "$SUITES")
+          matrix=$(python3 .github/workflows/gpu-ci/groups.py "$SUITES" "${revisions[@]}")
+          jq -er '.include[] | .group + " (" + .arch + "): " + ((.targets // ["full group"]) | join(", "))' \
+            <<< "$matrix" >> "$GITHUB_STEP_SUMMARY"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   cache-212:
@@ -162,7 +166,7 @@ jobs:
             "base-branch": env.BASE, "base-sha": env.BASE_SHA, "merge-sha": env.MERGE_SHA,
             "parallel-ut": (env.PARALLEL_UT == "true"),
             "reduced-it": (env.REDUCED_IT == "true"),
-            "cache-key": (if .scala == "2.12" then env.CACHE_212 else env.CACHE_213 end)}')
+            "cache-key": (if .arch != "amd64" then "" elif .scala == "2.12" then env.CACHE_212 else env.CACHE_213 end)}')
           echo "payload=$payload" >> "$GITHUB_OUTPUT"
       - name: Run the shim group
         uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
@@ -172,7 +176,7 @@ jobs:
           source-ref: ${{ github.ref }}
           source-sha: ${{ github.sha }}
           workload: ${{ steps.workload.outputs.payload }}
-          runner-type: gpu-amd64
+          runner-type: gpu-${{ matrix.arch }}
           queue-timeout-minutes: '15'
           execution-timeout-minutes: '240'
 
