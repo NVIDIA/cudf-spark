@@ -802,6 +802,85 @@ class SpillablePartialFileHandleSuite
     }
   }
 
+  test("close() waits for an in-flight write() before freeing the HostMemoryBuffer") {
+    val tempFile = File.createTempFile("test-deterministic-write-close-", ".tmp")
+    val insideWrite = new CountDownLatch(1)
+    val releaseWrite = new CountDownLatch(1)
+    val writeError = new AtomicReference[Throwable](null)
+    val closeError = new AtomicReference[Throwable](null)
+
+    val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+      initialCapacity = 16,
+      maxBufferSize = 1024,
+      memoryThreshold = 0.99,
+      spillFile = tempFile,
+      capacityHintProvider = Some((_, required) => {
+        insideWrite.countDown()
+        assert(releaseWrite.await(5, TimeUnit.SECONDS))
+        required
+      }))
+
+    val chunk = new Array[Byte](64)
+    Arrays.fill(chunk, 0x5a.toByte)
+
+    val writerThread = new Thread(() => {
+      try {
+        handle.write(chunk, 0, chunk.length)
+      } catch {
+        case t: Throwable => writeError.set(t)
+      }
+    }, "partial-file-deterministic-writer")
+
+    val closeFinished = new AtomicBoolean(false)
+    val closeThread = new Thread(() => {
+      try {
+        handle.close()
+      } catch {
+        case t: Throwable => closeError.set(t)
+      } finally {
+        closeFinished.set(true)
+      }
+    }, "partial-file-deterministic-closer")
+
+    try {
+      writerThread.start()
+      assert(insideWrite.await(5, TimeUnit.SECONDS),
+        "writer thread did not enter write() expansion")
+
+      closeThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (closeThread.getState != Thread.State.BLOCKED && System.nanoTime() < deadline) {
+        Thread.`yield`()
+      }
+      assert(closeThread.getState == Thread.State.BLOCKED,
+        s"close() should block while write() holds monitor, state=${closeThread.getState}")
+      assert(!closeFinished.get(),
+        "close() must not complete while write() is still using HostMemoryBuffer")
+
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      closeThread.join(5000)
+      assert(!writerThread.isAlive, "writer thread did not finish")
+      assert(!closeThread.isAlive, "close thread did not finish")
+      assert(writeError.get() == null, s"in-flight write failed: ${writeError.get()}")
+      assert(closeError.get() == null, s"close failed: ${closeError.get()}")
+      assert(handle.isPhysicallyClosed)
+      assert(!tempFile.exists(), "temp file should be cleaned up on close")
+      assertThrows[IllegalStateException] {
+        handle.write(chunk, 0, 16)
+      }
+      assertThrows[IllegalStateException] {
+        handle.write(1)
+      }
+    } finally {
+      releaseWrite.countDown()
+      handle.close()
+      if (tempFile.exists()) {
+        tempFile.delete()
+      }
+    }
+  }
+
   test("concurrent write and close on MEMORY_WITH_SPILL handle fails safely without crashing") {
     val chunk = new Array[Byte](16 * 1024)
     Arrays.fill(chunk, 0x5a.toByte)

@@ -25,7 +25,7 @@ import java.nio.ByteBuffer
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -1334,42 +1334,134 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       "Bytes in flight should be released after stop(false)")
   }
 
-  test("concurrent stop(false) during multi-batch writes exits cleanly without crashing") {
-    // Regression test for #17081: stop(false) while BatchMerger steps are writing compressed
-    // records into SpillablePartialFileHandle must cancel active mergers before aborting writers.
-    (0 until 10).foreach { iter =>
-      val writer = createWriter()
-      val firstRecordQueued = new CountDownLatch(1)
-      val multiBatchIterator = new Iterator[(Int, ColumnarBatch)] {
-        private var count = 0
-        override def hasNext: Boolean = count < 200
-        override def next(): (Int, ColumnarBatch) = {
-          val id = count
-          count += 1
-          if (id == 1) {
-            firstRecordQueued.countDown()
+  test("stop(false) waits for active multi-batch mergers before aborting map output writers") {
+    // Deterministic regression test for #17081: hold two concurrent BatchMerger threads inside
+    // OutputStream.write() via latches, call stop(false), and verify abort() does not run until
+    // both in-flight writes finish.
+    val nextWriterNumber = new AtomicInteger(0)
+    val mergersInWrite = new CountDownLatch(2)
+    val cancelInterruptObserved = new CountDownLatch(1)
+    val releaseMergers = new CountDownLatch(1)
+    val abortedWhileWriting = new AtomicBoolean(false)
+    val abortCount = new AtomicInteger(0)
+    val mergerWriteError = new AtomicReference[Throwable](null)
+    val stopError = new AtomicReference[Throwable](null)
+
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        val writerNumber = nextWriterNumber.getAndIncrement()
+        val inWrite = new AtomicBoolean(false)
+        val firstWriteBlocked = new AtomicBoolean(false)
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def getPartitionWriter(reducePartitionId: Int): ShufflePartitionWriter = {
+            val delegate = super.getPartitionWriter(reducePartitionId)
+            new ShufflePartitionWriter {
+              override def openStream(): OutputStream = {
+                new FilterOutputStream(delegate.openStream()) {
+                  override def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
+                    if (writerNumber < 2 && firstWriteBlocked.compareAndSet(false, true)) {
+                      inWrite.set(true)
+                      var interrupted = false
+                      try {
+                        mergersInWrite.countDown()
+                        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                        while (releaseMergers.getCount > 0 && System.nanoTime() < deadline) {
+                          try {
+                            releaseMergers.await(
+                              math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+                          } catch {
+                            case _: InterruptedException =>
+                              interrupted = true
+                              cancelInterruptObserved.countDown()
+                          }
+                        }
+                        super.write(bytes, offset, length)
+                      } catch {
+                        case t: Throwable =>
+                          mergerWriteError.compareAndSet(null, t)
+                          throw t
+                      } finally {
+                        inWrite.set(false)
+                        if (interrupted) {
+                          Thread.currentThread().interrupt()
+                        }
+                      }
+                    } else {
+                      super.write(bytes, offset, length)
+                    }
+                  }
+                }
+              }
+
+              override def openChannelWrapper(): Optional[WritableByteChannelWrapper] =
+                delegate.openChannelWrapper()
+
+              override def getNumBytesWritten(): Long = delegate.getNumBytesWritten()
+            }
           }
-          // Partition ID wraps every 7 records to force multi-batch pipelining.
-          (id % 7, createTestBatch(id + 1))
+
+          override def abort(error: Throwable): Unit = {
+            if (inWrite.get()) {
+              abortedWhileWriting.set(true)
+            }
+            abortCount.incrementAndGet()
+            super.abort(error)
+          }
         }
       }
-
-      val writeThread = new Thread(() => {
-        try {
-          writer.write(multiBatchIterator)
-        } catch {
-          case _: Throwable => // expected when aborted by stop(false)
-        }
-      }, s"concurrent-stop-writer-$iter")
-      writeThread.start()
-      assert(firstRecordQueued.await(5, TimeUnit.SECONDS))
-      Thread.sleep((iter % 5) * 5L)
-
-      writer.stop(false)
-      writeThread.join(5000)
-      assert(!writeThread.isAlive, s"Write thread stuck after stop(false) on iteration $iter")
-      assert(writer.getBytesInFlight == 0L,
-        s"Bytes in flight leaked after stop(false) on iteration $iter")
     }
+
+    val writer = createWriter()
+    // Two full 7-partition batches so both merger pool threads write concurrently.
+    val records = createTestRecords((0 until 14).map(_ % 7).iterator)
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(records)
+      } catch {
+        case _: Throwable => // expected when aborted by stop(false)
+      }
+    }, "deterministic-abort-writer")
+    val stopThread = new Thread(() => {
+      try {
+        writer.stop(false)
+      } catch {
+        case t: Throwable => stopError.set(t)
+      }
+    }, "deterministic-abort-stopper")
+
+    try {
+      writeThread.start()
+      assert(mergersInWrite.await(5, TimeUnit.SECONDS),
+        "Both batch mergers should enter write() concurrently")
+
+      stopThread.start()
+      assert(cancelInterruptObserved.await(5, TimeUnit.SECONDS),
+        "stop(false) should cancel active mergers")
+      assert(!abortedWhileWriting.get(),
+        "mapOutputWriter.abort() must not run while a BatchMerger is inside write()")
+      assert(abortCount.get() == 0,
+        "mapOutputWriter.abort() must wait for active BatchMerger steps to finish")
+    } finally {
+      releaseMergers.countDown()
+    }
+
+    stopThread.join(5000)
+    writeThread.join(5000)
+    assert(!stopThread.isAlive, "stop(false) thread did not finish")
+    assert(!writeThread.isAlive, "write thread did not finish after stop(false)")
+    assert(stopError.get() == null, s"stop(false) threw: ${stopError.get()}")
+    assert(mergerWriteError.get() == null,
+      s"in-flight merger write failed before abort: ${mergerWriteError.get()}")
+    assert(!abortedWhileWriting.get(),
+      "mapOutputWriter.abort() ran concurrently with an in-flight BatchMerger write")
+    assert(abortCount.get() == 2,
+      s"expected both batch writers to be aborted, got ${abortCount.get()}")
+    assert(writer.getBytesInFlight == 0L,
+      "Bytes in flight should be released after stop(false)")
   }
 }

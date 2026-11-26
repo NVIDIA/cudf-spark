@@ -61,10 +61,10 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   private val syncWrites = sparkConf.get("spark.shuffle.sync", "false").toBoolean
 
   // RAPIDS optimization: use SpillablePartialFileHandle for unified storage
-  private var partialFileHandle: Option[SpillablePartialFileHandle] = None
+  @volatile private var partialFileHandle: Option[SpillablePartialFileHandle] = None
   private var storageInitAttempted: Boolean = false
   private var forceFileOnly: Boolean = false
-  private var aborted: Boolean = false
+  @volatile private var aborted: Boolean = false
 
   // Track completed partition count for predictive buffer sizing
   private var completedPartitionCount: Int = 0
@@ -236,7 +236,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
     }
   }
 
-  private def currentPartialFileHandle(): Option[SpillablePartialFileHandle] = synchronized {
+  private def currentPartialFileHandle(): Option[SpillablePartialFileHandle] = {
     if (aborted) {
       throw new IllegalStateException("Map output writer has been aborted")
     }
