@@ -18,7 +18,7 @@ package org.apache.spark.sql.delta.rapids
 
 import scala.util.Try
 
-import com.nvidia.spark.rapids.{RapidsConf, ShimLoader, ShimReflectionUtils, VersionUtils}
+import com.nvidia.spark.rapids.{RapidsConf, ShimReflectionUtils, VersionUtils}
 import com.nvidia.spark.rapids.delta.{DeltaConfigChecker, DeltaProvider}
 
 import org.apache.spark.SPARK_VERSION
@@ -123,51 +123,45 @@ trait DeltaRuntimeShim {
 
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
+  private val DELTA_MAJOR_MINOR = """^(\d+)\.(\d+)\..*""".r
 
-  private def parseSparkVersion(sparkVersion: String): (Int, Int, Int) = sparkVersion match {
-    case SparkVersion(major, minor, patch) => (major.toInt, minor.toInt, patch.toInt)
-    case _ => throw new IllegalStateException(s"Unable to parse Spark version $sparkVersion")
+  private def isDelta42Plus(deltaVersion: String): Boolean = deltaVersion match {
+    case DELTA_MAJOR_MINOR(major, minor) =>
+      val maj = BigInt(major)
+      maj > 4 || (maj == 4 && BigInt(minor) >= 2)
+    case _ => false
   }
 
-  private[rapids] def getDelta42ShimClassName(
+  private[rapids] def getDelta42PlusShimClassName(
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
-    if (deltaVersion.startsWith("4.2.")) {
-      val parsedSparkVersion = parseSparkVersion(sparkVersion)
-      (deltaVersion, parsedSparkVersion) match {
-        case ("4.2.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
-          Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
-        case _ =>
-          throw new IllegalStateException(
-            s"Unsupported Delta Lake $deltaVersion and Spark $sparkVersion combination")
-      }
+    (deltaVersion, sparkVersion) match {
+      case ("4.2.0", SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4")) =>
+        Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
+      case ("4.3.0", SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4")) =>
+        Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
+      case _ => None
+    }
+  }
+
+  /**
+   * Spark 3.5.3+ builds bundle only the Delta 3.3 shim, which links against classes that older
+   * Delta releases lack (e.g. LoggingShims), so the Delta version on the classpath must be
+   * checked before the shim is loaded.
+   */
+  private[rapids] def getDelta33ShimClassName(deltaVersion: String): Option[String] = {
+    if (deltaVersion.startsWith("3.3.")) {
+      Some("org.apache.spark.sql.delta.rapids.delta33x.Delta33xRuntimeShim")
     } else {
       None
     }
   }
 
-  private[rapids] def getDelta43ShimClassName(
-      deltaVersion: String,
-      sparkVersion: String): Option[String] = {
-    if (deltaVersion.startsWith("4.3.")) {
-      val parsedSparkVersion = parseSparkVersion(sparkVersion)
-      (deltaVersion, parsedSparkVersion) match {
-        case ("4.3.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
-          Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
-        case _ =>
-          throw new IllegalStateException(
-            s"Unsupported Delta Lake $deltaVersion and Spark $sparkVersion combination")
-      }
-    } else {
-      None
-    }
-  }
-
-  private def getPreDelta42ShimClassName: String = {
+  private def getPreDelta42ShimClassName(deltaVersion: String): Option[String] = {
     if (VersionUtils.cmpSparkVersion(3, 2, 0) < 0) {
-      throw new IllegalStateException("Delta Lake is not supported on Spark < 3.2.x")
+      None
     } else if (VersionUtils.cmpSparkVersion(3, 3, 0) < 0) {
-      "org.apache.spark.sql.delta.rapids.delta20x.Delta20xRuntimeShim"
+      Some("org.apache.spark.sql.delta.rapids.delta20x.Delta20xRuntimeShim")
     } else if (VersionUtils.cmpSparkVersion(3, 4, 0) < 0) {
       // Could not find a Delta Lake API to determine what version is being run,
       // so this resorts to "fingerprinting" via reflection probing.
@@ -178,40 +172,42 @@ object DeltaRuntimeShim {
           Try {
             classOf[DeltaLog].getMethod("assertRemovable")
           }.map(_ => "org.apache.spark.sql.delta.rapids.delta22x.Delta22xRuntimeShim")
-        }.getOrElse("org.apache.spark.sql.delta.rapids.delta23x.Delta23xRuntimeShim")
+        }.toOption.orElse(Some("org.apache.spark.sql.delta.rapids.delta23x.Delta23xRuntimeShim"))
     } else if (VersionUtils.cmpSparkVersion(3, 5, 0) < 0) {
-      "org.apache.spark.sql.delta.rapids.delta24x.Delta24xRuntimeShim"
+      Some("org.apache.spark.sql.delta.rapids.delta24x.Delta24xRuntimeShim")
     } else if (VersionUtils.cmpSparkVersion(3, 5, 2) > 0 &&
                VersionUtils.cmpSparkVersion(4, 0, 0) < 0) {
-      "org.apache.spark.sql.delta.rapids.delta33x.Delta33xRuntimeShim"
+      getDelta33ShimClassName(deltaVersion)
     } else if (VersionUtils.cmpSparkVersion(4, 0, 0) >= 0 &&
                VersionUtils.cmpSparkVersion(4, 1, 0) < 0) {
-      "org.apache.spark.sql.delta.rapids.delta40x.Delta40xRuntimeShim"
+      Some("org.apache.spark.sql.delta.rapids.delta40x.Delta40xRuntimeShim")
     } else if (VersionUtils.cmpSparkVersion(4, 1, 0) >= 0) {
-      "org.apache.spark.sql.delta.rapids.delta41x.Delta41xRuntimeShim"
+      Some("org.apache.spark.sql.delta.rapids.delta41x.Delta41xRuntimeShim")
     } else {
-      val sparkVer = ShimLoader.getShimVersion
-      throw new IllegalStateException(
-        s"${sparkVer}: No Delta Lake support for this build of Spark"
-      )
+      None
     }
   }
 
-  private def getShimClassName: String = {
-    getDelta43ShimClassName(io.delta.VERSION, SPARK_VERSION)
-      .orElse(getDelta42ShimClassName(io.delta.VERSION, SPARK_VERSION))
-      .getOrElse(getPreDelta42ShimClassName)
+  private[rapids] def getShimClassName(
+      deltaVersion: String = io.delta.VERSION): Option[String] = {
+    if (isDelta42Plus(deltaVersion)) {
+      getDelta42PlusShimClassName(deltaVersion, SPARK_VERSION)
+    } else {
+      getPreDelta42ShimClassName(deltaVersion)
+    }
   }
 
-  private[rapids] lazy val shimInstance = {
-    val shimClassName = getShimClassName
-    val shimClass = ShimReflectionUtils.loadClass(shimClassName)
-    shimClass.getConstructor().newInstance().asInstanceOf[DeltaRuntimeShim]
+  private lazy val optionalShim = getShimClassName().map { name =>
+    val cls = ShimReflectionUtils.loadClass(name)
+    cls.getConstructor().newInstance().asInstanceOf[DeltaRuntimeShim]
   }
+
+  private[rapids] lazy val shimInstance: DeltaRuntimeShim =
+    optionalShim.getOrElse(throw new IllegalStateException("No supported Delta runtime shim"))
 
   private[rapids] def getShimInstance: DeltaRuntimeShim = shimInstance
 
-  def getDeltaProvider: DeltaProvider = shimInstance.getDeltaProvider
+  def getDeltaProvider: Option[DeltaProvider] = optionalShim.map(_.getDeltaProvider)
 
   def mayContainShreddedVariant(protocol: Protocol): Boolean =
     shimInstance.mayContainShreddedVariant(protocol)
