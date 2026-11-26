@@ -1039,6 +1039,22 @@ def _build_nested_required_empty_descriptor_set_bytes(spark):
     ])
 
 
+def _build_projection_hidden_descriptor_set_bytes(spark, label):
+    """Child holds an unread scalar before the selected one, plus an empty message."""
+    return _build_proto2_descriptor(spark, f"projection_hidden_{label}.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("unread", 1, "INT32"),
+            _field("selected", 2, "INT32"),
+            _field("empty", 3, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", label=label, type_name=".test.Child"),
+        ]),
+    ])
+
+
 def _build_repeated_nested_empty_message_descriptor_set_bytes(spark):
     """A repeated message whose element hides an empty message, so the list child is trimmed."""
     return _build_proto2_descriptor(spark, "repeated_nested_empty_field.proto", [
@@ -1090,6 +1106,35 @@ _empty_message_cases = [
     pytest.param(_build_repeated_nested_empty_message_descriptor_set_bytes, b"",
                  id="repeated_nested_empty"),
 ]
+
+
+_projection_child = (_encode_varint_field(1, 11) + _encode_varint_field(2, 22) +
+                     _encode_length_delimited_field(3, b""))
+
+
+@pytest.mark.parametrize("label", ["optional", "repeated"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_projection_with_hidden_fields(
+        local_tmp_path, from_protobuf_fn, label):
+    """Both kinds of hidden field in one decode: the unread scalar keeps its null placeholder
+    inside the Spark schema while the omitted empty message is trimmed after it, so the
+    selected field has to keep its ordinal."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, f"projection_hidden_{label}.desc",
+        lambda spark: _build_projection_hidden_descriptor_set_bytes(spark, label))
+    child = _encode_length_delimited_field(2, _projection_child)
+    row = _encode_varint_field(1, 7) + (child * 2 if label == "repeated" else child)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(
+            [(0, row), (1, None)], schema="idx int, bin binary").coalesce(1)
+        decoded = _decode(from_protobuf_fn, desc, "Root")
+        return df.select("idx",
+                         decoded.getField("child").getField("selected").alias("selected"))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuFromProtobuf",
+        non_exist_classes="ProtobufDataToCatalyst")
 
 
 @pytest.mark.parametrize("build_fn,tail", _empty_message_cases, ids=idfn)
