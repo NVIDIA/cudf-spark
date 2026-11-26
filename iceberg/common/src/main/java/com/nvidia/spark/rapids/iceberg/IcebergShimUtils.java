@@ -217,7 +217,7 @@ public interface IcebergShimUtils {
         Option<GpuMetric> opt = metrics.get(GpuMetric.FILECACHE_FOOTER_MISSES());
         GpuMetric missCounter = opt.isDefined() ? opt.get() : NoopMetric$.MODULE$;
         missCounter.$plus$eq(1L);
-        return ParquetFileReader.open(GpuParquetIO.file(inputFile.getDelegate()), options);
+        return ParquetFileReader.open(GpuParquetIO.file(inputFile), options);
     }
 
     /**

@@ -21,13 +21,14 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
+import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.Schema
 import org.apache.iceberg.io.InputFile
 import org.apache.iceberg.mapping.NameMapping
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
-import org.apache.iceberg.shaded.org.apache.parquet.io.{InputFile => ShadedInputFile}
+import org.apache.iceberg.shaded.org.apache.parquet.io.{DelegatingSeekableInputStream, InputFile => ShadedInputFile, SeekableInputStream => ShadedInputStream}
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{GroupType => ShadedGroupType,
   MessageType => ShadedMessageType, OriginalType, Type => ShadedType}
 
@@ -101,6 +102,19 @@ object GpuParquetIO {
 
   def file(file: InputFile): ShadedInputFile = {
     GpuParquetIOAccess.file(file)
+  }
+
+  def file(inputFile: RapidsInputFile): ShadedInputFile = new ShadedInputFile {
+    override def getLength: Long = inputFile.getLength
+    override def newStream(): ShadedInputStream = stream(inputFile.open())
+    override def toString: String = inputFile.path()
+  }
+
+  private[parquet] def stream(input: SeekableInputStream): ShadedInputStream = {
+    new DelegatingSeekableInputStream(input) {
+      override def getPos: Long = input.getPos
+      override def seek(position: Long): Unit = input.seek(position)
+    }
   }
 
   /**
