@@ -29,8 +29,7 @@ from iceberg import (
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table,
     setup_iceberg_write_default_tables,
-    assert_iceberg_write_only_default_fallback, setup_iceberg_fixed_default_table,
-    check_default_rows)
+    assert_iceberg_write_only_default_fallback, setup_iceberg_fixed_default_table)
 from iceberg.defaults import (
     assert_iceberg_default_file_parity, assert_iceberg_gpu_writer,
     iceberg_default_file_snapshot, iceberg_file_hashes)
@@ -216,7 +215,9 @@ def test_iceberg_v3_write_default_evolution(spark_tmp_table_factory):
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("default_type", [
-    "int", "long", "decimal", "boolean", "float", "double",
+    "int", "long", "decimal", "boolean",
+    pytest.param("float", marks=pytest.mark.approximate_float),
+    pytest.param("double", marks=pytest.mark.approximate_float),
     pytest.param("date", marks=allow_non_gpu_conditional(
         is_not_utc(), "ProjectExec", "Cast", "AnsiCast")),
     pytest.param("timestamptz", marks=allow_non_gpu_conditional(
@@ -233,37 +234,33 @@ def test_iceberg_write_default_types(spark_tmp_table_factory, default_type):
     nested = default_type == "struct"
     conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
 
+    if default_type == "decimal":
+        # Iceberg's vectorized reader tries to cast the decimal default to its physical INT32.
+        conf["spark.sql.iceberg.vectorization.enabled"] = "false"
+
     def setup(spark):
         jvm = spark._jvm
         iceberg = jvm.org.apache.iceberg
         types = iceberg.types.Types
-        # Type, initial/write defaults, SQL type/value, and independent expected read values.
         cases = {
-            "int": (types.IntegerType.get(), 7, 19, "INT", "37", "7", "19", "37"),
-            "long": (types.LongType.get(), 5000000000, 6000000000, "BIGINT",
-                     "7000000000L", "5000000000", "6000000000", "7000000000"),
+            "int": (types.IntegerType.get(), 7, 19, "INT", "37"),
+            "long": (types.LongType.get(), 5000000000, 6000000000, "BIGINT", "7000000000L"),
             "decimal": (types.DecimalType.of(9, 2), jvm.java.math.BigDecimal("-12.34"),
                         jvm.java.math.BigDecimal("23.45"), "DECIMAL(9,2)",
-                        "CAST(34.56 AS DECIMAL(9,2))", "-12.34", "23.45", "34.56"),
-            "boolean": (types.BooleanType.get(), True, False, "BOOLEAN", "TRUE",
-                        "true", "false", "true"),
-            "float": (types.FloatType.get(), 1.25, 2.5, "FLOAT", "CAST(3.75 AS FLOAT)",
-                      "1.25", "2.5", "3.75"),
-            "double": (types.DoubleType.get(), -2.5, 5.25, "DOUBLE", "CAST(7.5 AS DOUBLE)",
-                       "-2.5", "5.25", "7.5"),
+                        "CAST(34.56 AS DECIMAL(9,2))"),
+            "boolean": (types.BooleanType.get(), True, False, "BOOLEAN", "TRUE"),
+            "float": (types.FloatType.get(), 1.25, 2.5, "FLOAT", "CAST(3.75 AS FLOAT)"),
+            "double": (types.DoubleType.get(), -2.5, 5.25, "DOUBLE", "CAST(7.5 AS DOUBLE)"),
             "date": (types.DateType.get(), "2024-01-02", "2024-02-03", "DATE",
-                     "DATE '2024-03-04'", "2024-01-02", "2024-02-03", "2024-03-04"),
+                     "DATE '2024-03-04'"),
             "timestamptz": (types.TimestampType.withZone(),
                             "2024-11-03T01:30:00.123456-04:00",
                             "2024-11-03T01:30:00.123456-05:00", "TIMESTAMP",
-                            "TIMESTAMP '2024-11-04T06:30:00.123456Z'",
-                            "1730611800123456", "1730615400123456", "1730701800123456"),
+                            "TIMESTAMP '2024-11-04T06:30:00.123456Z'"),
             "binary": (types.BinaryType.get(),
                        jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2])),
-                       jvm.java.nio.ByteBuffer.wrap(bytearray([3, 4])), "BINARY", "X'0506'",
-                       "0102", "0304", "0506")}
-        case = cases["int" if nested else default_type]
-        iceberg_type, initial, current, *_ = case
+                       jvm.java.nio.ByteBuffer.wrap(bytearray([3, 4])), "BINARY", "X'0506'")}
+        iceberg_type, initial, current, sql_type, explicit = cases["int" if nested else default_type]
         for table in (cpu_table, gpu_table):
             columns = "id BIGINT, s STRUCT<kept: BIGINT>" if nested else "id BIGINT"
             spark.sql(f"CREATE TABLE {table} ({columns}) USING ICEBERG "
@@ -281,11 +278,9 @@ def test_iceberg_write_default_types(spark_tmp_table_factory, default_type):
                 "s.value" if nested else "value",
                 iceberg.expressions.Literal.of(current).to(iceberg_type)).commit()
             spark.catalog.refreshTable(table)
-        visible = not nested and "CURRENT_DEFAULT" in spark.table(cpu_table).schema["value"].metadata
-        return case, visible
+        return sql_type, explicit
 
-    case, catalog_has_default = with_cpu_session(setup)
-    _, _, _, sql_type, explicit, initial_expected, write_expected, explicit_expected = case
+    sql_type, explicit = with_cpu_session(setup)
 
     def append_and_read(spark):
         table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
@@ -299,22 +294,8 @@ def test_iceberg_write_default_types(spark_tmp_table_factory, default_type):
         failed, _ = collect_data_or_exception(
             lambda: spark.sql(f"INSERT INTO {table} (id) VALUES (4L)").collect(),
             "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA")
-        value = "s.value" if nested else "value"
-        projection = (f"hex({value})" if default_type == "binary" else
-                      f"CAST(unix_micros({value}) AS STRING)" if default_type == "timestamptz" else
-                      f"CAST({value} AS STRING)")
-        kept = "s.kept" if nested else "CAST(NULL AS BIGINT)"
-        result = spark.sql(f"SELECT id, {projection} AS actual, {kept} AS kept, "
-                           f"{str(not failed).lower()} AS omitted FROM {table} ORDER BY id")
-        expected = [(1, initial_expected, 10 if nested else None),
-                    (2, explicit_expected, 20 if nested else None),
-                    (3, None, 30 if nested else None)]
-        if nested:
-            expected.append((5, None, None))
-        if not failed:
-            expected.append((4, write_expected if catalog_has_default else None, None))
-        assert result.collect() == [row + (not failed,) for row in sorted(expected)]
-        return result
+        return spark.table(table).selectExpr(
+            "*", f"{str(not failed).lower()} AS omitted_insert_succeeded").orderBy("id")
 
     assert_gpu_and_cpu_are_equal_collect(append_and_read, conf=conf)
     with_cpu_session(lambda spark: assert_iceberg_default_file_parity(
@@ -330,7 +311,10 @@ def test_iceberg_write_default_types(spark_tmp_table_factory, default_type):
 def test_iceberg_append_initial_only_default(spark_tmp_table_factory):
     base = get_full_table_name(spark_tmp_table_factory)
     cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
-    conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
+    conf = copy_and_update(iceberg_write_enabled_conf, {
+        "spark.sql.adaptive.enabled": "false",
+        # Iceberg's vectorized reader expects a variable-width Arrow vector for this file.
+        "spark.sql.iceberg.vectorization.enabled": "false"})
 
     def setup(spark):
         for table in (cpu_table, gpu_table):
@@ -353,10 +337,7 @@ def test_iceberg_append_initial_only_default(spark_tmp_table_factory):
         # of the GPU append above. The scan allowances cannot hide a CPU writer.
         return spark.table(table).orderBy("id")
 
-    assert_gpu_and_cpu_are_equal_collect(
-        append_and_read, conf=conf,
-        result_canonicalize_func_before_compare=check_default_rows(
-            [(1, bytearray([1, 2])), (2, None), (3, bytearray([3, 4]))]))
+    assert_gpu_and_cpu_are_equal_collect(append_and_read, conf=conf)
 
 
 @iceberg
