@@ -1,0 +1,169 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI worker
+run-name: ${{ inputs.request-id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request-id: {required: true, type: string}
+      parent-run-id: {required: true, type: string}
+      parent-run-attempt: {required: true, type: string}
+      source-ref: {required: true, type: string}
+      source-sha: {required: true, type: string}
+      runner: {required: true, type: string}
+      workload: {required: true, type: string}
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  worker:
+    name: worker
+    if: github.repository == 'NVIDIA/cudf-spark'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 240
+    env:
+      SCALA: ${{ fromJSON(inputs.workload).scala }}
+      GROUP: ${{ fromJSON(inputs.workload).group }}
+      KIND: ${{ fromJSON(inputs.workload).kind }}
+    steps:
+      - name: Check coordinator and approved source
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
+        with:
+          request-id: ${{ inputs.request-id }}
+          parent-run-id: ${{ inputs.parent-run-id }}
+          parent-run-attempt: ${{ inputs.parent-run-attempt }}
+          source-ref: ${{ inputs.source-ref }}
+          source-sha: ${{ inputs.source-sha }}
+
+      - name: Check worker definition and current PR merge
+        uses: actions/github-script@v9
+        env:
+          SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          PARENT: ${{ inputs.parent-run-id }}
+          WORKLOAD: ${{ inputs.workload }}
+        with:
+          script: |
+            const w = JSON.parse(process.env.WORKLOAD);
+            const match = /^refs\/heads\/pull-request\/([1-9]\d*)$/.exec(context.ref);
+            if (!match || context.ref !== process.env.SOURCE_REF || context.sha !== process.env.SOURCE_SHA ||
+                process.env.RUNNER_ARCH !== 'X64' || typeof w['parallel-ut'] !== 'boolean') {
+              throw new Error('Expected an approved copied head, an AMD64 runner and a boolean parallel-ut setting');
+            }
+            const {data: parent} = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: Number(process.env.PARENT),
+            });
+            if (parent.path !== '.github/workflows/gpu-ci.yml' || parent.event !== 'push' ||
+                parent.head_branch !== context.ref.slice('refs/heads/'.length) || parent.head_sha !== context.sha) {
+              throw new Error('Dispatch does not belong to the GPU CI coordinator for this copied head');
+            }
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: Number(match[1])});
+            if (pr.state !== 'open' || pr.head.sha !== context.sha || pr.base.ref !== w['base-branch'] ||
+                pr.base.sha !== w['base-sha'] || !/^[0-9a-f]{40}$/.test(w['merge-sha']) ||
+                pr.merge_commit_sha !== w['merge-sha']) {
+              throw new Error('PR head, base or merge commit changed; rerun for the current PR');
+            }
+            // Budget includes checkout, image pull and restore. Leave time for cleanup and upload.
+            core.exportVariable('GPU_DEADLINE', Math.floor(Date.now() / 1000) + 210 * 60);
+
+      - name: Checkout tested merge and pinned submodules
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ fromJSON(inputs.workload).merge-sha }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify merge parents, Parquet test data and requested group
+        env:
+          MERGE_SHA: ${{ fromJSON(inputs.workload).merge-sha }}
+          BASE_SHA: ${{ fromJSON(inputs.workload).base-sha }}
+          HEAD_SHA: ${{ inputs.source-sha }}
+          WORKLOAD: ${{ inputs.workload }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$MERGE_SHA" ]]
+          [[ "$(git show -s --format=%P HEAD)" == "$BASE_SHA $HEAD_SHA" ]]
+          [[ "$(git -C thirdparty/parquet-testing rev-parse HEAD)" == "$(git rev-parse HEAD:thirdparty/parquet-testing)" ]]
+          compgen -G 'thirdparty/parquet-testing/data/*.parquet' >/dev/null
+          python3 .github/workflows/gpu-ci/groups.py "$(jq -cn '[env.KIND]')" | jq -e --argjson w "$WORKLOAD" '
+            ($w | if .kind == "unit" then {kind, group, scala, shims}
+                  elif .kind == "integration" then {kind, group, scala, shim, shard}
+                  else error("Unknown GPU workload kind") end) as $row |
+            any(.include[]; . == $row)' >/dev/null
+      - name: Checkout the shared image recipe helper
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          sparse-checkout: container-image
+          persist-credentials: false
+      - name: Select Spark build image
+        id: image
+        timeout-minutes: 15
+        env:
+          CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
+          BASE_BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
+        run: python3 .github/workflows/gpu-ci/select-image.py
+      - name: Build missing Spark image locally
+        if: steps.image.outputs.build != ''
+        id: local-image
+        timeout-minutes: 60
+        env:
+          IMAGE_CONFIG: ${{ steps.image.outputs.build }}
+        run: |
+          set -euo pipefail
+          home=$(mktemp -d "$RUNNER_TEMP/gpu-image.XXXXXXXX")
+          trap 'rm -rf -- "$home"' EXIT
+          env -i PATH="$PATH" HOME="$home" DOCKER_CONFIG="$home" DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}" \
+            IMAGE_CONFIG="$IMAGE_CONFIG" PUBLISH_IMAGE=false bash .ci-common/container-image/image.sh
+          image=$(docker image inspect --format '{{.Id}}' "image-validation:$(jq -er .tag <<< "$IMAGE_CONFIG")")
+          [[ $image =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Maven dependencies
+        id: cache
+        if: fromJSON(inputs.workload).cache-key != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 40
+        with:
+          path: ~/.m2/repository
+          key: ${{ fromJSON(inputs.workload).cache-key }}
+      - name: Prepare verified Spark distribution for integration tests
+        if: env.KIND == 'integration'
+        id: spark
+        uses: ./.github/actions/spark-archive-cache
+        with:
+          scala: ${{ env.SCALA }}
+      - name: Run GPU tests for ${{ env.GROUP }}
+        id: test
+        env:
+          IMAGE: ${{ steps.local-image.outputs.image || steps.image.outputs.image }}
+          CACHE_HIT: ${{ steps.cache.outcome == 'success' && steps.cache.outputs.cache-hit == 'true' && steps.cache.outputs.cache-matched-key == fromJSON(inputs.workload).cache-key }}
+          PARALLEL_UT: ${{ fromJSON(inputs.workload).parallel-ut }}
+          SHIMS: ${{ toJSON(fromJSON(inputs.workload).shims) }}
+          SPARK_SHIM: ${{ fromJSON(inputs.workload).shim }}
+          SHARD: ${{ fromJSON(inputs.workload).shard }}
+          SPARK_TARBALL: ${{ steps.spark.outputs.path }}
+          REDUCED_IT: ${{ fromJSON(inputs.workload).reduced-it }}
+        run: bash .github/workflows/gpu-ci/run-group.sh
+      - name: Upload group JUnit results
+        if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ env.GROUP }}-junit-${{ github.run_id }}
+          path: ${{ env.KIND == 'unit' && format('{0}/unit-junit/', runner.temp) || format('target/gpu-it-junit/{0}-{1}/*.xml', env.SCALA, fromJSON(inputs.workload).shard) }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove local build tag
+        if: always() && steps.image.outputs.build != ''
+        timeout-minutes: 1
+        run: |
+          tag="image-validation:gpu-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker image rm "$tag" || echo "::warning::Local build tag absent or could not be removed: $tag"

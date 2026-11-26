@@ -7,10 +7,25 @@
 Currently it checks [Docker images](ci-images/README.md). Markdown-only PRs
 and PRs titled with `[skip ci]` pass without building images.
 
+## GPU CI
+
+[GPU CI](gpu-ci.yml) is an opt-in standalone test workflow alongside Blossom.
+Copy-pr-bot approval of the current PR head starts it; the workers test that
+head merged with its target. Documentation-only or Skills-only changes and a
+`[skip ci]` title skip these jobs. Other changes run all eight groups. Blossom
+remains required and still handles Skills and Databricks.
+
+[GPU CI suites](../gpu-ci-suites.json) assigns four unit-test runners by Scala
+version and Spark shim, independently of Blossom's Maven property lists. Each
+Scala version also has two integration-test runners for the Spark distribution
+in the [archive catalog](../actions/spark-archive-cache/releases.json).
+Each group has its own result, so a failed group can be rerun without repeating
+successful groups. Rebalance from measured group times, not the number of shims.
+
 ## Shared dependency caches
 
 [Cache preparation](cache.yml) seeds Maven dependencies for [Maven Verify](mvn-verify-check.yml)
-and future standalone premerge jobs using the [Maven cache action](../actions/maven-cache/action.yml).
+and standalone GPU CI using the [Maven cache action](../actions/maven-cache/action.yml).
 The seed includes the Scala compiler bridge and standalone integration-test dependencies.
 When no current seed is available, Verify can save a smaller cache on the PR.
 Later commits on that PR reuse it; if dependencies change, the previous cache is a starting point.
@@ -30,7 +45,7 @@ and build normally on a miss. `premerge: true` is for the branch warmer: an exac
 checks that the cache exists without downloading it. Do not save PR-built artifacts to a branch cache.
 
 The same warmer seeds the standalone [Apache Spark distributions](../actions/spark-archive-cache/releases.json).
-Future GHA premerge workers can use the [archive action](../actions/spark-archive-cache/action.yml)
+Integration-test workers use the [archive action](../actions/spark-archive-cache/action.yml)
 to restore a checksum-verified tarball by Scala version. Extract its `path` output
 instead of downloading Spark again. When a standalone lane changes Spark version,
 update its archive version and checksum together. The warmer does not cache locally

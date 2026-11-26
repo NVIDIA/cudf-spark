@@ -15,52 +15,63 @@
 # limitations under the License.
 #
 
-set -ex
+contains_shim() {
+    local requested=$1 shim
+    shift
+    for shim in "$@"; do
+        if [[ "$shim" == "$requested" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
-BUILD_TYPE=all
-
-if [[ $# -eq 1 ]]; then
-    BUILD_TYPE=$1
-
-elif [[ $# -gt 1 ]]; then
-    >&2 echo "ERROR: too many parameters are provided"
-    exit 1
-fi
-
-CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
-CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
-MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
-MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
-if [[ -z "${PARALLEL_UT:-}" ]]; then
-    echo "NOTE: premerge CI runs unit tests in parallel; this run is serial. Set PARALLEL_UT=true to match CI."
-fi
-PARALLEL_UT=${PARALLEL_UT:-false}
-PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
-
-if [[ "$PARALLEL_UT" != "true" && "$PARALLEL_UT" != "false" ]]; then
-    >&2 echo "ERROR: PARALLEL_UT must be true or false"
-    exit 1
-fi
-
-if [[ -n "$PARALLEL_UT_FORK_COUNT" &&
-      ! "$PARALLEL_UT_FORK_COUNT" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
-    >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be an integer greater than 1"
-    exit 1
-fi
-
-MVN_PARALLEL_UT_ARGS=""
-if [[ "$PARALLEL_UT" == "true" ]]; then
-    MVN_PARALLEL_UT_ARGS="-Drapids.parallelUnitTests=true"
-    if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
-        MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
+run_unit_shim() {
+    local mode=$1 shim=$2 project=${3:-.}
+    local pom_args=()
+    if [[ "$project" != "." ]]; then
+        pom_args=(-f "$project/")
     fi
-fi
+    case $mode in
+        package)
+            env -u SPARK_HOME $MVN "${pom_args[@]}" -U -B $MVN_URM_MIRROR -Dbuildver="$shim" \
+                clean package $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
+            return
+            ;;
+        filecache) ;;
+        *) echo "ERROR: unknown unit-test mode: $mode" >&2; return 1 ;;
+    esac
+    env -u SPARK_HOME $MVN "${pom_args[@]}" -U -B $MVN_URM_MIRROR -Dbuildver="$shim" \
+        clean install $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
 
-MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true \
-  -Dcuda.version=$CLASSIFIER $MVN_PARALLEL_UT_ARGS"
+    if [[ "$BUILD_TYPE" == ci_unit ]]; then
+        # Both passes use the same XML filenames. Keep their evidence separate on the GPU worker.
+        local target="$project/tests/target/spark$shim"
+        mv "$target/surefire-reports" "$target/unit-reports"
+    fi
+    env -u SPARK_HOME SPARK_CONF=spark.rapids.filecache.enabled=true \
+        $MVN "${pom_args[@]}" -B $MVN_URM_MIRROR -Dbuildver="$shim" test -rf tests $MVN_BUILD_ARGS \
+        -Dpytest.TEST_TAGS='' -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
+}
 
-echo "Parallel unit tests: enabled=$PARALLEL_UT, \
-forks=${PARALLEL_UT_FORK_COUNT:-Maven default}"
+ci_unit() {
+    local shim=${SPARK_SHIM:?Set SPARK_SHIM to one premerge unit-test shim}
+    local project supported
+    local shims=()
+    case $SCALA_BINARY_VER in
+        2.12) project=. ;;
+        2.13) project=scala2.13 ;;
+        *) echo "ERROR: unsupported Scala binary version: $SCALA_BINARY_VER" >&2; return 1 ;;
+    esac
+    # The GPU workflow selects the group; only verify that its shim exists for this Scala build.
+    supported=$(python build/get_buildvers.py snap_and_no_snap "$project/pom.xml")
+    IFS=', ' read -r -a shims <<< "$supported"
+    if ! contains_shim "$shim" "${shims[@]}"; then
+        echo "ERROR: Spark shim $shim is not supported by $project/pom.xml" >&2
+        return 1
+    fi
+    run_unit_shim "${UNIT_TEST_MODE:?Set UNIT_TEST_MODE to package or filecache}" "$shim" "$project"
+}
 
 mvn_verify() {
     echo "Run mvn verify..."
@@ -84,23 +95,8 @@ mvn_verify() {
         echo "Spark version: $version"
         # build and run unit tests on one specific version for each sub-version (e.g. 330) except base version
         # separate the versions to two ci stages (mvn_verify, ci_2) for balancing the duration
-        match=1
-        for element in "${SPARK_SHIM_VERSIONS_PREMERGE_UT_1[@]}"; do
-            if [[ "$element" == "$version" ]]; then
-                match=0
-                break
-            fi
-        done
-        if [[ $match == 0 ]]; then
-            env -u SPARK_HOME \
-              $MVN -U -B $MVN_URM_MIRROR -Dbuildver=$version clean install $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
-            # Run filecache tests
-            env -u SPARK_HOME SPARK_CONF=spark.rapids.filecache.enabled=true \
-              $MVN -B $MVN_URM_MIRROR -Dbuildver=$version test -rf tests $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
-              -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
-        # build only for other versions
-        # elif [[ "${SPARK_SHIM_VERSIONS_NOSNAPSHOTS_TAIL[@]}" =~ "$version" ]]; then
-        #     $MVN_INSTALL_CMD -DskipTests -Dbuildver=$version
+        if contains_shim "$version" "${SPARK_SHIM_VERSIONS_PREMERGE_UT_1[@]}"; then
+            run_unit_shim filecache "$version"
         fi
     done
     # build base shim version for following test step with PREMERGE_PROFILES
@@ -211,12 +207,17 @@ run_iceberg_extra_classpath_tests() {
     local iceberg_spark_ver
     iceberg_spark_ver=$(echo "$spark_ver" | cut -d. -f1,2)
     local iceberg_runtime_artifact="iceberg-spark-runtime-${iceberg_spark_ver}_${scala_ver}"
-    local iceberg_extra_classpath_dir="$ARTF_ROOT/iceberg-extra-classpath"
-    local iceberg_runtime_jar="${iceberg_extra_classpath_dir}/${iceberg_runtime_artifact}-${iceberg_version}.jar"
-
-    mkdir -p "$iceberg_extra_classpath_dir"
-    wget -q -O "$iceberg_runtime_jar" \
-        "$SPARK_REPO/org/apache/iceberg/${iceberg_runtime_artifact}/${iceberg_version}/${iceberg_runtime_artifact}-${iceberg_version}.jar"
+    local iceberg_runtime_jar=${4:-}
+    if [[ -z "$iceberg_runtime_jar" ]]; then
+        local iceberg_extra_classpath_dir="$ARTF_ROOT/iceberg-extra-classpath"
+        iceberg_runtime_jar="${iceberg_extra_classpath_dir}/${iceberg_runtime_artifact}-${iceberg_version}.jar"
+        mkdir -p "$iceberg_extra_classpath_dir"
+        wget -q -O "$iceberg_runtime_jar" \
+            "$SPARK_REPO/org/apache/iceberg/${iceberg_runtime_artifact}/${iceberg_version}/${iceberg_runtime_artifact}-${iceberg_version}.jar"
+    elif [[ ! -f "$iceberg_runtime_jar" || ! -s "$iceberg_runtime_jar" ]]; then
+        echo "ERROR: missing or empty Iceberg runtime JAR: $iceberg_runtime_jar" >&2
+        return 1
+    fi
 
     # Loading Iceberg from extraClassPath creates the app/shim classloader split.
     echo "!!! Running targeted Iceberg extraClassPath tests for Iceberg $iceberg_version"
@@ -257,8 +258,7 @@ ci_2() {
     echo "Run mvn package..."
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_UT_2[@]}"
     do
-        env -u SPARK_HOME $MVN -U -B $MVN_URM_MIRROR -Dbuildver=$version clean package $MVN_BUILD_ARGS \
-          -Dpytest.TEST_TAGS=''
+        run_unit_shim package "$version"
     done
 }
 
@@ -272,12 +272,7 @@ ci_scala213() {
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_SCALA213[@]}"
     do
         echo "Spark version (Scala 2.13): $version"
-        env -u SPARK_HOME \
-            $MVN -f scala2.13/ -U -B $MVN_URM_MIRROR -Dbuildver=$version clean install $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
-        # Run filecache tests
-        env -u SPARK_HOME SPARK_CONF=spark.rapids.filecache.enabled=true \
-            $MVN -f scala2.13/ -B $MVN_URM_MIRROR -Dbuildver=$version test -rf tests $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
-            -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
+        run_unit_shim filecache "$version" scala2.13
     done
 
     # Download a Scala 2.13 version of Spark (use Spark 4.0.1 for Spark 4 shuffle testing)
@@ -301,6 +296,22 @@ ci_scala213() {
     SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
         LC_ALL="en_US.UTF-8" TEST="regexp_test.py" ./integration_tests/run_pyspark_from_build.sh
 
+    run_premerge_unity_catalog_tests "$SPARK_VER"
+
+    # Trigger the RapidsShuffleManager tests for scala 2.13
+    rapids_shuffle_smoke_test $SPARK_VER
+
+    # Iceberg version detection (requires JDK 17, available in this stage).
+    # Moved out of spark-tests.sh DEFAULT mode where JDK 8 causes
+    # UnsupportedClassVersionError for Iceberg 1.9+ runtime JARs.
+    run_iceberg_version_detect_tests $SPARK_VER 2.13
+    if [[ "$SPARK_VER" == 4.0.* ]]; then
+        run_iceberg_extra_classpath_tests $SPARK_VER 2.13 1.10.1
+    fi
+}
+
+run_premerge_unity_catalog_tests() {
+    local SPARK_VER=${1:?'spark_ver is required'}
     # Exercise one catalog-managed Delta 4.2 operation in the actual Blossom premerge entrypoint.
     # TEST_MODE=DELTA_LAKE_UC_ONLY exposes the full operation/failure matrix for external jobs
     # that must be scheduled separately for Spark 4.0.1, 4.0.5, 4.1.1, and 4.1.4.
@@ -325,17 +336,6 @@ ci_scala213() {
           ./integration_tests/run_pyspark_from_build.sh \
             -m unity_catalog --delta_lake --unity_catalog
 
-    # Trigger the RapidsShuffleManager tests for scala 2.13
-    rapids_shuffle_smoke_test $SPARK_VER
-
-    # Iceberg version detection (requires JDK 17, available in this stage).
-    # Moved out of spark-tests.sh DEFAULT mode where JDK 8 causes
-    # UnsupportedClassVersionError for Iceberg 1.9+ runtime JARs.
-    run_iceberg_version_detect_tests $SPARK_VER 2.13
-    if [[ "$SPARK_VER" == 4.0.* ]]; then
-        run_iceberg_extra_classpath_tests $SPARK_VER 2.13 1.10.1
-    fi
-
 }
 
 prepare_spark() {
@@ -357,7 +357,64 @@ prepare_spark() {
     export PYTHONPATH=$TMP_PYTHON/python:$TMP_PYTHON/python/pyspark/:$(echo -n $TMP_PYTHON/python/lib/py4j-*-src.zip)
 }
 
+# The GHA integration worker sources the test functions with its own image and dependencies.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+    return 0
+fi
+
+set -ex
+
+BUILD_TYPE=all
+
+if [[ $# -eq 1 ]]; then
+    BUILD_TYPE=$1
+
+elif [[ $# -gt 1 ]]; then
+    >&2 echo "ERROR: too many parameters are provided"
+    exit 1
+fi
+
+CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
+CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
+MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
+MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
+if [[ -z "${PARALLEL_UT:-}" ]]; then
+    echo "NOTE: premerge CI runs unit tests in parallel; this run is serial. Set PARALLEL_UT=true to match CI."
+fi
+PARALLEL_UT=${PARALLEL_UT:-false}
+PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
+
+if [[ "$PARALLEL_UT" != "true" && "$PARALLEL_UT" != "false" ]]; then
+    >&2 echo "ERROR: PARALLEL_UT must be true or false"
+    exit 1
+fi
+
+if [[ -n "$PARALLEL_UT_FORK_COUNT" &&
+      ! "$PARALLEL_UT_FORK_COUNT" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
+    >&2 echo "ERROR: PARALLEL_UT_FORK_COUNT must be an integer greater than 1"
+    exit 1
+fi
+
+MVN_PARALLEL_UT_ARGS=""
+if [[ "$PARALLEL_UT" == "true" ]]; then
+    MVN_PARALLEL_UT_ARGS="-Drapids.parallelUnitTests=true"
+    if [[ -n "$PARALLEL_UT_FORK_COUNT" ]]; then
+        MVN_PARALLEL_UT_ARGS+=" -DparallelForkCount=$PARALLEL_UT_FORK_COUNT"
+    fi
+fi
+
+MVN_BUILD_ARGS="-Drat.skip=true -Dmaven.scaladoc.skip -Dmaven.scalastyle.skip=true \
+  -Dcuda.version=$CLASSIFIER $MVN_PARALLEL_UT_ARGS"
+
+echo "Parallel unit tests: enabled=$PARALLEL_UT, \
+forks=${PARALLEL_UT_FORK_COUNT:-Maven default}"
+
 nvidia-smi
+
+if [[ "$BUILD_TYPE" == ci_unit ]]; then
+    ci_unit
+    exit
+fi
 
 . jenkins/version-def.sh
 . jenkins/shuffle-common.sh

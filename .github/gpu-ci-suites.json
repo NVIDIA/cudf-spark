@@ -1,0 +1,28 @@
+{
+  "suites": {
+    "unit": {
+      "enabled": true,
+      "paths": ["**"],
+      "exclude_paths": ["skills/", "**/*.md", "**/*.rst", "**/*.adoc", "docs/img/"],
+      "jobs": ["gpu-test"],
+      "groups": [
+        {"group": "unit-212-1", "scala": "2.12", "shims": [{"shim": "340", "unit-group": "ut1"}]},
+        {"group": "unit-212-2", "scala": "2.12", "shims": [{"shim": "356", "unit-group": "ut2"}]},
+        {"group": "unit-213-1", "scala": "2.13", "shims": [{"shim": "401", "unit-group": "scala213"}]},
+        {"group": "unit-213-2", "scala": "2.13", "shims": [{"shim": "350", "unit-group": "scala213"}, {"shim": "420", "unit-group": "scala213"}]}
+      ]
+    },
+    "integration": {
+      "enabled": true,
+      "paths": ["**"],
+      "exclude_paths": ["skills/", "**/*.md", "**/*.rst", "**/*.adoc", "docs/img/"],
+      "jobs": ["gpu-test"],
+      "groups": [
+        {"group": "it-212-1", "scala": "2.12", "shim": "330", "shard": 1},
+        {"group": "it-212-2", "scala": "2.12", "shim": "330", "shard": 2},
+        {"group": "it-213-1", "scala": "2.13", "shim": "401", "shard": 1},
+        {"group": "it-213-2", "scala": "2.13", "shim": "401", "shard": 2}
+      ]
+    }
+  }
+}
