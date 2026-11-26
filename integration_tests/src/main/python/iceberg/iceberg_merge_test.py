@@ -336,6 +336,7 @@ def test_iceberg_merge_write_defaults(
 
 @iceberg
 @ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Remote catalogs can fail on fixed defaults (#17078)")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("merge_mode,fallback_exec", [
     pytest.param("copy-on-write", "ReplaceDataExec", id="cow"),

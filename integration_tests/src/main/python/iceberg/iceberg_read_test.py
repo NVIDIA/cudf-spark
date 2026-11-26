@@ -625,6 +625,7 @@ def test_iceberg_v3_unsupported_initial_defaults_fallback(
               "spark.rapids.sql.format.parquet.reader.type": reader_type})
 
 
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Remote catalogs can fail on fixed defaults (#17078)")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("initial_only", [
     pytest.param(True, marks=allow_non_gpu("BatchScanExec", "ColumnarToRowExec"), id="initial-only"),

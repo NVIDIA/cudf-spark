@@ -51,6 +51,7 @@ DELETE_TEST_SEED_OVERRIDE_REASON = "Ensure reproducible test data for DELETE ope
 
 
 @iceberg
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Remote catalogs can fail on fixed defaults (#17078)")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 def test_iceberg_v3_write_only_default_position_delete(spark_tmp_table_factory):
     base = get_full_table_name(spark_tmp_table_factory)

@@ -342,6 +342,7 @@ def test_iceberg_append_initial_only_default(spark_tmp_table_factory):
 
 @iceberg
 @ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Remote catalogs can fail on fixed defaults (#17078)")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @allow_non_gpu("AppendDataExec")
 def test_iceberg_append_write_only_default_fallback(spark_tmp_table_factory):
