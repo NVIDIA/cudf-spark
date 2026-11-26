@@ -184,7 +184,8 @@
 359	src/main/scala/com/nvidia/spark/rapids/shims/RaiseErrorShim.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/RaiseErrorShim.scala
 413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/RaiseErrorShim.scala	sql-plugin/src/main/spark350db143/scala/com/nvidia/spark/rapids/shims/RaiseErrorShim.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala
-413,500	src/main/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala	sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala
+413	src/main/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala	sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala	sql-plugin/src/main/spark420/scala/com/nvidia/spark/rapids/shims/ReplaceDataExecShim.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/RoundShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/RoundShims.scala
 359,413,350db143,400db173	src/main/scala/com/nvidia/spark/rapids/shims/SampleExecShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/SampleExecShims.scala
 410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/SampleExecShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/SampleExecShims.scala
@@ -255,6 +256,8 @@
 350db143	src/main/scala/com/nvidia/spark/rapids/shims/WindowInPandasShims.scala	sql-plugin/src/main/spark350db143/scala/com/nvidia/spark/rapids/shims/WindowInPandasShims.scala
 400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/WindowInPandasShims.scala	sql-plugin/src/main/spark400db173/scala/com/nvidia/spark/rapids/shims/WindowInPandasShims.scala
 413,500	src/main/scala/com/nvidia/spark/rapids/shims/WindowInPandasShims.scala	sql-plugin/src/main/spark411/scala/com/nvidia/spark/rapids/shims/WindowInPandasShims.scala
+359,413	src/main/scala/com/nvidia/spark/rapids/shims/WriteDeltaExecShim.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/WriteDeltaExecShim.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/WriteDeltaExecShim.scala	sql-plugin/src/main/spark420/scala/com/nvidia/spark/rapids/shims/WriteDeltaExecShim.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/YearMonthIntervalShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/YearMonthIntervalShims.scala
 359,413,500	src/main/scala/com/nvidia/spark/rapids/shims/extractValueShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/extractValueShims.scala
 359,413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala	sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala
@@ -303,9 +306,11 @@
 359,413,350db143,400db173,410db183,500	src/main/scala/org/apache/spark/sql/execution/datasources/rapids/DataSourceStrategyUtils.scala	sql-plugin/src/main/spark340/scala/org/apache/spark/sql/execution/datasources/rapids/DataSourceStrategyUtils.scala
 359,413,410db183,500	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuMergeRowsExec.scala	sql-plugin/src/main/spark350/scala/org/apache/spark/sql/execution/datasources/v2/GpuMergeRowsExec.scala
 359	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala	sql-plugin/src/main/spark350/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala
-413,500	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala
+413	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala
+500	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala	sql-plugin/src/main/spark420/scala/org/apache/spark/sql/execution/datasources/v2/GpuReplaceDataExec.scala
 359	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala	sql-plugin/src/main/spark350/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala
-413,410db183,500	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala	sql-plugin/src/main/spark410db183/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala
+413,410db183	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala	sql-plugin/src/main/spark410db183/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala
+500	src/main/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala	sql-plugin/src/main/spark420/scala/org/apache/spark/sql/execution/datasources/v2/GpuV2WriteCommitShims.scala
 359,413,410db183,500	src/main/scala/org/apache/spark/sql/execution/datasources/v2/WriteToDataSourceV2Exec.scala	sql-plugin/src/main/spark350/scala/org/apache/spark/sql/execution/datasources/v2/WriteToDataSourceV2Exec.scala
 350db143	src/main/scala/org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec.scala	sql-plugin/src/main/spark350db143/scala/org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec.scala
 359	src/main/scala/org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec.scala	sql-plugin/src/main/spark356/scala/org/apache/spark/sql/execution/datasources/v2/rapids/GpuAtomicCreateTableAsSelectExec.scala

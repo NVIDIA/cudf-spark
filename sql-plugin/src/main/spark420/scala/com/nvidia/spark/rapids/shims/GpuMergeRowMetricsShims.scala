@@ -24,6 +24,7 @@ import org.apache.spark.sql.execution.metric.{SQLLastAttemptMetric, SQLLastAttem
 
 object GpuMergeRowMetricsShims {
   val writeSummaryEnabled: Boolean = true
+  val rowLevelMetricsEnabled: Boolean = true
 
   def createMetric(sc: SparkContext, name: String): SQLMetric =
     SQLLastAttemptMetrics.createMetric(sc, name)

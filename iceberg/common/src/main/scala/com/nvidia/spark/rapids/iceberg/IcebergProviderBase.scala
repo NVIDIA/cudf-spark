@@ -21,7 +21,7 @@ import scala.util.Try
 
 import com.nvidia.spark.rapids.{AppendDataExecMeta, AtomicCreateTableAsSelectExecMeta, AtomicReplaceTableAsSelectExecMeta, FileFormatChecks, GpuExec, GpuExpression, GpuRowToColumnarExec, GpuScan, IcebergFormatType, OverwriteByExpressionExecMeta, OverwritePartitionsDynamicExecMeta, RapidsConf, ScanMeta, ScanRule, ShimReflectionUtils, SparkPlanMeta, StaticInvokeMeta, TargetSize, WriteFileOp}
 import com.nvidia.spark.rapids.iceberg.IcebergProviderBase.{checkChildPlan, columnarChildOf}
-import com.nvidia.spark.rapids.shims.{ReplaceDataExecMeta, ReplaceDataExecShim, WriteDeltaExecMeta}
+import com.nvidia.spark.rapids.shims.{ReplaceDataExecMeta, ReplaceDataExecShim, WriteDeltaExecMeta, WriteDeltaExecShim}
 import org.apache.iceberg.spark.GpuTypeToSparkType.toSparkType
 import org.apache.iceberg.spark.functions.{BucketFunction, DaysFunction, GpuBucketExpression, GpuDaysExpression, GpuHoursExpression, GpuMonthsExpression, GpuTruncateExpression, GpuYearsExpression, HoursFunction, MonthsFunction, TruncateFunction, YearsFunction}
 import org.apache.iceberg.spark.source.{GpuSparkPositionDeltaWrite, GpuSparkScan, GpuSparkWrite}
@@ -33,7 +33,7 @@ import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.connector.write.Write
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
-import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, GpuAppendDataExec, GpuOverwriteByExpressionExec, GpuOverwritePartitionsDynamicExec, GpuWriteDeltaExec, OverwriteByExpressionExec, OverwritePartitionsDynamicExec, ReplaceDataExec, WriteDeltaExec}
+import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, GpuAppendDataExec, GpuOverwriteByExpressionExec, GpuOverwritePartitionsDynamicExec, OverwriteByExpressionExec, OverwritePartitionsDynamicExec, ReplaceDataExec, WriteDeltaExec}
 import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTableAsSelectExec, GpuAtomicReplaceTableAsSelectExec}
 import org.apache.spark.sql.types.{DateType, TimestampType}
 
@@ -388,10 +388,9 @@ abstract class IcebergProviderBase extends IcebergProvider {
   }
 
   private def convertToGpu(cpuExec: WriteDeltaExec, meta: WriteDeltaExecMeta): GpuExec = {
-    GpuWriteDeltaExec(
+    WriteDeltaExecShim.convertToGpu(
+      cpuExec,
       columnarChildOf(meta),
-      cpuExec.refreshCache,
-      cpuExec.projections,
       GpuSparkPositionDeltaWrite.convert(cpuExec.write))
   }
 }
