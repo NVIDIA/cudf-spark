@@ -92,7 +92,7 @@ public interface IcebergShimUtils {
     }
 
     /** Creates an accessor for defaults present in the data writer schema. */
-    default IcebergWriteDefaultAccessor newWriteDefaultAccessor() {
+    default IcebergDefaultAccessor newDefaultAccessor() {
         return (field, sparkField) -> sparkField;
     }
 

@@ -19,7 +19,7 @@ package org.apache.iceberg.spark
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.iceberg.IcebergWriteDefaultAccessor
+import com.nvidia.spark.rapids.iceberg.IcebergDefaultAccessor
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
@@ -47,8 +47,8 @@ object GpuTypeToSparkType {
 
   def toSparkType(
       schema: Schema,
-      writeDefaultAccessor: IcebergWriteDefaultAccessor): StructType = {
-    TypeUtil.visit(schema, new GpuTypeToSparkType(Some(writeDefaultAccessor)))
+      defaultAccessor: IcebergDefaultAccessor): StructType = {
+    TypeUtil.visit(schema, new GpuTypeToSparkType(Some(defaultAccessor)))
       .asInstanceOf[StructType]
   }
 
@@ -90,7 +90,7 @@ object GpuTypeToSparkType {
  * special-case recursion through `Types.StructType`.
  */
 class GpuTypeToSparkType(
-    writeDefaultAccessor: Option[IcebergWriteDefaultAccessor]) extends TypeToSparkType {
+    defaultAccessor: Option[IcebergDefaultAccessor]) extends TypeToSparkType {
   def this() = this(None)
 
   private val nestedIdsStack = mutable.ArrayBuffer.empty[Option[String]]
@@ -162,8 +162,8 @@ class GpuTypeToSparkType(
           if (field.doc() != null) {
             sparkField = sparkField.withComment(field.doc())
           }
-          writeDefaultAccessor match {
-            case Some(accessor) => accessor.withWriteDefault(field, sparkField)
+          defaultAccessor match {
+            case Some(accessor) => accessor.withDefaults(field, sparkField)
             case None => sparkField
           }
       }

@@ -118,8 +118,8 @@ public class ShimUtils {
         return IMPL.hasWriteDefault(field);
     }
 
-    public static IcebergWriteDefaultAccessor newWriteDefaultAccessor() {
-        return IMPL.newWriteDefaultAccessor();
+    public static IcebergDefaultAccessor newDefaultAccessor() {
+        return IMPL.newDefaultAccessor();
     }
 
     public static int rowIdFieldId() {

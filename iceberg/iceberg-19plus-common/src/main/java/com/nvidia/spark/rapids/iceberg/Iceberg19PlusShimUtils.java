@@ -61,13 +61,13 @@ public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
     }
 
     @Override
-    public IcebergWriteDefaultAccessor newWriteDefaultAccessor() {
-        return new WriteDefaultAccessor();
+    public IcebergDefaultAccessor newDefaultAccessor() {
+        return new DefaultAccessor();
     }
 
-    private static final class WriteDefaultAccessor implements IcebergWriteDefaultAccessor {
+    private static final class DefaultAccessor implements IcebergDefaultAccessor {
         @Override
-        public StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
+        public StructField withDefaults(Types.NestedField field, StructField sparkField) {
             // CPU Parquet footers describe the write schema Spark supplied to Iceberg.
             if (field.initialDefaultLiteral() != null) {
                 sparkField = sparkField.withExistenceDefaultValue(

@@ -170,7 +170,7 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
 object GpuSparkWrite {
   /** Build the Spark schema embedded in GPU Parquet footers after Spark has resolved the input. */
   private[source] def dataWriterSparkTypeFor(writeSchema: Schema): StructType = {
-    GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.newWriteDefaultAccessor())
+    GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.newDefaultAccessor())
   }
 
   def supports(cpuClass: Class[_ <: Write]): Boolean = {

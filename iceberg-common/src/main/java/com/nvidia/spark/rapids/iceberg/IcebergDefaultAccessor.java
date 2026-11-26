@@ -20,13 +20,18 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.types.StructField;
 
 /**
- * Root-safe bridge for accessing Iceberg write defaults.
+ * Root-safe bridge for accessing Iceberg field defaults.
  *
  * <p>The default APIs differ across Iceberg versions, so implementations live in the
  * version-specific Iceberg shim modules. Keeping this interface at the JAR root lets shared
  * schema-conversion code use the selected implementation without reflective API access.
  */
 @FunctionalInterface
-public interface IcebergWriteDefaultAccessor {
-  StructField withWriteDefault(Types.NestedField field, StructField sparkField);
+public interface IcebergDefaultAccessor {
+  /**
+   * Returns the Spark field with metadata for each default present on the Iceberg field.
+   * The {@code initial-default} supplies the value when reading a file written before the field
+   * was added. The {@code write-default} supplies the value when a new write omits the field.
+   */
+  StructField withDefaults(Types.NestedField field, StructField sparkField);
 }
