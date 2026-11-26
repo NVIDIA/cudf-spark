@@ -16,13 +16,17 @@
 package org.apache.spark.sql.rapids
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, IOException, OutputStream}
+import java.nio.ByteBuffer
+import java.nio.channels.GatheringByteChannel
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
 import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryAllocator, HostMemoryBuffer}
 import com.nvidia.spark.rapids.{RapidsConf, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.output.CloseShieldOutputStream
 import org.scalatest.funsuite.AnyFunSuite
@@ -75,6 +79,48 @@ class SegmentedHostOutputStreamSuite extends AnyFunSuite {
     for (size <- Seq(0, -1, Int.MaxValue)) {
       intercept[IllegalArgumentException](new SegmentedHostOutputStream(size))
     }
+  }
+
+  test("gathering writes preserve record tails across short writes and batch boundaries") {
+    val bytes = Array.tabulate[Byte](11)(_.toByte)
+    val tail = Array[Byte](42)
+    val result = new ByteArrayOutputStream()
+    var largestVector = 0
+    val channel = new GatheringByteChannel {
+      override def write(srcs: Array[ByteBuffer], offset: Int, length: Int): Long = {
+        largestVector = math.max(largestVector, length)
+        var written = 0
+        var index = offset
+        while (index < offset + length && written < 5) {
+          val buf = srcs(index)
+          while (buf.hasRemaining && written < 5) {
+            result.write(buf.get())
+            written += 1
+          }
+          index += 1
+        }
+        written.toLong
+      }
+      override def write(srcs: Array[ByteBuffer]): Long = write(srcs, 0, srcs.length)
+      override def write(src: ByteBuffer): Int = fail("Expected a gathering write")
+      override def isOpen: Boolean = true
+      override def close(): Unit = ()
+    }
+    def record(data: Array[Byte]): OwnedBuffer = {
+      withResource(new SegmentedHostOutputStream(7)) { stream =>
+        stream.write(data)
+        stream.takeBuffer()
+      }
+    }
+    withResource(record(bytes)) { first =>
+      withResource(record(tail)) { second =>
+        val records = Iterator.fill(37)(Iterator(first, second)).flatten
+        OwnedBuffer.writeTo(channel, records.asJava)
+      }
+    }
+    val expected = Array.fill(37)(bytes ++ tail).flatten
+    assert(result.toByteArray.sameElements(expected))
+    assert(largestVector > 2) // A vector spans more than the two segments in the first record.
   }
 
   // Exercise each codec's framing/close behavior, plus Spark's shared encryption wrapper.

@@ -20,8 +20,10 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
+import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 
@@ -130,6 +132,7 @@ public final class SegmentedHostOutputStream extends OutputStream {
 
   /** Immutable record payload. Moving or closing one owner invalidates only that owner. */
   public static final class OwnedBuffer implements AutoCloseable {
+    private static final int MAX_GATHER_BUFFERS = 64;
     private List<HostMemoryBuffer> segments;
     private final int segmentSize;
     private final long count;
@@ -183,14 +186,50 @@ public final class SegmentedHostOutputStream extends OutputStream {
       requireOpen();
       WritableByteChannel channel = out instanceof FileOutputStream
           ? ((FileOutputStream) out).getChannel() : Channels.newChannel(out);
-      long remaining = count;
-      for (HostMemoryBuffer segment : segments) {
-        int length = (int) Math.min(remaining, segmentSize);
-        ByteBuffer data = segment.asByteBuffer(0, length);
+      for (int i = 0; i < segments.size(); i++) {
+        ByteBuffer data = segmentView(i);
         while (data.hasRemaining()) {
           channel.write(data);
         }
-        remaining -= length;
+      }
+    }
+
+    private ByteBuffer segmentView(int index) {
+      long offset = (long) index * segmentSize;
+      int length = (int) Math.min(count - offset, segmentSize);
+      return segments.get(index).asByteBuffer(0, length);
+    }
+
+    /**
+     * Write to a blocking channel across record boundaries without copying the payload.
+     * The caller must own the records and keep them open until this method returns.
+     */
+    public static void writeTo(GatheringByteChannel channel, Iterator<OwnedBuffer> records)
+        throws IOException {
+      ByteBuffer[] batch = new ByteBuffer[MAX_GATHER_BUFFERS];
+      int used = 0;
+      while (records.hasNext()) {
+        OwnedBuffer record = records.next();
+        record.requireOpen();
+        for (int i = 0; i < record.segments.size(); i++) {
+          batch[used++] = record.segmentView(i);
+          if (used == batch.length) {
+            writeBatch(channel, batch, used);
+            used = 0;
+          }
+        }
+      }
+      writeBatch(channel, batch, used);
+    }
+
+    private static void writeBatch(GatheringByteChannel channel, ByteBuffer[] batch, int used)
+        throws IOException {
+      int first = 0;
+      while (first < used) {
+        channel.write(batch, first, used - first);
+        while (first < used && !batch[first].hasRemaining()) {
+          batch[first++] = null;
+        }
       }
     }
 

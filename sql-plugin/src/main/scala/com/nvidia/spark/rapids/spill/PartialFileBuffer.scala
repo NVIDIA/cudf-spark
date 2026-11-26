@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids.spill
 import java.io.FileOutputStream
 import java.util.ArrayList
 
+import scala.collection.JavaConverters._
+
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 
@@ -99,7 +101,7 @@ private[spill] final class OwnedRecordBuffer extends PartialFileBuffer {
 
   override def writeTo(out: FileOutputStream, length: Long): Unit = {
     require(length == size)
-    records.forEach(_.data.writeTo(out))
+    OwnedBuffer.writeTo(out.getChannel, records.iterator().asScala.map(_.data).asJava)
   }
 
   override def close(): Unit = {
