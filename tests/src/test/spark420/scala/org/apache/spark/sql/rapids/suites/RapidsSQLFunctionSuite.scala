@@ -19,14 +19,15 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.DataFrameJoinSuite
-import org.apache.spark.sql.rapids.execution.GpuBroadcastHashJoinExec
+import com.nvidia.spark.rapids.GpuHashAggregateExec
+
+import org.apache.spark.sql.execution.SQLFunctionSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDataFrameJoinSuite
-  extends DataFrameJoinSuite with RapidsGpuPlanTest {
+class RapidsSQLFunctionSuite extends SQLFunctionSuite with RapidsGpuPlanTest {
   override protected def gpuTestNames: Set[String] = Set(
-    "SPARK-47810: replace equivalent expression to <=> in join condition")
-  override protected def gpuOperator: Class[GpuBroadcastHashJoinExec] =
-    classOf[GpuBroadcastHashJoinExec]
+    "SQL scalar function with subquery in the function body")
+  override protected def requireGpuForEveryAnswer: Boolean = true
+  override protected def gpuOperator: Class[GpuHashAggregateExec] =
+    classOf[GpuHashAggregateExec]
 }

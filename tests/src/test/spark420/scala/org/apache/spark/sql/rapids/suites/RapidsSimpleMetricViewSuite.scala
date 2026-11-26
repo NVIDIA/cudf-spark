@@ -21,13 +21,13 @@ package org.apache.spark.sql.rapids.suites
 
 import com.nvidia.spark.rapids.GpuHashAggregateExec
 
-import org.apache.spark.sql.PlanMergeSuite
+import org.apache.spark.sql.execution.SimpleMetricViewSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsPlanMergeSuite
-  extends PlanMergeSuite with RapidsGpuPlanTest {
+class RapidsSimpleMetricViewSuite extends SimpleMetricViewSuite with RapidsGpuPlanTest {
   override protected def gpuTestNames: Set[String] = Set(
-    "SPARK-56677: Merge scalar subqueries with filter propagation through Join")
+    "test multiple measures with different aggregations")
   override protected def requireGpuForEveryAnswer: Boolean = true
-  override protected def gpuOperator: Class[GpuHashAggregateExec] = classOf[GpuHashAggregateExec]
+  override protected def gpuOperator: Class[GpuHashAggregateExec] =
+    classOf[GpuHashAggregateExec]
 }

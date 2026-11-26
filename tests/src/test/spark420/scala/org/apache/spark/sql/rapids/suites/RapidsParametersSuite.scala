@@ -19,14 +19,15 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.DataFrameSelfJoinSuite
-import org.apache.spark.sql.rapids.execution.GpuBroadcastHashJoinExec
+import com.nvidia.spark.rapids.GpuHashAggregateExec
+
+import org.apache.spark.sql.ParametersSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDataFrameSelfJoinSuite
-  extends DataFrameSelfJoinSuite with RapidsGpuPlanTest {
+class RapidsParametersSuite extends ParametersSuite with RapidsGpuPlanTest {
   override protected def gpuTestNames: Set[String] = Set(
-    "SPARK-53143: self join edge-case when Join is not returned by the analyzer")
-  override protected def gpuOperator: Class[GpuBroadcastHashJoinExec] =
-    classOf[GpuBroadcastHashJoinExec]
+    "named parameters in subquery expression")
+  override protected def requireGpuForEveryAnswer: Boolean = true
+  override protected def gpuOperator: Class[GpuHashAggregateExec] =
+    classOf[GpuHashAggregateExec]
 }

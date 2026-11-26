@@ -23,15 +23,15 @@ import org.apache.spark.sql.rapids.suites._
 
 class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsConditionalExpressionSuite]
-  enableSuite[RapidsDataFrameComplexTypeSuite]
-  enableSuite[RapidsDataFrameSelfJoinSuite]
-  enableSuite[RapidsDataFrameJoinSuite]
   enableSuite[RapidsDataFrameTungstenSuite]
-  enableSuite[RapidsDataFrameWindowFramesSuite]
   enableSuite[RapidsDatasetUnpivotSuite]
   enableSuite[RapidsSubqueryHintPropagationSuite]
   enableSuite[RapidsOptimizeExpandQuerySuite]
-  enableSuite[RapidsPlanMergeSuite]
   enableSuite[RapidsPushDownJoinThroughUnionSuite]
-  enableSuite[RapidsUnwrapCastInComparisonEndToEndSuite]
+  enableSuite[RapidsInlineTableParsingImprovementsSuite]
+  enableSuite[RapidsLateralColumnAliasSuite]
+  enableSuite[RapidsParametersSuite]
+  enableSuite[RapidsSQLFunctionSuite]
+  enableSuite[RapidsSimpleMetricViewSuite]
+  enableSuite[RapidsStringLiteralCoalescingSuite]
 }

@@ -19,14 +19,15 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.GpuFilterExec
+import com.nvidia.spark.rapids.GpuHashAggregateExec
 
-import org.apache.spark.sql.UnwrapCastInComparisonEndToEndSuite
+import org.apache.spark.sql.InlineTableParsingImprovementsSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsUnwrapCastInComparisonEndToEndSuite
-  extends UnwrapCastInComparisonEndToEndSuite with RapidsGpuPlanTest {
+class RapidsInlineTableParsingImprovementsSuite
+  extends InlineTableParsingImprovementsSuite with RapidsGpuPlanTest {
   override protected def gpuTestNames: Set[String] = Set(
-    "SPARK-46069: Support unwrap timestamp type to date type")
-  override protected def gpuOperator: Class[GpuFilterExec] = classOf[GpuFilterExec]
+    "SPARK-49269: Value list in projection list subquery")
+  override protected def gpuOperator: Class[GpuHashAggregateExec] =
+    classOf[GpuHashAggregateExec]
 }

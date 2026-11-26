@@ -19,15 +19,16 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import com.nvidia.spark.rapids.window.{GpuLag, GpuLead, GpuWindowBaseExec}
+import com.nvidia.spark.rapids.GpuFilterExec
 
-import org.apache.spark.sql.DataFrameWindowFramesSuite
+import org.apache.spark.sql.StringLiteralCoalescingSuite
 import org.apache.spark.sql.rapids.utils.RapidsGpuPlanTest
 
-class RapidsDataFrameWindowFramesSuite
-  extends DataFrameWindowFramesSuite with RapidsGpuPlanTest {
+class RapidsStringLiteralCoalescingSuite
+  extends StringLiteralCoalescingSuite with RapidsGpuPlanTest {
   override protected def gpuTestNames: Set[String] = Set(
-    "lead/lag with positive offset that greater than window group size")
-  override protected def gpuOperator: Class[GpuWindowBaseExec] = classOf[GpuWindowBaseExec]
-  override protected def gpuExpressions = Seq(classOf[GpuLead], classOf[GpuLag])
+    "string coalescing in WHERE clause")
+  override protected def requireGpuForEveryAnswer: Boolean = true
+  override protected def gpuOperator: Class[GpuFilterExec] =
+    classOf[GpuFilterExec]
 }
