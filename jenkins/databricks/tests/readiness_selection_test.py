@@ -30,9 +30,9 @@ class ReadinessSelectionTest(unittest.TestCase):
         spark = root / "spark"
         (spark / "bin").mkdir(parents=True)
         (spark / "python").mkdir()
-        (spark / "python/pyspark.py").write_text('__version__ = "3.5.0"\n')
+        (spark / "python/pyspark.py").write_text('__version__ = "4.0.0"\n')
         pyspark = spark / "bin/pyspark"
-        pyspark.write_text('#!/bin/bash\necho "Using Scala version 2.12.18"\n')
+        pyspark.write_text('#!/bin/bash\necho "Using Scala version 2.13.16"\n')
         pyspark.chmod(0o755)
         submit = spark / "bin/spark-submit"
         # Simulate pytest writing its relative --junitxml argument from the launcher's cwd.
@@ -50,10 +50,10 @@ class ReadinessSelectionTest(unittest.TestCase):
         (spark / "bin/python").symlink_to(sys.executable)
         # The launcher checks for zip even though this fixture has no archives to edit.
         (spark / "bin/zip").symlink_to("/bin/false")
-        (jar_dir / "rapids-4-spark_2.12-test.jar").touch()
-        (jar_dir / "rapids-4-spark-integration-tests_2.12-test-spark350db143.jar").touch()
-        env.update(SPARK_HOME=str(spark), SPARK_SHIM_VER="spark350db143", TEST_PARALLEL="1",
-                   PYSP_TEST_spark_master="local[2]",
+        (jar_dir / "rapids-4-spark_2.13-test.jar").touch()
+        (jar_dir / "rapids-4-spark-integration-tests_2.13-test-spark400db173.jar").touch()
+        env.update(SPARK_HOME=str(spark), SPARK_SHIM_VER="spark400db173", TEST_PARALLEL="1",
+                   BASE_SPARK_VERSION="4.0.0", PYSP_TEST_spark_master="local[2]",
                    PATH=str(spark / "bin") + os.pathsep + env["PATH"])
 
     def run_script(self, version="18.3.", mode="CI_PART1", hook=True,
@@ -200,7 +200,7 @@ class ReadinessSelectionTest(unittest.TestCase):
                                       "sort_test.py", "window_function_test.py"})
 
     def test_other_runtimes_and_manual_runs_keep_delta_lake(self):
-        for version, hook in (("14.3.", True), ("17.3.", True), ("18.3.", False)):
+        for version, hook in (("17.3.", True), ("18.3.", False)):
             with self.subTest(version=version, hook=hook):
                 result = self.run_script(version=version, hook=hook, mode="CI_PART2")
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -285,7 +285,8 @@ class ReadinessSelectionTest(unittest.TestCase):
         for skipped, outcome in ((False, ""), (True, "<skipped/>")):
             with self.subTest(skipped=skipped):
                 result = self.run_script(
-                    mode="DELTA_LAKE_ONLY", jar_path="./jars", integration_runner=runner,
+                    version="17.3.", mode="DELTA_LAKE_ONLY", jar_path="./jars",
+                    integration_runner=runner,
                     delta_report=f"<testcase name='test_delta_scan_read'>{outcome}</testcase>")
                 self.assertEqual(result.returncode, int(skipped), result.stderr)
                 if skipped:

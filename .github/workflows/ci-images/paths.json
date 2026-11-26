@@ -1,0 +1,27 @@
+{
+  "shared": [
+    ".github/workflows/ci-images/paths.json",
+    ".github/workflows/ci-images/select.py",
+    ".github/workflows/build-docker-image.yml"
+  ],
+  "validation": [
+    ".github/workflows/cpu-ci.yml"
+  ],
+  "publication": [
+    ".github/workflows/docker-images.yml",
+    ".github/workflows/ci-images/publish-tag.sh"
+  ],
+  "multi-platform-publication": [
+    ".github/workflows/ci-images/promote-platforms.sh",
+    ".github/workflows/ci-images/tag-baseline.py"
+  ],
+  "release-version-file": "pom.xml",
+  "unit-tests": {
+    "include": [
+      ".github/workflows/ci-images/",
+      ".github/workflows/docker-images.yml",
+      ".github/workflows/ci-image-cleanup.yml"
+    ],
+    "exclude": ["*.md"]
+  }
+}

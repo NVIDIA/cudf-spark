@@ -23,6 +23,7 @@ package org.apache.spark.sql.delta.rapids.delta43x
 
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.delta.GpuStatisticsCollection
+import com.nvidia.spark.rapids.delta.delta43x.Delta43xConfigChecker
 
 import org.apache.spark.sql.Column
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
@@ -85,9 +86,19 @@ class GpuOptimisticTransaction43x(
         }.toMap
     }
 
-    filteredOptions ++ TableParquetVersionOption.getWriterOptions(
+    val writerOptions = filteredOptions ++ TableParquetVersionOption.getWriterOptions(
       spark = getActiveSparkSession,
       writerOptions = filteredOptions,
       tableProperties = metadata.configuration)
+    // Planning tagged this write for the GPU from the table's metadata at that time. This
+    // transaction may have refreshed to newer metadata that asks for DataPageV2, which the GPU
+    // writer cannot produce, and it is too late to fall back. Fail instead of silently
+    // committing DataPageV1 files to a table that asks for DataPageV2.
+    Delta43xConfigChecker.unsupportedWriterVersion(writerOptions).foreach { version =>
+      throw new IllegalStateException(
+        s"The table's Parquet writer version '$version' (DataPageV2) changed after this write " +
+          "was planned on the GPU, which only writes DataPageV1. Retry the write.")
+    }
+    writerOptions
   }
 }

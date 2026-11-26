@@ -17,7 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
@@ -42,8 +42,8 @@ import org.apache.spark.sql.types._
  * supported.
  *
  * The schema uses the JNI flattened representation: nested message fields follow their parent
- * entry and point to it through parentIndices. The planner decodes and returns every field, so
- * every entry has isOutput == true.
+ * entry and point to it through parentIndices. Fields with isOutput == false are not read by
+ * the query: the decoder still validates them but returns them as nulls.
  *
  * @param decodedSchema Spark output schema
  * @param schema Flattened JNI schema; callers must not mutate its arrays after construction.

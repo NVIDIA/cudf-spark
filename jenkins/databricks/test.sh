@@ -19,16 +19,16 @@
 # All the environments can be overwritten by shell variables:
 #   LOCAL_JAR_PATH: Directory containing the prebuilt RAPIDS jars and pytest bundle
 #   SPARK_CONF: Spark configuration parameters
-#   BASE_SPARK_VERSION: Spark version [3.2.1, 3.3.0]. Default is pulled from current instance.
+#   BASE_SPARK_VERSION: Spark version. Default is read from the current instance.
 #   SHUFFLE_SPARK_SHIM: Set the default value for the shuffle shim. For Databricks
-#                       versions, use the matching buildver, such as spark350db143
+#                       versions, use the matching buildver, such as spark400db173
 #   TEST_MODE: Can be one of the following (`DEFAULT` is the default value):
 #       - DEFAULT: all tests except cudf_udf tests
 #       - DELTA_LAKE_ONLY: delta_lake tests only
 #       - MULTITHREADED_SHUFFLE: shuffle tests only
 # Usage:
-# - Running tests on DB10.4/Spark 3.2.1:
-#       `BASE_SPARK_VERSION=3.2.1 ./jenkins/databricks/test.sh`
+# - Running tests on DBR 17.3/Spark 4.0.0:
+#       `BASE_SPARK_VERSION=4.0.0 ./jenkins/databricks/test.sh`
 # To add support of a new runtime:
 #   1. Check if any more dependencies need to be added to the apt/pip install commands.
 #   2. If you had to go beyond the above steps to support the new runtime, then update the

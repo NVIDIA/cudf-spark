@@ -19,9 +19,27 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import org.apache.spark.sql.catalyst.expressions.Expression
+import com.nvidia.spark.rapids.GpuEvalMode
+
+import org.apache.spark.sql.catalyst.expressions.{Add, BinaryArithmetic, Divide, Expression, Multiply, Remainder, Subtract}
 
 object TryModeShim {
+  def getEvalMode(expr: BinaryArithmetic): GpuEvalMode.Value = {
+    val failOnError = expr match {
+      case add: Add => add.failOnError
+      case sub: Subtract => sub.failOnError
+      case mul: Multiply => mul.failOnError
+      case div: Divide => div.failOnError
+      case mod: Remainder => mod.failOnError
+      case _ => throw new RuntimeException(s"Unsupported expression $expr for eval mode")
+    }
+    if (failOnError) {
+      GpuEvalMode.ANSI
+    } else {
+      GpuEvalMode.LEGACY
+    }
+  }
+
   /**
    * Expression is wrapped under TryEval during query planning which is not supported on GPU.
    * Example: for try_add(col1, col2) it would be <TryEval> tryeval((col1#0 + col2#1))

@@ -20,8 +20,8 @@ import org.apache.spark.sql.catalyst.expressions.{Add, And, ArrayAggregate, Asci
   AttributeReference, CaseWhen, Cast, CheckOverflow, Divide, EqualTo, Expression, GreaterThan,
   Greatest, If, LambdaFunction, Least, Literal, Multiply, NamedExpression, NamedLambdaVariable,
   Or, Subtract}
-import org.apache.spark.sql.types.{ArrayType, BooleanType, DataType, DecimalType, DoubleType,
-  IntegerType, LongType, StringType}
+import org.apache.spark.sql.types.{ArrayType, BooleanType, ByteType, DataType, DecimalType,
+  DoubleType, FloatType, IntegerType, LongType, StringType}
 
 // Extends GpuUnitTests so SQLConf.get is available for the default evalMode / failOnError
 // parameter on Add/Subtract/Multiply/Divide (the field name differs across Spark versions;
@@ -184,15 +184,95 @@ class ArrayAggregateDecomposerSuite extends GpuUnitTests {
     }
   }
 
-  test("Cast wrapping the acc side is unwrapped (single layer)") {
-    val acc = lv("acc", LongType); val x = lv("x", IntegerType)
+  test("Same-type cast around acc is unwrapped") {
+    val acc = lv("acc"); val x = lv("x")
     assertDecomposes(Add(Cast(acc, IntegerType), x), acc, x, SumOp)
   }
 
-  test("Cast wrapping the acc side is unwrapped (chained)") {
+  test("Widening acc to long and casting back to int preserves its value") {
     val acc = lv("acc"); val x = lv("x")
     val doubleCastAcc = Cast(Cast(acc, LongType), IntegerType)
     assertDecomposes(Add(doubleCastAcc, x), acc, x, SumOp)
+  }
+
+  test("Non-ANSI addition can narrow the accumulator before each element") {
+    withSQLConf("spark.sql.ansi.enabled" -> "false") {
+      val acc = lv("acc"); val x = lv("x")
+      val castAcc = Cast(Cast(acc, ByteType), IntegerType)
+      assertDecomposes(Add(castAcc, x), acc, x, NarrowingSumOp(ByteType), Some(x))
+      assertDecomposes(Add(x, castAcc), acc, x, NarrowingSumOp(ByteType), Some(x))
+      assertRejects(merge(Add(castAcc, Add(x, Literal(1))), acc, x), identityFinish(acc),
+        "the last addend must be the input element")
+      assertRejects(merge(Greatest(Seq(castAcc, x)), acc, x), identityFinish(acc),
+        "narrowing cast is only supported for non-ANSI integer addition")
+      assertRejects(merge(Add(x, Cast(Cast(acc, FloatType), IntegerType)), acc, x),
+        identityFinish(acc), "casting through float can round the accumulator")
+      val longAcc = lv("acc", LongType); val longX = lv("x", LongType)
+      assertRejects(
+        merge(Add(longX, Cast(Cast(longAcc, DoubleType), LongType)), longAcc, longX),
+        identityFinish(longAcc), "casting long through double can round the accumulator",
+        zeroType = LongType)
+    }
+  }
+
+  test("Checked cast and arithmetic cannot use wrapping reduction in a non-ANSI session") {
+    val acc = lv("acc"); val x = lv("x")
+    withSQLConf("spark.sql.ansi.enabled" -> "true") {
+      val checkedCast = Cast(acc, ByteType)
+      val checkedAdd = Add(acc, x)
+      val checkedMul = Multiply(acc, x)
+      withSQLConf("spark.sql.ansi.enabled" -> "false") {
+        val body = Add(Cast(checkedCast, IntegerType), x)
+        assertRejects(merge(body, acc, x), identityFinish(acc),
+          "cast must preserve overflow errors")
+        assertRejects(merge(checkedAdd, acc, x), identityFinish(acc),
+          "addition must preserve overflow errors")
+        assertRejects(merge(checkedMul, acc, x), identityFinish(acc),
+          "multiplication must preserve overflow errors")
+      }
+    }
+  }
+
+  test("Decimal precision-loss setting does not reject integral sum or product") {
+    val acc = lv("acc", LongType); val x = lv("x", LongType)
+    withSQLConf(
+      "spark.sql.ansi.enabled" -> "false",
+      "spark.sql.decimalOperations.allowPrecisionLoss" -> "false") {
+      val castAcc = Cast(Cast(acc, IntegerType), LongType)
+      val add = Add(acc, x)
+      val mul = Multiply(acc, x)
+      val narrowAdd = Add(castAcc, x)
+      withSQLConf("spark.sql.decimalOperations.allowPrecisionLoss" -> "true") {
+        assertDecomposes(add, acc, x, SumOp, zeroType = LongType)
+        assertDecomposes(mul, acc, x, ProductOp, zeroType = LongType)
+        assertDecomposes(narrowAdd, acc, x, NarrowingSumOp(IntegerType), Some(x),
+          zeroType = LongType)
+      }
+    }
+  }
+
+  test("TRY-mode cast and arithmetic in merge lambda are rejected") {
+    withCpuSparkSession { spark =>
+      withSQLConf("spark.sql.ansi.enabled" -> "false") {
+        val base = spark.sql("SELECT array(127, 1, 0) AS a").repartition(1)
+        Seq(
+          "aggregate(a, 0, (acc, x) -> try_cast(acc as tinyint) + x)",
+          "aggregate(a, 0, (acc, x) -> try_add(acc, x))",
+          "aggregate(a, 1, (acc, x) -> try_multiply(acc, x))"
+        ).foreach { exprSql =>
+          val plan = base.selectExpr(exprSql).queryExecution.optimizedPlan
+          val agg = plan.expressions.flatMap(_.collect { case a: ArrayAggregate => a }).head
+          assert(decompose(agg.merge, agg.finish, agg.argument.dataType, agg.zero.dataType,
+            agg.zero.nullable).isLeft, s"expected Left for $exprSql")
+        }
+      }
+    }
+  }
+
+  test("A narrowing cast in an If branch cannot be replaced with the identity") {
+    val acc = lv("acc"); val x = lv("x")
+    val body = If(EqualTo(x, Literal(0)), Cast(Cast(acc, ByteType), IntegerType), Add(acc, x))
+    assertRejects(merge(body, acc, x), identityFinish(acc), "branch can change the accumulator")
   }
 
   test("Subtract is not an associative op we recognize") {

@@ -26,7 +26,7 @@ from pyspark.sql.types import *
 import pyspark.sql.utils
 import pyspark.sql.functions as f
 from spark_session import with_cpu_session, with_gpu_session, \
-    is_databricks_version_or_later, is_before_spark_320, is_spark_400_or_later, \
+    is_databricks173_or_later, is_before_spark_320, is_spark_400_or_later, \
     is_before_spark_340, spark_version_tuple
 
 _regexp_conf = { 'spark.rapids.sql.regexp.enabled': 'true' }
@@ -396,9 +396,9 @@ def test_rtrim(data_gen):
                 'TRIM(TRAILING NULL FROM a)',
                 'TRIM(TRAILING "" FROM a)'))
 
-@pytest.mark.skipif(condition=is_spark_400_or_later() or is_databricks_version_or_later(14, 3),
+@pytest.mark.skipif(condition=is_spark_400_or_later() or is_databricks173_or_later(),
                     reason="startsWith(None)/endswith(None) seems to cause an NPE in Column.fn() on Apache Spark 4.0, "
-                           "and Databricks 14.3."
+                           "and supported Databricks runtimes."
                            "See https://issues.apache.org/jira/browse/SPARK-48995.")
 def test_startswith():
     gen = mk_str_gen('[Ab\ud720]{3}A.{0,3}Z[Ab\ud720]{3}')
@@ -424,9 +424,9 @@ def test_unsupported_fallback_startswith():
     assert_gpu_did_fallback(f.col("a").startswith(f.col("a")))
 
 
-@pytest.mark.skipif(condition=is_spark_400_or_later() or is_databricks_version_or_later(14, 3),
+@pytest.mark.skipif(condition=is_spark_400_or_later() or is_databricks173_or_later(),
                     reason="startsWith(None)/endswith(None) seems to cause an NPE in Column.fn() on Apache Spark 4.0, "
-                           "and Databricks 14.3."
+                           "and supported Databricks runtimes."
                            "See https://issues.apache.org/jira/browse/SPARK-48995.")
 def test_endswith():
     gen = mk_str_gen('[Ab\ud720]{3}A.{0,3}Z[Ab\ud720]{3}')
