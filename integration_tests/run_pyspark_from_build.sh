@@ -801,12 +801,13 @@ else
         esac
 
         CONNECT_CLIENT_VENV="${RUN_DIR}/connect_client_venv"
-        python -m venv "$CONNECT_CLIENT_VENV"
-        "$CONNECT_CLIENT_VENV/bin/python" -m pip install --upgrade pip >/dev/null
-        "$CONNECT_CLIENT_VENV/bin/python" -m pip install --no-cache-dir "$CONNECT_PIP_PACKAGE==${VERSION_STRING}" > /dev/null
+        # The server's PYTHONPATH can shadow the venv's PySpark and gRPC during both install and import.
+        PYTHONPATH= python -m venv "$CONNECT_CLIENT_VENV"
+        PYTHONPATH= "$CONNECT_CLIENT_VENV/bin/python" -m pip install --upgrade pip >/dev/null
+        PYTHONPATH= "$CONNECT_CLIENT_VENV/bin/python" -m pip install --no-cache-dir "$CONNECT_PIP_PACKAGE==${VERSION_STRING}" > /dev/null
 
         # Run a simple query using the Connect client and assert expected result and GPU operator in the plan
-        output=$(CONNECT_URL="$CONNECT_SERVER_URL" \
+        output=$(PYTHONPATH= CONNECT_URL="$CONNECT_SERVER_URL" \
             timeout 120s "$CONNECT_CLIENT_VENV/bin/python" - <<'PY'
 import os
 from pyspark.sql import SparkSession
