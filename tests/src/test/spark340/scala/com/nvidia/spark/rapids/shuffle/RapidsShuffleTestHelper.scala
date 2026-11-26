@@ -17,7 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shuffle

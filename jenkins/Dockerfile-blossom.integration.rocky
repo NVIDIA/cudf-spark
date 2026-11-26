@@ -37,8 +37,8 @@ RUN yum update -y && \
         wget expect rsync zip unzip procps git
 
 # The plugin: net.alchim31.maven requires a higher mvn version.
-ENV MAVEN_HOME "/usr/local/apache-maven-3.8.1"
-RUN wget ${ART_URL}/org/apache/maven/apache-maven/3.8.1/apache-maven-3.8.1-bin.tar.gz -P /usr/local && \
+ENV MAVEN_HOME "/usr/local/apache-maven-3.8.2"
+RUN wget ${ART_URL}/org/apache/maven/apache-maven/3.8.2/apache-maven-3.8.2-bin.tar.gz -P /usr/local && \
     tar xzvf $MAVEN_HOME-bin.tar.gz -C /usr/local && \
     rm -f $MAVEN_HOME-bin.tar.gz
 

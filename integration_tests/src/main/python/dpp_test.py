@@ -20,7 +20,7 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gp
 from conftest import spark_tmp_table_factory
 from data_gen import *
 from marks import ignore_order, allow_non_gpu, datagen_overrides
-from spark_session import is_before_spark_320, with_cpu_session, is_before_spark_312, is_databricks_runtime, is_databricks113_or_later, is_databricks_version_or_later
+from spark_session import is_before_spark_320, with_cpu_session, is_before_spark_312, is_databricks_runtime, is_databricks113_or_later, is_databricks173_or_later
 
 # non-positive values here can produce a degenerative join, so here we ensure that most values are
 # positive to ensure the join will produce rows. See https://github.com/NVIDIA/spark-rapids/issues/10147
@@ -167,11 +167,11 @@ _statements = [
     '''
 ]
 
-# On some Databricks versions (>=14.3), some query plans include a `CollectLimitExec`,
+# On Databricks, some query plans include a `CollectLimitExec`,
 # when filtering partitions.  This exec falls back to CPU.  These tests allow for `CollectLimit` to
 # run on the CPU, if everything else in the plan execute as expected.
 # Further details are furnished at https://github.com/NVIDIA/spark-rapids/issues/11764.
-dpp_fallback_execs=["CollectLimitExec"] if is_databricks_version_or_later(14,3) else []
+dpp_fallback_execs=["CollectLimitExec"] if is_databricks173_or_later() else []
 
 # When BroadcastExchangeExec is available on filtering side, and it can be reused:
 # DynamicPruningExpression(InSubqueryExec(value, GpuSubqueryBroadcastExec)))
@@ -288,7 +288,7 @@ def test_dpp_skip(spark_tmp_table_factory, store_format, s_index, aqe_enabled):
         non_exist_classes='DynamicPruningExpression',
         conf=dict(_dpp_fallback_conf + [('spark.sql.adaptive.enabled', aqe_enabled)]))
 
-dpp_like_any_fallback_execs=['FilterExec', 'CollectLimitExec', 'LikeAny'] if is_databricks_version_or_later(14,3) else ['FilterExec', 'LikeAny']
+dpp_like_any_fallback_execs=['FilterExec', 'CollectLimitExec', 'LikeAny'] if is_databricks173_or_later() else ['FilterExec', 'LikeAny']
 
 # GPU verification on https://issues.apache.org/jira/browse/SPARK-34436
 @ignore_order

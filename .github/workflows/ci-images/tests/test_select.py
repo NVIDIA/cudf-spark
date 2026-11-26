@@ -193,6 +193,32 @@ class ImageSelectorTest(unittest.TestCase):
         self.assertEqual(jobs["validate"], [])
         self.assert_versioned_images(jobs["publish"], "main", alias_prefix=RELEASE_LINE)
 
+    def test_manual_image_choice_preserves_the_full_matrix_for_each_family(self):
+        scheduled = self.invoke(event="schedule")
+        self.assertEqual(scheduled["validate"], [])
+        skills = [row for row in scheduled["publish"] if row["image"] == "skills-build"]
+        self.assertEqual([(row["tag"], [w["arch"] for w in row["workers"]]) for row in skills],
+                         [("main", ["amd64"])])
+        self.assert_versioned_images([row for row in scheduled["publish"] if row["image"] != "skills-build"],
+                                     "main", alias_prefix=RELEASE_LINE)
+
+        for payload in ({}, {"inputs": {}}, {"inputs": {"image": "all"}}):
+            with self.subTest(payload=payload):
+                self.assertEqual(self.invoke(event="workflow_dispatch", payload=payload), scheduled)
+        for family in sorted({row["image"] for row in scheduled["publish"]}):
+            with self.subTest(family=family):
+                selected = self.invoke(event="workflow_dispatch", payload={"inputs": {"image": family}})
+                expected = [row for row in scheduled["publish"] if row["image"] == family]
+                self.assertEqual(selected, {"validate": [], "publish": expected})
+
+    def test_manual_image_choice_rejects_unknown_and_validation_only_names(self):
+        for name in ("integration-ubunttu", "udf-cuda-template", "shuffle-ubuntu-rdma"):
+            with self.subTest(name=name):
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    self.invoke(event="workflow_dispatch", payload={"inputs": {"image": name}})
+                self.assertIn(name, error.exception.stderr)
+                self.assertEqual((self.root / "output").read_text(), "")
+
     def test_pr_cache_imports_match_publication_for_each_variant_and_arch(self):
         self.git("switch", "-qc", "topic")
         self.write(CI_IMAGES / "select.py", "# select all images\n")

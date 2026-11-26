@@ -185,7 +185,8 @@ class GpuSemaphoreSuite extends AnyFunSuite
         val iter = new HostToGpuCoalesceIterator(hostBatches, TargetSize(1), schema,
           NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
           NoopMetric, "test", useArrowCopyOpt = false,
-          releaseSemaphoreWhilePulling = releaseSemaphore)
+          releaseSemaphoreWhilePulling = releaseSemaphore,
+          inputBatchCleanup = HostBatchCleanupPolicy.ProducerCloses)
         var rows = 0
         var gpuBatches = 0
         while (iter.hasNext) {

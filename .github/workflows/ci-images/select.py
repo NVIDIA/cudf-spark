@@ -191,7 +191,8 @@ def select():
                               stderr=subprocess.DEVNULL).returncode:
                 git("fetch", "--no-tags", "--depth=1", "origin", base)
     tracked = paths("ls-files", "-z")
-    images = recipes(json.loads(CATALOG.read_text()))
+    catalog = json.loads(CATALOG.read_text())
+    images = recipes(catalog)
     expected = {p for p in tracked if re.fullmatch(r"(?:dockerfile(?:[._-].+)?|.+\.dockerfile)",
                                                    Path(p).name, re.IGNORECASE)
                 and not p.endswith(".dockerignore")}
@@ -213,6 +214,14 @@ def select():
     # A shared change already selects all recipes. Its new version file may not exist at base.
     compare_version = version_file in changed and changed.isdisjoint(rules["shared"])
     line_changed = compare_version and release_line(base, version_file) != line
+
+    if event == "workflow_dispatch":
+        requested = (payload.get("inputs") or {}).get("image", "all")
+        if requested != "all":
+            if requested not in catalog["ci-toolchains"]:
+                choices = ", ".join(catalog["ci-toolchains"])
+                raise ValueError(f"Unknown publishable image {requested!r}. Choose all or one of: {choices}")
+            images = {requested: images[requested]}
 
     jobs = {"validate": [], "publish": []}
     for name, (suite, entry) in images.items():

@@ -18,12 +18,12 @@
 # This script installs dependencies required to build RAPIDS Accelerator for Apache Spark on DB.
 # All the environments can be overwritten by shell variables:
 #   SPARKSRCTGZ: Archive file location of the plugin repository. Default is empty.
-#   BASE_SPARK_VERSION: Spark version [3.2.1, 3.3.0]. Default is pulled from current instance.
+#   BASE_SPARK_VERSION: Spark version. Default is read from the current instance.
 #   MVN_OPT: Options to be passed to the MVN commands. Note that "-DskipTests" is hardcoded in the
 #       build command.
 # Usage:
-# - build for DB10.4/Spark 3.2.1:
-#       `BASE_SPARK_VERSION=3.2.1 ./jenkins/databricks/build.sh`
+# - build for DBR 17.3/Spark 4.0.0:
+#       `BASE_SPARK_VERSION=4.0.0 ./jenkins/databricks/build.sh`
 # The Databricks runtime jars are not installed into the local Maven repository. Instead,
 # thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py renders
 # shim-deps/databricks/pom.xml.template into a BOM that references
@@ -114,12 +114,9 @@ initialize()
     fi
 
     DBR_VER=$(cat /databricks/DBR_VERSION)
-    if [ $DBR_VER == '14.3' ] || [ $DBR_VER == '17.3' ] || [ $DBR_VER == '18.3' ]; then
-        DBR_VER=$(echo $DBR_VER | sed 's/\.//g')
-        # We are appending 143 in addition to the base spark version because Databricks 14.3
-        # and Databricks 15.4 are both based on spark version 3.5.0. Similarly, we are appending 173
-        # for Databricks 17.3 and 183 for Databricks 18.3 to identify their exact runtimes.
-        BUILDVER="$BUILDVER$DBR_VER"
+    if [[ "$DBR_VER" == '17.3' || "$DBR_VER" == '18.3' ]]; then
+        # The Databricks build version identifies both the Spark and DBR versions.
+        BUILDVER="$BUILDVER${DBR_VER//./}"
     fi
 
     # Databricks runtime jars referenced as system-scoped dependencies.

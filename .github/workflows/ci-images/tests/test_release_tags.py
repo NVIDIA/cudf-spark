@@ -3,6 +3,7 @@
 
 """Verify branch tag freshness, release ownership and digest preservation."""
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from release_fixture import RELEASE_BRANCH, RELEASE_LINE
 
@@ -19,6 +21,23 @@ SOURCE = Path(__file__).resolve().parents[1]
 DIGEST = "sha256:" + "f" * 64
 PACKAGE = "integration-ubuntu"
 SUFFIX = "-test-toolchain"
+
+
+class ManifestLookupTest(unittest.TestCase):
+    def test_only_unambiguous_404_proves_absence(self):
+        spec = importlib.util.spec_from_file_location("tag_baseline", SOURCE / "tag-baseline.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        missing = {"code": "MANIFEST_UNKNOWN"}
+        image = "ghcr.io/nvidia/cudf-spark/spark-build"
+        with patch.object(guard, "pull_token", return_value="fixture"), patch.object(guard, "get") as get:
+            get.return_value = (404, None, json.dumps({"errors": [missing]}))
+            self.assertIsNone(guard.manifest_digest(image, "main"))
+            for errors in ([missing, {"code": "DENIED"}], [], [None], None):
+                with self.subTest(errors=errors):
+                    get.return_value = (404, None, json.dumps({"errors": errors}))
+                    with self.assertRaisesRegex(ValueError, "HTTP 404"):
+                        guard.manifest_digest(image, "main")
 
 
 class ReleaseTagTest(unittest.TestCase):
@@ -68,6 +87,97 @@ metadata.write_text(json.dumps({"containerimage.descriptor": {"digest": digest}}
 
     def seed(self, release_tag=RELEASE_LINE + SUFFIX):
         return self.publish(PACKAGE, "main" + SUFFIX, release_tag)
+
+    def prepare_retry(self):
+        self.baselines = self.root / "baselines"
+        self.baselines.mkdir()
+        self.env.update(GITHUB_RUN_ID="15", GITHUB_RUN_ATTEMPT="2",
+                        GITHUB_SHA=subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                          cwd=self.worker, text=True).strip(),
+                        PLATFORM_RECORDS=str(self.baselines))
+        # Invoke the real CLI with an in-memory registry instead of contacting GHCR.
+        (self.worker / CI_IMAGES / "tag-baseline.py").write_text(
+            "import importlib.util, json, os, sys\n"
+            "sys.dont_write_bytecode = True\n"
+            f"spec = importlib.util.spec_from_file_location('guard', {str(SOURCE / 'tag-baseline.py')!r})\n"
+            "guard = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(guard)\n"
+            "guard.manifest_digest = lambda image, tag: json.loads(os.environ['REGISTRY_TAGS'])[image + ':' + tag]\n"
+            "guard.main()\n")
+
+    def baseline(self, arch, previous, **changes):
+        record = dict(image=f"ghcr.io/nvidia/cudf-spark/{PACKAGE}", source=self.env["GITHUB_SHA"],
+                      run=self.env["GITHUB_RUN_ID"], attempt="1", platform=f"linux/{arch}", previous=previous)
+        (self.baselines / f"baseline-{arch}.json").write_text(json.dumps({**record, **changes}))
+
+    def registry(self, tags):
+        image = f"ghcr.io/nvidia/cudf-spark/{PACKAGE}"
+        self.env["REGISTRY_TAGS"] = json.dumps({f"{image}:{tag}": digest for tag, digest in tags.items()})
+
+    def assert_no_write(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.calls.exists())
+        self.assertFalse(Path(self.env["GITHUB_OUTPUT"]).exists())
+
+    def test_retry_allows_unchanged_missing_or_already_published_tag(self):
+        self.prepare_retry()
+        tag, old = "main" + SUFFIX, "sha256:" + "1" * 64
+        for before, now in ((old, old), (None, None), (old, DIGEST)):
+            with self.subTest(before=before, now=now):
+                # A failed first-attempt sibling need not have saved a baseline.
+                self.baseline("arm64", {tag: before})
+                self.registry({tag: now})
+                result = self.publish(PACKAGE, tag, tag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads(self.calls.read_text())
+                self.assertEqual(args[-2:], [f"ghcr.io/nvidia/cudf-spark/{PACKAGE}:{tag}",
+                                            f"ghcr.io/nvidia/cudf-spark/{PACKAGE}@{DIGEST}"])
+                self.calls.unlink()
+                Path(self.env["GITHUB_OUTPUT"]).unlink()
+
+    def test_retry_rejects_changed_deleted_and_conflicting_previous_tags(self):
+        self.prepare_retry()
+        tag = "main" + SUFFIX
+        old, newer = ("sha256:" + c * 64 for c in "12")
+        for amd, arm, now in ((old, old, newer), (old, old, None), (None, None, newer), (old, newer, old)):
+            with self.subTest(amd=amd, arm=arm, now=now):
+                self.baseline("amd64", {tag: amd})
+                self.baseline("arm64", {tag: arm})
+                self.registry({tag: now})
+                self.assert_no_write(self.publish(PACKAGE, tag, tag))
+
+    def test_retry_rejects_missing_or_foreign_original_baseline(self):
+        self.prepare_retry()
+        tag = "main" + SUFFIX
+        self.registry({tag: DIGEST})
+        self.assert_no_write(self.publish(PACKAGE, tag, tag))
+        self.baseline("arm64", {tag: None})
+        for changes in ({"run": "16"}, {"source": "9" * 40}, {"image": "ghcr.io/other/image"},
+                        {"attempt": "2"}, {"platform": "linux/arm64"}):
+            with self.subTest(changes=changes):
+                self.baseline("amd64", {tag: None}, **changes)
+                self.assert_no_write(self.publish(PACKAGE, tag, tag))
+
+    def test_retry_checks_release_alias_separately_after_main_succeeds(self):
+        self.prepare_retry()
+        main, alias = "main" + SUFFIX, RELEASE_LINE + SUFFIX
+        old, newer = ("sha256:" + c * 64 for c in "12")
+        self.registry({main: old, alias: newer})
+        self.baseline("amd64", {main: old, alias: None})
+        result = self.publish(PACKAGE, main, main)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.calls.unlink()
+        Path(self.env["GITHUB_OUTPUT"]).unlink()
+        self.assert_no_write(self.seed())
+
+        # A missing alias key is not a recorded absence, even when the registry has no tag.
+        self.baseline("amd64", {main: old})
+        self.registry({main: DIGEST, alias: None})
+        self.assert_no_write(self.seed())
+        self.baseline("amd64", {main: old, alias: None})
+        result = self.seed()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"ghcr.io/nvidia/cudf-spark/{PACKAGE}:{alias}", json.loads(self.calls.read_text()))
 
     def test_stable_skills_tag_checks_recipe_again_after_build(self):
         package = "skills-build"
