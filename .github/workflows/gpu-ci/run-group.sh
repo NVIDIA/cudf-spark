@@ -63,9 +63,11 @@ printf 'sparkci:x:%s:%s::/home/ci:/bin/bash\n' "$uid" "$gid" > "$scratch/passwd"
 printf 'sparkci:x:%s:\n' "$gid" > "$scratch/group"
 run_in_image() {
   local remaining
-  local -a target_env=()
+  local -a workload_env=()
   if [[ $KIND == integration && -n ${TARGETS_JSON:-} ]]; then
-    target_env=(-e TARGETS_JSON)
+    workload_env=(-e TARGETS_JSON)
+  elif [[ $KIND == unit && -n ${unit_locale:-} ]]; then
+    workload_env=(-e "LC_ALL=$unit_locale")
   fi
   remaining=$(( GPU_DEADLINE - $(date +%s) ))
   if ((remaining <= 0)); then
@@ -85,7 +87,7 @@ run_in_image() {
     -e HOME=/home/ci -e WORKSPACE=/workspace -e SPARK_LOCAL_IP=127.0.0.1 \
     -e JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$arch" -e CLASSIFIER=cuda12 \
     -e SCALA_BINARY_VER="$SCALA" -e SPARK_SHIM -e UNIT_TEST_MODE -e PARALLEL_UT \
-    -e SPARK_HOME -e IT_SHARD -e REDUCED_IT "${target_env[@]}" \
+    -e SPARK_HOME -e IT_SHARD -e REDUCED_IT "${workload_env[@]}" \
     -e MVN_SETTINGS=/home/ci/.m2/settings.xml \
     -e 'MAVEN_OPTS=-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository -DsecondaryCacheDir=/home/ci/.m2/repository/.sbt/1.0/zinc/org.scala-sbt' \
     --entrypoint /bin/bash "$IMAGE" -c 'export PATH="$JAVA_HOME/bin:$PATH"; exec bash "$@"' bash "$@"
@@ -139,9 +141,9 @@ run_selected_suites() {
     -Dmaven.wagon.http.retryHandler.count=3
 }
 
-jq -er '.[] | [.shim, ."unit-group"] | @tsv' <<< "${SHIMS:?}" > "$scratch/shims"
+jq -er '.[] | [.shim, ."unit-group", (.locale // "")] | @tsv' <<< "${SHIMS:?}" > "$scratch/shims"
 [[ -s "$scratch/shims" ]]
-while read -r SPARK_SHIM unit_group; do
+while read -r SPARK_SHIM unit_group unit_locale; do
   case "$unit_group" in
     ut2) UNIT_TEST_MODE=package ;;
     ut1|scala213) UNIT_TEST_MODE=filecache ;;

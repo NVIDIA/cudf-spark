@@ -156,6 +156,20 @@ class WorkloadTest(unittest.TestCase):
                         workload.run_workload("test", env, "owned", directory, archive)
                 self.assertNotIn("DATABRICKS_PRIVKEY", workload.cleanup_env(profile))
 
+    def test_failed_tests_report_counts_without_overriding_the_exit(self):
+        env = dict(DATABRICKS_DRIVER_ADDRESS="driver.invalid", DATABRICKS_CLUSTER_ID="owned",
+                   EXTRA_ENVS="TEST_MODE=CI_PART2,REDUCED_IT=false", BASE_SPARK_VERSION="4.1.0",
+                   DATABRICKS_SSH_CONFIG="fixture")
+        for exits, summary, expected, reads in [
+                ([0, 0, 1], 0, 1, 1), ([0, 0, 7], OSError(), 7, 1),
+                ([0, 0, 0], OSError(), 1, 1), ([23], 0, 23, 0),
+                ([0, 0, 255], 0, 255, 0), ([0, 0, 124], 0, 124, 0)]:
+            with self.subTest(exits=exits), patch("subprocess.run", side_effect=[
+                    subprocess.CompletedProcess([], code) for code in exits]), patch.object(
+                    workload, "check_pytest", side_effect=[summary]) as report:
+                self.assertEqual(workload.run_workload("test", env, "owned", self.tmp, None), expected)
+                self.assertEqual(report.call_count, reads)
+
     def test_driver_output_is_bounded_and_never_treated_as_commands(self):
         for text, expected in (("3 1 0\n", 0), ("0 0 0\n", 1), ("1 1 0\n", 1), ("2 0 1\n", 1),
                                ("::notice::bad\n", 1), ("1 " * 64, 1)):

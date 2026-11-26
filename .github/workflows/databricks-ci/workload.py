@@ -242,9 +242,16 @@ def run_workload(phase, env, cluster_id, directory, archive):
     redirection = ">buildout 2>&1" if phase == "build" else ">/dev/null 2>&1"
     # DBR 18.3 part 2 has successful test commands longer than three hours.
     limit = (270 if phase == "test" else 75) * 60
-    rc = rc or remote("umask 077; cd /home/ubuntu && " + shlex.join(command) + " " + redirection, timeout=limit)
-    if phase == "test" and not rc:
-        rc = check_pytest(ssh, directory)
-        if rc:
-            print(f"No complete passing pytest JUnit summary (check exit={rc})", flush=True)
-    return rc
+    if rc:
+        return rc
+    rc = remote("umask 077; cd /home/ubuntu && " + shlex.join(command) + " " + redirection, timeout=limit)
+    if phase != "test" or rc < 0 or rc in (124, 255):
+        return rc
+    # Collect counts even when pytest failed, without masking the original exit.
+    try:
+        summary_rc = check_pytest(ssh, directory)
+    except (OSError, subprocess.SubprocessError):
+        summary_rc = 1
+    if summary_rc and not rc:
+        print(f"No complete passing pytest JUnit summary (check exit={summary_rc})", flush=True)
+    return rc or summary_rc
