@@ -168,12 +168,12 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     val schema = StructType(Seq(StructField("id", IntegerType)))
 
     val hidden = SparkProtobufCompat.hiddenFieldsMissingFromSchema(
-      schema, descriptor, "root message")
+      schema, descriptor, "root message", depth = 0)
 
     assert(hidden.map(_.map(_.name)) == Right(Seq("empty")))
     assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
       schema.add("empty", StructType(Seq(StructField("x", IntegerType)))), descriptor,
-      "root message") == Right(Seq.empty))
+      "root message", depth = 0) == Right(Seq.empty))
   }
 
   test("compat rejects other descriptor fields missing from the Spark schema") {
@@ -184,7 +184,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     val schema = StructType(Seq(StructField("id", IntegerType)))
 
     assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
-      schema, descriptor, "protobuf field 'child'") ==
+      schema, descriptor, "protobuf field 'child'", depth = 0) ==
       Left("protobuf field 'child' has fields missing from the Spark schema: name, child"))
   }
 
@@ -195,7 +195,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       fakeField("wrapper", 2, "MESSAGE", Some(wrapper))), "test.Root")
 
     val hidden = SparkProtobufCompat.hiddenFieldsMissingFromSchema(
-      idSchema, descriptor, "root message")
+      idSchema, descriptor, "root message", depth = 0)
 
     assert(hidden.map(_.map(_.name)) == Right(Seq("wrapper")))
   }
@@ -210,7 +210,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       fakeField("node", 2, "MESSAGE", Some(node))), "test.Root")
 
     assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
-      idSchema, descriptor, "root message") ==
+      idSchema, descriptor, "root message", depth = 0) ==
       Left("root message has fields missing from the Spark schema: node"))
   }
 
@@ -222,7 +222,7 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
         mapField = true)), "test.Root")
 
     assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
-      idSchema, descriptor, "root message") ==
+      idSchema, descriptor, "root message", depth = 0) ==
       Left("root message has fields missing from the Spark schema: choice, entries"))
   }
 
@@ -242,6 +242,41 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
     assert(arrays.isOutput.toSeq == Seq(true, false, false))
     assert(arrays.toJniDescriptor.numFields() == 3)
+  }
+
+  test("compat rejects an empty-message field at the decoder's depth limit") {
+    // The decoder accepts entries at depth 0 to 9, so the deepest hidden field is depth 9.
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"), emptyMessageField), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 9).map(_.map(_.name)) ==
+      Right(Seq("empty")))
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 10) ==
+      Left("root message has fields missing from the Spark schema: empty"))
+  }
+
+  test("compat counts the depth of a hidden subtree from the enclosing message") {
+    // A chain of wrappers around an empty message: the subtree keeps its own entries, so an
+    // omitted field below the root cannot use the whole depth budget.
+    def wrappers(levels: Int): ProtobufFieldDescriptor = {
+      val leaf = fakeField("empty", 1, "MESSAGE", Some(emptyMessage("test.Empty")))
+      (1 to levels).foldLeft(leaf) { (field, level) =>
+        fakeField(s"w$level", 1, "MESSAGE",
+          Some(fakeMessage(Seq(field), s"test.Wrapper$level")))
+      }
+    }
+    val descriptor = fakeMessage(Seq(fakeField("id", 1, "INT32"), wrappers(8)), "test.Root")
+    val name = descriptor.fieldNames.last
+
+    // The subtree holds nine entries, so its deepest one lands at depth 9 only while the
+    // subtree starts at depth 0 or 1.
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 1).map(_.map(_.name)) == Right(Seq(name)))
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 2) ==
+      Left(s"root message has fields missing from the Spark schema: $name"))
   }
 
   test("the GPU decoder accepts a schema with a hidden empty-message field") {

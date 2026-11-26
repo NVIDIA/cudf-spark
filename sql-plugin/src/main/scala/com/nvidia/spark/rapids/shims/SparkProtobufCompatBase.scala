@@ -43,8 +43,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
   private[this] val proto2Syntax = "PROTO2"
 
-  // The decoder rejects schemas nested deeper than this, so stop before building one.
-  private[this] val maxEmptyMessageDepth = 10
+  // The decoder rejects entries at depth 10 or beyond, so stop before flattening such a
+  // subtree. NVIDIA/cudf-spark-jni#5561 tracks exposing this limit from the JNI descriptor.
+  private[this] val maxNestingDepth = 10
 
   /** Option keys whose semantics the GPU decoder handles. */
   val SupportedOptions: Set[String] = Set("enums.as.ints", "mode")
@@ -119,14 +120,17 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
    * Spark drops empty-message fields from its schema but still checks their presence and
    * encoding, which the GPU decoder cannot do without them. Returns those fields so the planner
    * can decode them without returning them; any other omission falls back to the CPU.
+   * The caller passes the absolute depth of this message's fields, so that an omitted subtree
+   * is rejected here rather than by the decoder after it has been flattened.
    */
   def hiddenFieldsMissingFromSchema(
       schema: StructType,
       desc: ProtobufMessageDescriptor,
-      location: String): Either[String, Seq[ProtobufFieldDescriptor]] =
+      location: String,
+      depth: Int): Either[String, Seq[ProtobufFieldDescriptor]] =
     Try {
       val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
-        .map(name => name -> emptyMessageField(desc, name))
+        .map(name => name -> emptyMessageField(desc, name, depth))
       val (hidden, unsupported) = omitted.partition(_._2.isDefined)
       Either.cond(unsupported.isEmpty, hidden.flatMap(_._2),
         s"$location has fields missing from the Spark schema: " +
@@ -138,32 +142,34 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   /** A proto2 message field with no field Spark can represent, so its schema omits it. */
   private def emptyMessageField(
       desc: ProtobufMessageDescriptor,
-      name: String): Option[ProtobufFieldDescriptor] =
-    desc.findField(name).filter(isEmptyMessageField(_, Set.empty, 0))
+      name: String,
+      depth: Int): Option[ProtobufFieldDescriptor] =
+    desc.findField(name).filter(isEmptyMessageField(_, Set.empty, depth))
 
+  /** The field occupies the entry at `depth`, and its own fields sit one level below it. */
   private def isEmptyMessageField(
       field: ProtobufFieldDescriptor,
       visited: Set[String],
       depth: Int): Boolean =
-    field.protoTypeName == "MESSAGE" && !field.isInOneof && !field.isMapField &&
-      field.messageDescriptor.exists(isEmptyMessageType(_, visited, depth))
+    depth < maxNestingDepth &&
+      field.protoTypeName == "MESSAGE" && !field.isInOneof && !field.isMapField &&
+      field.messageDescriptor.exists(isEmptyMessageType(_, visited, depth + 1))
 
   /**
    * A message type is empty for Spark when every field is itself such a message, so an empty
-   * message is the base case. A recursive type keeps nesting and the decoder limits nesting
-   * depth, so both are reported as representable and the planner falls back for them.
+   * message is the base case. A recursive type keeps nesting, so it is reported as
+   * representable and the planner falls back for it.
    */
   private def isEmptyMessageType(
       desc: ProtobufMessageDescriptor,
       visited: Set[String],
       depth: Int): Boolean = {
-    if (desc.syntax != proto2Syntax || visited.contains(desc.fullName) ||
-        depth >= maxEmptyMessageDepth) {
+    if (desc.syntax != proto2Syntax || visited.contains(desc.fullName)) {
       false
     } else {
       val nested = visited + desc.fullName
       desc.fieldNames.forall { name =>
-        desc.findField(name).exists(isEmptyMessageField(_, nested, depth + 1))
+        desc.findField(name).exists(isEmptyMessageField(_, nested, depth))
       }
     }
   }

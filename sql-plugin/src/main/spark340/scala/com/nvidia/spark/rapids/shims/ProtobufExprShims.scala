@@ -155,7 +155,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             if (pathPrefix.isEmpty) "root message" else s"protobuf field '$pathPrefix'"
           val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
           for {
-            hidden <- SparkProtobufCompat.hiddenFieldsMissingFromSchema(schema, msgDesc, location)
+            hidden <- SparkProtobufCompat.hiddenFieldsMissingFromSchema(schema, msgDesc,
+              location, depth)
             fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
               schema, msgDesc, enumsAsInts, messageName)
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
