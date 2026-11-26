@@ -58,7 +58,9 @@ abstract class GpuSparkScan(val cpuScan: Scan,
       // Older files can still supply an identity value after the table's partition spec changes.
       val specs = GpuSparkScanAccess.table(cpuScan).specs().values().asScala
       specs.exists { spec =>
-        spec.identitySourceIds().asScala.exists(id => schema.findField(id) != null)
+        spec.fields().asScala.exists { field =>
+          field.transform().isIdentity() && schema.findField(field.sourceId()) != null
+        }
       }
     }
   }

@@ -114,6 +114,11 @@ def test_iceberg_coalesce_after_scan(
         spark_tmp_table_factory, format_version, reader_type):
     table = _create_small_files_table(spark_tmp_table_factory, format_version)
     _assert_coalesced_reads(table, reader_type, format_version)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT id + 1 FROM {table}"),
+        exist_classes='GpuBatchScanExec,GpuProjectExec', non_exist_classes='GpuCoalesceBatches',
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type},
+        require_non_empty=True)
 
 
 @iceberg
