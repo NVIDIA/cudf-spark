@@ -217,8 +217,6 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
     ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), \
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_with_deletion_vectors(
         spark_tmp_path, use_cdf, use_metadata_row_index):
     expect_cpu_fallback = is_oss_delta_lake_24()
@@ -607,8 +605,7 @@ def test_delta_delete_partitions(spark_tmp_path, use_cdf, partition_columns, ena
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
-                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values, ids=idfn)
 def test_delta_delete_rows(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
     # Databricks changes the number of files being written, so we cannot compare logs unless there's only one slice
     num_slices_to_test = 1 if is_databricks_runtime() else 10
@@ -858,14 +855,174 @@ def test_delta_delete_preserves_row_tracking(spark_tmp_path):
     assert_delta_row_tracking_dml(
         spark_tmp_path, "DELETE FROM delta.`{path}` WHERE a IN (2, 3)", conf)
 
+
+def _tracked_persistent_dv_delete_conf():
+    return copy_and_update(delta_delete_enabled_conf, delta_row_tracking_dml_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.dmlMetricsFromMetadata.enabled": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
+
+
+def _setup_tracked_persistent_dv_delete_table(
+        spark, path, column_mapping, partitioned=False, row_tracking=True):
+    partition_column = ", p INT" if partitioned else ""
+    partitioning = "PARTITIONED BY (p)" if partitioned else ""
+    spark.sql(
+        f"CREATE TABLE delta.`{path}` (id BIGINT{partition_column}) USING DELTA {partitioning} "
+        f"TBLPROPERTIES ('delta.enableRowTracking'='{str(row_tracking).lower()}', "
+        "'delta.enableDeletionVectors'='true', "
+        f"'delta.columnMapping.mode'='{column_mapping}')")
+    data = spark.range(5, numPartitions=1)
+    if partitioned:
+        data = data.selectExpr("id", "CAST(id % 2 AS INT) AS p")
+    data.write.format("delta").mode("append").save(path)
+
+
+def _tracked_delete_rows(spark, table):
+    return spark.sql(
+        f"SELECT id, _metadata.row_id, _metadata.row_commit_version FROM {table} "
+        "ORDER BY id").collect()
+
+
+def _tracked_delete_latest_version(spark, table):
+    return spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").first().version
+
+
+@allow_non_gpu("ColumnarToRowExec", "ExecutedCommandExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize("column_mapping", ["none", "name"])
+@pytest.mark.parametrize("delete_case",
+                         ["row", "existing_dv", "mixed_predicate", "enable_row_tracking"])
+def test_delta_delete_persistent_dv_row_tracking_fallback(
+        spark_tmp_path, column_mapping, delete_case):
+    conf = _tracked_persistent_dv_delete_conf()
+    path = spark_tmp_path + "/tracked"
+    table = f"delta.`{path}`"
+    partitioned = delete_case == "mixed_predicate"
+    predicate = "p = 1 AND id = 1" if partitioned else "id = 1"
+
+    def setup(spark):
+        enable_after_insert = delete_case == "enable_row_tracking"
+        _setup_tracked_persistent_dv_delete_table(
+            spark, path, column_mapping, partitioned=partitioned,
+            row_tracking=not enable_after_insert)
+        if enable_after_insert:
+            spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('delta.enableRowTracking'='true')")
+        if delete_case == "existing_dv":
+            assert_equal(spark.sql(f"DELETE FROM {table} WHERE id = 0").collect(), [Row(1)])
+            version = _tracked_delete_latest_version(spark, table)
+            logs = read_delta_logs(spark, f"{path}/_delta_log/{version:020d}.json")
+            assert any(action.get("add", {}).get("deletionVector")
+                       for actions in logs.values() for action in actions)
+        return _tracked_delete_rows(spark, table), _tracked_delete_latest_version(spark, table)
+
+    before, version = with_cpu_session(setup, conf=conf)
+    plans = []
+    affected = assert_rapids_delta_write(
+        lambda spark: spark.sql(f"DELETE FROM {table} WHERE {predicate}").collect(),
+        conf=conf, required_gpu_classes=[], captured_plans_out=plans, require_non_empty=True)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    assert any(callback.didFallBack(plan, "ExecutedCommandExec") for plan in plans)
+    assert not any(callback.contains(plan, "GpuDeleteCommand") for plan in plans)
+    assert_equal(affected, [Row(1)])
+
+    def check_commit(spark):
+        assert_equal(_tracked_delete_rows(spark, table), [row for row in before if row.id != 1])
+        assert _tracked_delete_latest_version(spark, table) == version + 1
+        logs = read_delta_logs(spark, f"{path}/_delta_log/{version + 1:020d}.json")
+        cardinalities = [action["add"]["deletionVector"]["cardinality"]
+                         for actions in logs.values() for action in actions
+                         if action.get("add", {}).get("deletionVector")]
+        assert cardinalities == ([2] if delete_case == "existing_dv" else [1])
+
+    with_cpu_session(check_commit, conf=conf)
+
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize("column_mapping", ["none", "name"])
+def test_delta_delete_persistent_dv_row_tracking_disabled(spark_tmp_path, column_mapping):
+    conf = copy_and_update(_tracked_persistent_dv_delete_conf(), {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "false"})
+    # Name mapping generates a random directory for each newly written file.
+    _assert_tracked_delete_log_parity(
+        spark_tmp_path, column_mapping, conf, " WHERE id = 1", [1],
+        ignore_random_add_file_prefix=column_mapping == "name")
+
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize("column_mapping", ["none", "name"])
+@pytest.mark.parametrize("partition_column", ["p", "P", None],
+                         ids=["partition", "partition_case_insensitive", "whole_table"])
+def test_delta_delete_persistent_dv_row_tracking_metadata_only(
+        spark_tmp_path, column_mapping, partition_column):
+    conf = copy_and_update(_tracked_persistent_dv_delete_conf(), {
+        "spark.sql.caseSensitive": "false"})
+    predicate = f" WHERE {partition_column} = 0" if partition_column else ""
+    deleted_ids = [0, 2, 4] if partition_column else [0, 1, 2, 3, 4]
+    _assert_tracked_delete_log_parity(
+        spark_tmp_path, column_mapping, conf, predicate, deleted_ids,
+        partitioned=partition_column is not None)
+
+
+def _assert_tracked_delete_log_parity(
+        spark_tmp_path, column_mapping, conf, predicate, deleted_ids, partitioned=False,
+        ignore_random_add_file_prefix=False):
+    data_path = spark_tmp_path + "/tracked"
+
+    def delete(spark, table):
+        return spark.sql(f"DELETE FROM {table}{predicate}").collect()
+
+    def setup(spark):
+        cpu_path = f"{data_path}/CPU"
+        _setup_tracked_persistent_dv_delete_table(spark, cpu_path, column_mapping, partitioned)
+        # Both commits must remove files from the same snapshot, including physical column names.
+        sc = spark.sparkContext
+        hadoop_fs = sc._jvm.org.apache.hadoop.fs
+        config = sc._jsc.hadoopConfiguration()
+        source = hadoop_fs.Path(cpu_path)
+        dest = hadoop_fs.Path(f"{data_path}/GPU")
+        fs = source.getFileSystem(config)
+        assert hadoop_fs.FileUtil.copy(fs, source, fs, dest, False, config)
+        table = f"delta.`{cpu_path}`"
+        return _tracked_delete_rows(spark, table), _tracked_delete_latest_version(spark, table)
+
+    before, version = with_cpu_session(setup, conf=conf)
+    for mode in ("CPU", "GPU"):
+        table = f"delta.`{data_path}/{mode}`"
+        if mode == "CPU":
+            affected = with_cpu_session(lambda spark: delete(spark, table), conf=conf)
+        else:
+            affected = assert_rapids_delta_write(
+                lambda spark: delete(spark, table), conf=conf, required_gpu_classes=[],
+                expected_command="GpuDeleteCommand")
+        assert_equal(affected, [Row(len(deleted_ids))])
+        after, new_version = with_cpu_session(
+            lambda spark: (_tracked_delete_rows(spark, table),
+                           _tracked_delete_latest_version(spark, table)), conf=conf)
+        assert_equal(after, [row for row in before if row.id not in deleted_ids])
+        assert new_version == version + 1
+
+    with_cpu_session(
+        lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(
+            spark, data_path, ignore_random_add_file_prefix=ignore_random_add_file_prefix),
+        conf=conf)
+
+
 @allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
 @delta_lake
 @inject_oom
 @pytest.mark.parametrize("use_chunked_reader", [True, False], ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_before_spark_353(),
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
     """Regression test for https://github.com/NVIDIA/spark-rapids/issues/14442.
     The second DELETE on a DV-enabled table accesses _metadata.file_path and _metadata.row_index
@@ -921,8 +1078,7 @@ def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9884')
-@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
-                                        enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
+@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values, ids=idfn)
 def test_delta_delete_dataframe_api(spark_tmp_path, use_cdf, partition_columns, enable_deletion_vectors):
     from delta.tables import DeltaTable
     data_path = spark_tmp_path + "/DELTA_DATA"

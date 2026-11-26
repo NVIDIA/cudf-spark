@@ -107,7 +107,7 @@ class ReadinessSelectionTest(unittest.TestCase):
                                       "sort_test.py", "window_function_test.py"})
 
     def test_other_runtimes_and_manual_runs_keep_delta_lake(self):
-        for version, hook in (("14.3.", True), ("17.3.", True), ("18.3.", False)):
+        for version, hook in (("17.3.", True), ("18.3.", False)):
             with self.subTest(version=version, hook=hook):
                 result = self.run_script(version=version, hook=hook, mode="CI_PART2")
                 self.assertEqual(result.returncode, 0, result.stderr)

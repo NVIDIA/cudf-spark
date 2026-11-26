@@ -33,7 +33,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive._
-import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
+import org.apache.spark.sql.execution.columnar.{DefaultCachedBatchSerializer, InMemoryTableScanExec}
 import org.apache.spark.sql.execution.command.{DataWritingCommandExec, ExecutedCommandExec}
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2ScanExecBase, DropTableExec, ShowTablesExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_REQUIREMENTS,
@@ -54,7 +54,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   var rapidsConf: RapidsConf = null
 
   def optimizeGpuPlanTransitions(plan: SparkPlan): SparkPlan = plan match {
-    case HostColumnarToGpu(r2c: RowToColumnarExec, goal) =>
+    case HostColumnarToGpu(r2c: RowToColumnarExec, goal, _) =>
       val optimizedChild = optimizeGpuPlanTransitions(r2c.child)
       val projectedChild = checkInjectedProject(optimizedChild, optimizedChild, isRowToCol = true)
       GpuRowToColumnarExec(projectedChild, goal)
@@ -108,7 +108,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
       optimizeAdaptiveTransitions(child, Some(bb))
 
     // HostColumnarToGpu(RowToColumnarExec(..)) => GpuRowToColumnarExec(..)
-    case HostColumnarToGpu(r2c: RowToColumnarExec, goal) =>
+    case HostColumnarToGpu(r2c: RowToColumnarExec, goal, _) =>
       val child = optimizeAdaptiveTransitions(r2c.child, Some(r2c))
       child match {
         case a: AdaptiveSparkPlanExec =>
@@ -220,9 +220,10 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
       val c2r = GpuColumnarToRowExec(optimizeAdaptiveTransitions(e, Some(plan)))
       SparkShimImpl.addRowShuffleToQueryStageTransitionIfNeeded(c2r, e)
 
-    // If Spark wrapped a TableCache query stage with a CPU ColumnarToRow, replace it with
-    // a GPU ColumnarToRow to avoid CPU accessing GPU vectors.
-    case ColumnarToRowExec(e) if SparkShimImpl.getTableCacheNonQueryStagePlan(e).nonEmpty =>
+    // If Spark wrapped a GPU TableCache query stage with a CPU ColumnarToRow, replace it with
+    // a GPU ColumnarToRow to avoid CPU accessing GPU vectors. Leave CPU cache plans unchanged.
+    case ColumnarToRowExec(e) if SparkShimImpl.getTableCacheNonQueryStagePlan(e)
+        .exists(_.isInstanceOf[GpuExec]) =>
       GpuColumnarToRowExec(optimizeAdaptiveTransitions(e, Some(plan)))
 
     case ColumnarToRowExec(e: BroadcastQueryStageExec) =>
@@ -274,7 +275,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
    * looking for HostColumnarToGpu when optimizing transitions.
    */
   def fixupHostColumnarTransitions(plan: SparkPlan): SparkPlan = plan match {
-    case HostColumnarToGpu(child, goal) if DataTypeUtils.hasNestedTypes(child.schema) ||
+    case HostColumnarToGpu(child, goal, _) if DataTypeUtils.hasNestedTypes(child.schema) ||
         child.schema.fields.exists(field => GpuColumnVector.isVariantType(field.dataType)) =>
       GpuRowToColumnarExec(ColumnarToRowExec(fixupHostColumnarTransitions(child)), goal)
     case p => p.withNewChildren(p.children.map(fixupHostColumnarTransitions))
@@ -602,7 +603,10 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   private def insertColumnarToGpu(plan: SparkPlan): SparkPlan = {
     val nonQueryStagePlan = GpuTransitionOverrides.getNonQueryStagePlan(plan)
     if (isHostColumnar(nonQueryStagePlan)) {
-      HostColumnarToGpu(insertColumnarFromGpu(plan), TargetSize(rapidsConf.gpuTargetBatchSizeBytes))
+      HostColumnarToGpu(
+        insertColumnarFromGpu(plan),
+        TargetSize(rapidsConf.gpuTargetBatchSizeBytes),
+        GpuTransitionOverrides.hostBatchCleanupFor(nonQueryStagePlan))
     } else {
       plan.withNewChildren(plan.children.map(insertColumnarToGpu))
     }
@@ -1047,6 +1051,18 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
 
 object GpuTransitionOverrides {
   val aqeQueryStageExchange = TreeNodeTag[Boolean]("rapids.aqe.queryStageExchange")
+
+  private[rapids] def hostBatchCleanupFor(plan: SparkPlan): HostBatchCleanupPolicy = plan match {
+    case scan: InMemoryTableScanExec
+        if scan.relation.cacheBuilder.serializer.getClass ==
+            classOf[DefaultCachedBatchSerializer] =>
+      // The default serializer allocates fresh vectors per batch and closes them again at task
+      // completion; vector close is idempotent. Release their backing memory after the synchronous
+      // copy so a large cache partition does not retain every decoded batch's data.
+      HostBatchCleanupPolicy.CloseAfterCopy
+    case _ =>
+      HostBatchCleanupPolicy.ProducerCloses
+  }
 
   def tagAqeQueryStageExchanges(plan: SparkPlan): Unit = {
     def tagPlanAndSubqueries(plan: SparkPlan): Unit = {
