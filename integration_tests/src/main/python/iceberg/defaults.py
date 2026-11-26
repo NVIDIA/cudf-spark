@@ -15,6 +15,7 @@
 import hashlib
 import json
 from contextlib import closing
+from decimal import Decimal
 
 from conftest import spark_jvm
 
@@ -58,22 +59,71 @@ def iceberg_default_file_snapshot(spark, name):
     from pyarrow import BufferReader
     from pyarrow.parquet import ParquetFile
 
-    def defaults(metadata):
-        # The fixtures use flat schemas. Both producers identify the same fields by Iceberg ID.
-        if b"iceberg.schema" in metadata:
-            fields = json.loads(metadata[b"iceberg.schema"])["fields"]
-            return tuple(sorted((field["id"], key, field[key]) for field in fields
-                                for key in ("initial-default", "write-default") if key in field))
+    def iceberg_value(iceberg_type, value):
+        if value is None:
+            return None
+        type_id = iceberg_type.typeId().name()
+        if type_id in ("BINARY", "FIXED"):
+            return bytes(spark_jvm().org.apache.iceberg.util.ByteBuffers.toByteArray(value))
+        if type_id == "DECIMAL":
+            return Decimal(str(value))
+        if type_id == "STRUCT":
+            object_class = spark_jvm().java.lang.Class.forName("java.lang.Object")
+            return tuple(iceberg_value(field.type(), value.get(index, object_class))
+                         for index, field in enumerate(iceberg_type.asStructType().fields()))
+        # Iceberg DATE and TIMESTAMP defaults are already epoch days and microseconds.
+        return value
 
-        fields = json.loads(metadata[b"org.apache.spark.sql.parquet.row.metadata"])["fields"]
+    def spark_value(literal, data_type):
+        if isinstance(data_type, dict) and data_type["type"] == "struct":
+            if spark.sql(f"SELECT {literal}").first()[0] is None:
+                return None
+            return tuple(spark_value(
+                f"({literal}).`{field['name'].replace('`', '``')}`", field["type"])
+                for field in data_type["fields"])
+        if data_type == "date":
+            literal = f"unix_date({literal})"
+        elif data_type == "timestamp":
+            # Avoid Python/session-local datetime conversion, including DST overlaps.
+            literal = f"unix_micros({literal})"
+        value = spark.sql(f"SELECT {literal}").first()[0]
+        return bytes(value) if isinstance(value, (bytes, bytearray, memoryview)) else value
+
+    def spark_fields(data_type):
+        if not isinstance(data_type, dict):
+            return
+        if data_type["type"] == "struct":
+            for field in data_type["fields"]:
+                yield field
+                yield from spark_fields(field["type"])
+        elif data_type["type"] == "array":
+            yield from spark_fields(data_type["elementType"])
+        elif data_type["type"] == "map":
+            yield from spark_fields(data_type["keyType"])
+            yield from spark_fields(data_type["valueType"])
+
+    def defaults(metadata):
         result = []
-        for field in fields:
-            attrs = field["metadata"]
-            for key, kind in (("EXISTS_DEFAULT", "initial-default"),
-                              ("CURRENT_DEFAULT", "write-default")):
-                if key in attrs:
-                    value = spark.sql(f"SELECT {attrs[key]}").first()[0]
-                    result.append((attrs["parquet.field.id"], kind, value))
+        if b"iceberg.schema" in metadata:
+            # Let Iceberg decode its typed JSON defaults (notably binary, decimal and time).
+            schema = spark_jvm().org.apache.iceberg.SchemaParser.fromJson(
+                metadata[b"iceberg.schema"].decode())
+            for field_id in schema.idToName().keySet():
+                field = schema.findField(field_id)
+                for kind, literal, value in (
+                        ("initial-default", field.initialDefaultLiteral(), field.initialDefault()),
+                        ("write-default", field.writeDefaultLiteral(), field.writeDefault())):
+                    if literal is not None:
+                        result.append((field_id, kind, iceberg_value(field.type(), value)))
+        else:
+            schema = json.loads(metadata[b"org.apache.spark.sql.parquet.row.metadata"])
+            for field in spark_fields(schema):
+                attrs = field["metadata"]
+                for key, kind in (("EXISTS_DEFAULT", "initial-default"),
+                                  ("CURRENT_DEFAULT", "write-default")):
+                    if key in attrs:
+                        result.append((attrs["parquet.field.id"], kind,
+                                       spark_value(attrs[key], field["type"])))
         return tuple(sorted(result))
 
     table = spark_jvm().org.apache.iceberg.spark.Spark3Util.loadIcebergTable(

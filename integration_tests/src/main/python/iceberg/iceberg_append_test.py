@@ -18,7 +18,7 @@ import pytest
 from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
     collect_data_or_exception, \
     assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, is_not_utc
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
     assert_gpu_and_cpu_lineage_writes_are_equal, iceberg_format_versions, create_iceberg_table,
@@ -34,7 +34,7 @@ from iceberg import (
 from iceberg.defaults import (
     assert_iceberg_default_file_parity, assert_iceberg_gpu_writer,
     iceberg_default_file_snapshot, iceberg_file_hashes)
-from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
+from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides, iceberg_fast_test, incompat
 from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
 pytestmark = iceberg_unsupported_mark
@@ -209,6 +209,114 @@ def test_iceberg_v3_write_default_evolution(spark_tmp_table_factory):
             [(1, first_insert), (2, second_insert)], "generation INT, inserted BOOLEAN")
 
     assert_gpu_and_cpu_are_equal_collect(write, conf=conf)
+    with_cpu_session(lambda spark: assert_iceberg_default_file_parity(
+        spark, cpu_table, gpu_table), conf=conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("default_type", [
+    "int", "long", "decimal", "boolean", "float", "double",
+    pytest.param("date", marks=allow_non_gpu_conditional(
+        is_not_utc(), "ProjectExec", "Cast", "AnsiCast")),
+    pytest.param("timestamptz", marks=allow_non_gpu_conditional(
+        is_not_utc(), "ProjectExec", "Cast", "AnsiCast")),
+    pytest.param("binary", marks=pytest.mark.skipif(
+        is_iceberg_remote_catalog(),
+        reason="Remote catalogs can fail on binary initial defaults. "
+               "See https://github.com/NVIDIA/cudf-spark/issues/17078.")),
+    "struct"])
+@allow_non_gpu("LocalTableScanExec")
+def test_iceberg_write_default_types(spark_tmp_table_factory, default_type):
+    base = get_full_table_name(spark_tmp_table_factory)
+    cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
+    nested = default_type == "struct"
+    conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
+
+    def setup(spark):
+        jvm = spark._jvm
+        iceberg = jvm.org.apache.iceberg
+        types = iceberg.types.Types
+        # Type, initial/write defaults, SQL type/value, and independent expected read values.
+        cases = {
+            "int": (types.IntegerType.get(), 7, 19, "INT", "37", "7", "19", "37"),
+            "long": (types.LongType.get(), 5000000000, 6000000000, "BIGINT",
+                     "7000000000L", "5000000000", "6000000000", "7000000000"),
+            "decimal": (types.DecimalType.of(9, 2), jvm.java.math.BigDecimal("-12.34"),
+                        jvm.java.math.BigDecimal("23.45"), "DECIMAL(9,2)",
+                        "CAST(34.56 AS DECIMAL(9,2))", "-12.34", "23.45", "34.56"),
+            "boolean": (types.BooleanType.get(), True, False, "BOOLEAN", "TRUE",
+                        "true", "false", "true"),
+            "float": (types.FloatType.get(), 1.25, 2.5, "FLOAT", "CAST(3.75 AS FLOAT)",
+                      "1.25", "2.5", "3.75"),
+            "double": (types.DoubleType.get(), -2.5, 5.25, "DOUBLE", "CAST(7.5 AS DOUBLE)",
+                       "-2.5", "5.25", "7.5"),
+            "date": (types.DateType.get(), "2024-01-02", "2024-02-03", "DATE",
+                     "DATE '2024-03-04'", "2024-01-02", "2024-02-03", "2024-03-04"),
+            "timestamptz": (types.TimestampType.withZone(),
+                            "2024-11-03T01:30:00.123456-04:00",
+                            "2024-11-03T01:30:00.123456-05:00", "TIMESTAMP",
+                            "TIMESTAMP '2024-11-04T06:30:00.123456Z'",
+                            "1730611800123456", "1730615400123456", "1730701800123456"),
+            "binary": (types.BinaryType.get(),
+                       jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2])),
+                       jvm.java.nio.ByteBuffer.wrap(bytearray([3, 4])), "BINARY", "X'0506'",
+                       "0102", "0304", "0506")}
+        case = cases["int" if nested else default_type]
+        iceberg_type, initial, current, *_ = case
+        for table in (cpu_table, gpu_table):
+            columns = "id BIGINT, s STRUCT<kept: BIGINT>" if nested else "id BIGINT"
+            spark.sql(f"CREATE TABLE {table} ({columns}) USING ICEBERG "
+                      f"{iceberg_table_properties_sql('3')}")
+            old_rows = "(1L, named_struct('kept', 10L)), (5L, NULL)" if nested else "(1L)"
+            spark.sql(f"INSERT INTO {table} VALUES {old_rows}")
+            target = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, table)
+            initial_literal = iceberg.expressions.Literal.of(initial).to(iceberg_type)
+            update = target.updateSchema()
+            if nested:
+                update.addColumn("s", "value", iceberg_type, initial_literal).commit()
+            else:
+                update.addColumn("value", iceberg_type, initial_literal).commit()
+            target.updateSchema().updateColumnDefault(
+                "s.value" if nested else "value",
+                iceberg.expressions.Literal.of(current).to(iceberg_type)).commit()
+            spark.catalog.refreshTable(table)
+        visible = not nested and "CURRENT_DEFAULT" in spark.table(cpu_table).schema["value"].metadata
+        return case, visible
+
+    case, catalog_has_default = with_cpu_session(setup)
+    _, _, _, sql_type, explicit, initial_expected, write_expected, explicit_expected = case
+
+    def append_and_read(spark):
+        table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
+        null = f"CAST(NULL AS {sql_type})"
+        values = (f"(2L, named_struct('kept', 20L, 'value', {explicit})), "
+                  f"(3L, named_struct('kept', 30L, 'value', {null}))" if nested else
+                  f"(2L, {explicit}), (3L, {null})")
+        assert_iceberg_gpu_writer(
+            spark, lambda: spark.sql(f"INSERT INTO {table} VALUES {values}").collect(),
+            "GpuAppendDataExec")
+        failed, _ = collect_data_or_exception(
+            lambda: spark.sql(f"INSERT INTO {table} (id) VALUES (4L)").collect(),
+            "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA")
+        value = "s.value" if nested else "value"
+        projection = (f"hex({value})" if default_type == "binary" else
+                      f"CAST(unix_micros({value}) AS STRING)" if default_type == "timestamptz" else
+                      f"CAST({value} AS STRING)")
+        kept = "s.kept" if nested else "CAST(NULL AS BIGINT)"
+        result = spark.sql(f"SELECT id, {projection} AS actual, {kept} AS kept, "
+                           f"{str(not failed).lower()} AS omitted FROM {table} ORDER BY id")
+        expected = [(1, initial_expected, 10 if nested else None),
+                    (2, explicit_expected, 20 if nested else None),
+                    (3, None, 30 if nested else None)]
+        if nested:
+            expected.append((5, None, None))
+        if not failed:
+            expected.append((4, write_expected if catalog_has_default else None, None))
+        assert result.collect() == [row + (not failed,) for row in sorted(expected)]
+        return result
+
+    assert_gpu_and_cpu_are_equal_collect(append_and_read, conf=conf)
     with_cpu_session(lambda spark: assert_iceberg_default_file_parity(
         spark, cpu_table, gpu_table), conf=conf)
 
