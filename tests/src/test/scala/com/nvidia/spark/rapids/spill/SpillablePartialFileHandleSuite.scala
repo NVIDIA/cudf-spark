@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.spill
 
 import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
+import java.util.concurrent.{FutureTask, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import com.nvidia.spark.rapids.Arm.withResource
@@ -262,6 +263,32 @@ class SpillablePartialFileHandleSuite
       
       assert(bytesRead == testData.length)
       assert(readBuffer.sameElements(testData))
+    }
+  }
+
+  test("commit waits for an in-progress spill and writes the file if it still needs spilling") {
+    val file = File.createTempFile("commit-during-spill", ".tmp")
+    withResource(SpillablePartialFileHandle.createMemoryWithSpill(
+        1024, testMaxBufferSize, 1.0, file, retainRecords = true)) { handle =>
+      handle.write(42)
+      handle.finishWrite()
+      val commit = new FutureTask[Long](() => handle.spillForCommit())
+      val thread = new Thread(commit)
+      handle.synchronized { setSpillInProgress(handle, true) }
+      thread.start()
+      try {
+        waitUntil(thread.getState == Thread.State.WAITING || commit.isDone,
+          "commit thread did not reach the concurrent spill")
+        assert(!commit.isDone)
+      } finally {
+        handle.synchronized {
+          setSpillInProgress(handle, false)
+          handle.notifyAll()
+        }
+        thread.join(5000)
+      }
+      assert(commit.get(5, TimeUnit.SECONDS) == 1L)
+      assert(java.nio.file.Files.readAllBytes(file.toPath).sameElements(Array[Byte](42)))
     }
   }
 

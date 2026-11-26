@@ -563,7 +563,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     assert(GpuShuffleEnv.getMultithreadedCatalog.isEmpty)
     val batches = 128
     val writersCreated = new AtomicInteger()
-    val inputExhausted = new AtomicBoolean()
+    val firstBatchFinished = new CountDownLatch(1)
     val finalized = new AtomicInteger()
     shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
       conf, blockManager, blockResolver) {
@@ -581,7 +581,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
               assert(handle.isMemoryBased && !handle.isSpilled)
               if (reducePartitionId == 0) {
                 assert(handle.approxSizeInBytes == 0,
-                  "Heap records must not reserve native partial-buffer capacity")
+                  "An open batch must not register unfinished segments")
               }
             } else {
               assert(index == batches && handle.isFileOnly)
@@ -603,9 +603,9 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
           }
 
           override def finishWritePhase(): Unit = {
-            assert(inputExhausted.get(), "Batch finalization moved before input exhaustion")
-            finalized.incrementAndGet()
             super.finishWritePhase()
+            finalized.incrementAndGet()
+            if (index == 0) firstBatchFinished.countDown()
           }
         }
       }
@@ -614,12 +614,14 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     try {
       val records = createTestRecords(Iterator.fill(batches)(Seq(0, 1)).flatten)
       writer.write(new Iterator[(Int, ColumnarBatch)] {
-        override def hasNext: Boolean = {
-          val more = records.hasNext
-          if (!more) inputExhausted.set(true)
-          more
+        private var emitted = 0
+        override def hasNext: Boolean = records.hasNext
+        override def next(): (Int, ColumnarBatch) = {
+          // The third record starts batch 1. Batch 0 can finish before input is exhausted.
+          if (emitted == 3) assert(firstBatchFinished.await(10, TimeUnit.SECONDS))
+          emitted += 1
+          records.next()
         }
-        override def next(): (Int, ColumnarBatch) = records.next()
       })
       writer.stop(true)
       verifyWrite(writer, batches * 2, Set(0, 1))

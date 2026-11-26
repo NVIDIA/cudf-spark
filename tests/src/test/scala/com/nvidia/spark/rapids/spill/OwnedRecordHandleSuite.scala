@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.spill
 import java.io.IOException
 import java.nio.file.Files
 
+import ai.rapids.cudf.{PageableMemoryPool, PinnedMemoryPool}
 import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
@@ -64,7 +65,7 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
       handle.writeRecord(second)
       first.close()
       second.close()
-      assert(handle.host.get.capacity == expected.length)
+      assert(handle.host.get.capacity == 5L * segment)
       handle.finishWrite()
       for (offset <- Seq(0, a.length - 2, a.length, expected.length - 1)) {
         val actual = new Array[Byte](expected.length - offset)
@@ -107,7 +108,7 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   for (retain <- Seq(false, true)) {
-    test(s"native pressure applies only to contiguous native buffers: retain=$retain") {
+    test(s"memory pressure during writes and after completion: retain=$retain") {
       HostAlloc.initialize(4096)
       try {
         withResource(SpillablePartialFileHandle.createMemoryWithSpill(
@@ -123,8 +124,9 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
             h.writeRecord(record(Array[Byte](7, 8, 9), segment = 3))
             assert(h.isSpilled == !retain)
             h.finishWrite()
-            assert(SpillFramework.stores.hostStore.spill(Long.MaxValue) == 0)
             assert(h.isSpilled == !retain)
+            assert(SpillFramework.stores.hostStore.spill(Long.MaxValue) == (if (retain) 9 else 0))
+            assert(h.isSpilled)
             val actual = new Array[Byte](9)
             assert(h.read(actual, 0, actual.length) == actual.length)
             assert(actual.sameElements(Array[Byte](1, 2, 3, 4, 5, 6, 7, 8, 9)))
@@ -137,6 +139,35 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
+  test("HostAlloc can reclaim completed segments at their allocated capacity") {
+    val segment = 8192
+    val store = SpillFramework.stores.hostStore
+    HostAlloc.initialize(2L * segment)
+    try {
+      withResource(create(Files.createTempFile("owned-reclaim", ".bin").toFile)) { handle =>
+        handle.writeRecord(record(Array[Byte](1), segment))
+        handle.writeRecord(record(Array[Byte](2), segment))
+        assert(store.totalSize == 0 && store.spill(segment) == 0)
+        handle.finishWrite()
+        handle.finishWrite()
+        assert(store.totalSize == 2L * segment && !handle.isSpilled)
+        // Preallocated pools can satisfy the next allocation independently of the raw limit.
+        if (PinnedMemoryPool.getTotalPoolSizeBytes > 0 ||
+            PageableMemoryPool.getTotalPoolSizeBytes > 0) {
+          assert(store.spill(segment) == 2L * segment)
+        }
+        withResource(HostAlloc.alloc(segment, false)) { _ =>
+          assert(handle.isSpilled && store.totalSize == 0)
+          val result = new Array[Byte](2)
+          assert(handle.readAt(0, result, 0, result.length) == 2)
+          assert(result.sameElements(Array[Byte](1, 2)))
+        }
+      }
+    } finally {
+      HostAlloc.initialize(-1)
+    }
+  }
+
   test("failed explicit spill preserves records and permits retry") {
     val path = Files.createTempDirectory("owned-spill-failure")
     withResource(create(path.toFile, max = 3)) { h =>
@@ -145,7 +176,7 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
       h.finishWrite()
       intercept[IOException](h.spillForCommit())
       assert(!h.isSpilled)
-      assert(SpillFramework.stores.hostStore.totalSize == 0)
+      assert(SpillFramework.stores.hostStore.totalSize == 10)
       Files.delete(path)
       assert(h.spillForCommit() == 4)
       val actual = new Array[Byte](4)

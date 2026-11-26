@@ -53,11 +53,14 @@ private[spill] final class OwnedRecordBuffer extends PartialFileBuffer {
   private case class Record(start: Long, data: OwnedBuffer)
   private val records = new ArrayList[Record]()
   private var size = 0L
-  override def capacity: Long = size
+  private var allocatedBytes = 0L
+  override def capacity: Long = allocatedBytes
 
   /** Transfer ownership on success. On exception, the caller still owns data. */
   def append(data: OwnedBuffer): Unit = {
+    val recordCapacity = data.getCapacity
     records.add(Record(size, data))
+    allocatedBytes += recordCapacity
     size += data.getCount
   }
 
@@ -103,5 +106,6 @@ private[spill] final class OwnedRecordBuffer extends PartialFileBuffer {
     records.forEach(_.data.close())
     records.clear()
     size = 0L
+    allocatedBytes = 0L
   }
 }

@@ -49,7 +49,7 @@ private[rapids] final class ClosedPartialFileHandleException
  * This handle is designed for scenarios where:
  * 1. When memory is scarce (usage > threshold), use file-based storage directly
  * 2. When memory is sufficient, use host memory buffer with automatic spill support
- * Transferred segments stay in memory until an explicit spill, commit, or close.
+ * Completed record segments become eligible for host memory pressure spills.
  *
  * Features:
  * - Unified write/read interface regardless of storage mode
@@ -90,7 +90,9 @@ class SpillablePartialFileHandle private (
   // State management
   @volatile private var spilledToDisk: Boolean = false
   override private[spill] var host: Option[PartialFileBuffer] = None
-  override val approxSizeInBytes: Long = if (retainRecords) 0L else initialCapacity
+  // Keep this value stable from host-store registration through removal.
+  @volatile private var trackedCapacity: Long = if (retainRecords) 0L else initialCapacity
+  override def approxSizeInBytes: Long = trackedCapacity
 
   // Capacity and expansion apply only to the native buffer used by ordinary stream writers.
   private var currentBufferCapacity: Long = if (retainRecords) 0L else initialCapacity
@@ -137,7 +139,7 @@ class SpillablePartialFileHandle private (
       }
       host = Some(buffer)
       this.taskPriority = priority
-      // The handle adopts existing segments. Keep them in memory until explicit spill or close.
+      // Register owned segments once their final allocated capacity is known.
       if (!retainRecords) SpillFramework.stores.hostStore.trackNoSpill(this)
     } catch {
       case e: Exception =>
@@ -434,6 +436,12 @@ class SpillablePartialFileHandle private (
         return
       }
 
+      host match {
+        case Some(records: OwnedRecordBuffer) if records.capacity > 0 =>
+          trackedCapacity = records.capacity
+          SpillFramework.stores.hostStore.trackNoSpill(this)
+        case _ =>
+      }
       writeFinished = true
       totalBytesWritten = writePosition
       protectedFromSpill = false
@@ -630,7 +638,6 @@ class SpillablePartialFileHandle private (
 
   /**
    * Override spillable to add write phase protection and actual state checks.
-   * Since approxSizeInBytes is now a fixed val, we need to check actual state here.
    * No lock needed: protectedFromSpill is volatile.
    */
   override private[spill] def spillable: Boolean = {
@@ -665,7 +672,7 @@ class SpillablePartialFileHandle private (
    *
    * @param commit if true, the spill is happening due to a shuffle commit phase
    *               do not track the time/bytes in our spill metric.
-   * @return the number of bytes written to disk, or 0 if spilling was skipped
+   * @return file bytes for commit, reclaimable bytes for a pressure spill, or 0 if skipped
    */
   private def spillInternal(commit: Boolean): Long = {
     if (storageMode != PartialFileStorageMode.MEMORY_WITH_SPILL) {
@@ -674,6 +681,11 @@ class SpillablePartialFileHandle private (
 
     // Check all conditions under lock (following SpillFramework pattern)
     val bufferToSpill = synchronized {
+      // Commit needs a complete file. A concurrent pressure spill may still be writing it,
+      // or may fail and leave this thread responsible for writing it.
+      while (commit && spillInProgress) {
+        wait()
+      }
       if (spilledToDisk || spillInProgress || !writeFinished) {
         return 0L
       }
@@ -726,7 +738,8 @@ class SpillablePartialFileHandle private (
       logDebug(s"Spilled to ${file.getAbsolutePath} " +
         s"($totalBytesWritten bytes)")
 
-      totalBytesWritten
+      // Commit reports file bytes. A host-store spill reports the capacity it released.
+      if (retainRecords && !commit) trackedCapacity else totalBytesWritten
     }
   }
 
@@ -1021,8 +1034,8 @@ object SpillablePartialFileHandle extends Logging {
    * Create a memory-with-spill handle.
    * Ordinary writes use a native buffer that expands up to maxBufferSize and can spill
    * under native memory pressure. With retainRecords, the handle takes ownership of existing
-   * host segments without expanding a partial buffer or triggering a spill. Both
-   * representations support explicit spill and commit.
+   * host segments without expanding a partial buffer or triggering a spill. After the writer
+   * finishes, host memory pressure can spill the completed segments.
    *
    * @param initialCapacity Initial off-heap allocation when retainRecords is false
    * @param maxBufferSize Maximum native buffer size before spilling; ignored for owned records

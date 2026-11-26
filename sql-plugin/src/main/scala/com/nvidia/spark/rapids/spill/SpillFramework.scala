@@ -160,7 +160,7 @@ trait StoreHandle extends AutoCloseable {
    * - If approxSizeInBytes  is 0, the object is tracked by the stores so it can be
    *   removed on shutdown, or by handle.close, but 0-byte handles are not spillable.
    */
-  val approxSizeInBytes: Long
+  def approxSizeInBytes: Long
 
   /**
    * This is used to resolve races between closing a handle and spilling.
@@ -220,8 +220,7 @@ trait SpillableHandle extends StoreHandle with Logging {
    * produce any false negatives.
    *
    * @note At the level of `SpillableHandle`, the only requirement of spillability
-   *       is that the size of the handle is > 0. `approxSizeInBytes` is known at
-   *       construction, and is immutable.
+   *       is that the size of the handle is > 0. The size must remain stable while tracked.
    * @return true if currently spillable, false otherwise
    */
   private[spill] def spillable: Boolean = approxSizeInBytes > 0

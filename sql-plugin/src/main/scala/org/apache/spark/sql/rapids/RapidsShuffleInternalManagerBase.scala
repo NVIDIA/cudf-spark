@@ -409,6 +409,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         while (keepDraining && !completionFuture.isDone) {
           currentWorkState match {
             case Complete =>
+              writer match {
+                case rapids: RapidsLocalDiskShuffleMapOutputWriter => rapids.finishWritePhase()
+                case _ =>
+              }
               completionFuture.complete(null)
               keepDraining = false
             case NotReady =>
@@ -427,10 +431,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
               partitionRecords.remove(currentPartitionToWrite)
               currentPartitionToWrite += 1
           }
-        }
-
-        if (currentPartitionToWrite >= numPartitions) {
-          completionFuture.complete(null)
         }
       } catch {
         case ee: ExecutionException => fail(ee.getCause)
@@ -1133,8 +1133,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
   (SpillablePartialFileHandle, Array[Long]) = {
     writer match {
       case rapidsWriter: RapidsLocalDiskShuffleMapOutputWriter =>
-        // finishWritePhase() will enable spill
-        rapidsWriter.finishWritePhase()
         val handle = rapidsWriter.getPartialFileHandle().getOrElse {
           throw new IllegalStateException("RAPIDS writer should have a handle")
         }
