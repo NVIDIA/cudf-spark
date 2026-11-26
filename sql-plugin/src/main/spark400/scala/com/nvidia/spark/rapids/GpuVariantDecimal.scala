@@ -22,8 +22,8 @@ package com.nvidia.spark.rapids
 
 import java.math.BigInteger
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table, VariantOperationResult,
-  VariantOperationStatus, VariantUtils}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table, VariantOperationStatus,
+  VariantUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.sql.types.DecimalType
@@ -48,7 +48,7 @@ private[rapids] object GpuVariantDecimal {
 
   /** Returns an owning GPU column, or None so the caller can fall back after extraction closes. */
   def decode(
-      extraction: VariantOperationResult,
+      extraction: GpuVariantExtraction.Extraction,
       target: DecimalType): Option[ColumnVector] = {
     require(isSupportedTargetType(target), s"unsupported Variant decimal target: $target")
     // One guard digit preserves HALF_UP despite native truncation. At scale38 every valid
@@ -58,7 +58,12 @@ private[rapids] object GpuVariantDecimal {
     val nativeType = DType.create(DType.DTypeEnum.DECIMAL128, -guardScale)
     withResource(VariantUtils.castVariantValueWithStatus(
         extraction.getValue, nativeType, extraction.getStatus)) { decoded =>
-      if (!GpuVariantExtraction.allRowsCovered(extraction.getStatus, decoded.getStatus) ||
+      // Unlike the other targets, every row with a non-null parent must decode. A missing path
+      // or an encoded Variant null falls back, so that an object with unsorted or out-of-range
+      // field ids raises Spark's error instead of returning NULL. The shared coverage check
+      // then adds the Variant constructor check.
+      if (decoded.getValue.getNullCount != extraction.parentNullCount ||
+          !GpuVariantGet.isCovered(extraction, decoded.getValue) ||
           !isValidDecimal(extraction, decoded.getValue, intermediate)) {
         // The guard scale may have overflowed even though Spark can return a valid result.
         // Fall back to preserve Spark coercions and decimal-payload errors.
@@ -86,7 +91,7 @@ private[rapids] object GpuVariantDecimal {
   }
 
   private def isValidDecimal(
-      extraction: VariantOperationResult,
+      extraction: GpuVariantExtraction.Extraction,
       guard: ColumnView,
       intermediate: DecimalType): Boolean = {
     withResource(withResource(sourcePrecisions(extraction.getValue)) { precision =>
@@ -217,6 +222,8 @@ private[rapids] object GpuVariantDecimal {
     }
   }
 
+  // True when every row passed the decimal checks or has a SQL-null parent. This does not rely
+  // on the caller's coverage check: any other row the decoder left null counts as invalid.
   private def allRowsValid(valid: ColumnView, extractionStatus: ColumnView): Boolean = {
     withResource(Scalar.fromBool(false)) { invalid =>
       withResource(valid.replaceNulls(invalid)) { nonNullValid =>

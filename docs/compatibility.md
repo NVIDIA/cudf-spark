@@ -450,23 +450,27 @@ expression bridge are enabled. Strict `variant_get` and negative-scale decimal t
 remain on the CPU.
 
 For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQL null for
-final target overflow. SQL-null parent rows do not require runtime CPU fallback.
-Other source representations,
-including integer, string, boolean, and floating-point values, are converted by Spark through
-the CPU bridge. A missing path or encoded Variant null also uses that bridge: the native
-status alone cannot establish Spark's error behavior for malformed paths. Any row requiring
-the bridge sends the entire input batch through CPU evaluation, even when the surrounding
-plan contains `GpuVariantGet`. Temporary extraction and decoding columns are released before
-CPU conversion.
+final target overflow. Other source representations, including integer, string, boolean, and
+floating-point values, are converted by Spark through the CPU bridge.
+
+SQL-null parents stay on the GPU for every target, and missing paths and encoded Variant
+nulls do for every target except decimal. For decimal targets, a missing path or encoded
+Variant null uses the bridge, so that malformed object field ids raise Spark's error.
+Malformed bytes that extraction reports, rows that Spark's Variant constructor rejects, and
+path steps that meet a primitive type ID Spark does not recognize use the bridge so that Spark
+raises its error. Any row requiring the bridge sends the entire input batch through CPU
+evaluation, even when the surrounding plan contains `GpuVariantGet`. Temporary extraction and
+decoding columns are released before CPU conversion.
 
 Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
 intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
 Values outside that intermediate range fall back even if the final target could hold them;
 for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
 Width-specific decimal payload precision and scale are checked, but these checks do not
-validate the entire Variant path.
-As with boolean, integer, floating-point, and string extraction, malformed or noncanonical
-object/metadata encodings may therefore differ from Spark; incompatible-operation gating
+validate the entire Variant path. For targets other than decimal, object field ids that are
+unsorted or outside the metadata dictionary, which the Variant spec forbids, can return SQL
+null where Spark returns a value or raises an error. Malformed or noncanonical object and
+metadata encodings may also differ from Spark for any target; incompatible-operation gating
 remains in place.
 
 ## Parquet

@@ -188,6 +188,63 @@ def test_variant_cpu_rows_convert_to_gpu():
 
 
 @incompat
+@allow_non_gpu('RDDScanExec')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('value,metadata,error', [
+    pytest.param(b'', b'\x01\x00\x00', 'MALFORMED_VARIANT', id='empty-value'),
+    # cuDF checks the metadata only for object keys. Spark rejects version 2 for any path.
+    pytest.param(b'\x03\x01\x00\x02\x0c\x01', b'\x02\x00\x00', 'MALFORMED_VARIANT',
+                 id='bad-metadata-version'),
+    # cuDF reports MISSING_PATH when a path step meets a type ID that Spark does not recognize.
+    # The GPU checks the root and path prefixes of missing rows for such headers and falls back.
+    pytest.param(b'\xfc', b'\x01\x00\x00', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT',
+                 id='unknown-primitive'),
+    pytest.param(b'\x44' + b'\x00' * 8, b'\x01\x00\x00', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT',
+                 id='unknown-primitive-17'),
+])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_malformed_input_preserves_error(value, metadata, error):
+    from pyspark.sql.types import VariantVal
+
+    def do_it(spark, require_gpu=False):
+        # Local rows preserve the encoded bytes without a Parquet writer validating them.
+        # Spark throws for malformed bytes even in try_variant_get.
+        df = spark.createDataFrame(
+            [(VariantVal(value, metadata),)], 'v variant').selectExpr(
+                "try_variant_get(v, '$[0]', 'bigint') AS x")
+        if require_gpu:
+            # The validate_execs marker checks plan nodes only; this helper also checks
+            # expressions. Assert before collection, which is expected to fail.
+            spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+                df._jdf, 'GpuVariantGet')
+        return df.collect()
+
+    conf = {'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.incompatibleOps.enabled': 'true'}
+    assert_spark_exception(lambda: with_cpu_session(do_it, conf=conf), error)
+    assert_spark_exception(
+        lambda: with_gpu_session(lambda spark: do_it(spark, require_gpu=True), conf=conf), error)
+
+
+@incompat
+@allow_non_gpu('RDDScanExec')
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_array_statuses_and_coercions():
+    from pyspark.sql.types import VariantVal
+
+    rows = [(i, VariantVal.parseJson(json) if json is not None else None)
+            for i, json in enumerate(['[7]', '[]', '[null]', None, '["42"]', '["bad"]'])]
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.createDataFrame(rows, 'id int, v variant').selectExpr(
+            'id', "try_variant_get(v, '$[0]', 'bigint') AS x"),
+        exist_classes='GpuRowToColumnarExec,GpuVariantGet',
+        conf={'spark.sql.adaptive.enabled': 'false'},
+        require_non_empty=True)
+
+
+@incompat
 @allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
@@ -533,6 +590,34 @@ def test_parquet_variant_try_get_null_and_missing_fields(spark_tmp_path):
             "try_variant_get(v, '$.missing', 'string') AS missing",
             "try_variant_get(v, '$.n.inner', 'string') AS nested",
             "try_variant_get(v, '$.scalar.inner', 'int') AS scalar_nested"),
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_with_non_ascii_keys(spark_tmp_path):
+    # Spark sorts object keys in UTF-16 order and cuDF searches them in UTF-8 byte order. The two
+    # orders differ only among non-ASCII keys, and every ASCII key sorts before them in both, so a
+    # lookup by a supported (ASCII) path finds the same field as Spark.
+    data_path = spark_tmp_path + '/VARIANT_NON_ASCII_KEYS_PARQUET'
+
+    def write_data(spark):
+        spark.sql("""
+          SELECT parse_json(json) AS v
+          FROM VALUES
+            ('{"\\uFF21":2,"\\uD83D\\uDE00":1,"id":3,"z":{"\\uFFFD":0,"\\uD800\\uDC00":1,"id":4}}'),
+            ('{"\\uD83D\\uDE00":1,"\\uFF21":2}'),
+            ('{"id":5,"\\uFF49\\uFF44":6,"z":{"\\uD83D\\uDE00":7}}')
+          AS source(json)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write_data)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.id', 'bigint') AS id",
+            "try_variant_get(v, '$.z.id', 'int') AS nested_id",
+            "try_variant_get(v, '$.missing', 'string') AS missing"),
         conf=_variant_parquet_conf)
 
 
