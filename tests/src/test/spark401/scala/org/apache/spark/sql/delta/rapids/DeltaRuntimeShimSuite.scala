@@ -26,13 +26,13 @@ import java.util
 import scala.annotation.nowarn
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.rapids.{GpuOverrides, RapidsConf, SparkQueryCompareTestSuite, TestUtils}
+import com.nvidia.spark.rapids.{GpuOverrides, RapidsConf, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.{SPARK_VERSION, SparkConf, SparkException}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{Dataset, Row, SaveMode}
+import org.apache.spark.sql.{Dataset, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
@@ -47,6 +47,7 @@ import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
@@ -515,7 +516,23 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
         .set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .set("spark.sql.warehouse.dir", warehouseDir.getAbsolutePath)
-      TestUtils.withGpuSparkSession(conf) { spark =>
+      // Build a dedicated session for static catalog/warehouse configs while still honoring
+      // SPARK_CONF (e.g., spark.plugins= on CPU-only runners).
+      TrampolineUtil.cleanupAnyExistingSession()
+      val builder = SparkSession.builder()
+        .master("local[1]")
+        .config(conf)
+        .config(RapidsConf.SQL_ENABLED.key, "true")
+        .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
+        .appName(classOf[DeltaRuntimeShimSuite].getSimpleName)
+      Option(System.getenv("SPARK_CONF")).foreach { raw =>
+        raw.split(",").filter(_.contains("=")).foreach { entry =>
+          val parts = entry.split("=", 2)
+          builder.config(parts(0), parts(1))
+        }
+      }
+      val spark = builder.getOrCreate()
+      try {
         val catalogObj = spark.sessionState.catalogManager.catalog("spark_catalog")
         assert(catalogObj.isInstanceOf[DeltaCatalog],
           s"Expected DeltaCatalog for spark_catalog, got ${catalogObj.getClass.getName}")
@@ -566,6 +583,9 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
           spark.sql(s"DROP TABLE IF EXISTS default.$cpuName")
           spark.sql(s"DROP TABLE IF EXISTS default.$gpuName")
         }
+      } finally {
+        spark.stop()
+        TrampolineUtil.cleanupAnyExistingSession()
       }
     }
   }

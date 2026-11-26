@@ -340,7 +340,7 @@ run_delta_lake_tests() {
 
   if [[ $SPARK_VER =~ $SPARK_414_PATTERN ]]; then
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
-      DELTA_LAKE_VERSIONS="4.2.0 4.3.0"
+      DELTA_LAKE_VERSIONS="4.2.0 4.3.1"
     else
       echo "Skipping Delta Lake 4.2/4.3 tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
     fi
@@ -412,7 +412,7 @@ run_delta_lake_uc_tests() {
     test_parallel=1
   fi
 
-  # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
+  # These conditions mirror the Delta Lake 4.2.0 and 4.3.x (4.3.0/4.3.1) rows of run_delta_lake_tests above:
   # those versions are only exercised on Scala 2.13 with Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4.
   # They are repeated rather than read from DELTA_LAKE_VERSIONS because that variable is assigned
   # inside run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs.
@@ -726,7 +726,7 @@ if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
   run_delta_lake_tests
 fi
 DELTA_43_UC_VERSION="4.3.0"
-if [[ "$SPARK_VER" == "4.1.1" ]]; then
+if [[ "$SPARK_VER" == "4.1.1" || "$SPARK_VER" == "4.1.4" ]]; then
   DELTA_43_UC_VERSION="4.3.1"
 fi
 if [[ "$TEST_MODE" == "DEFAULT" ]]; then

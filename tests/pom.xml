@@ -445,6 +445,9 @@
             <properties>
                 <delta.test.spark.artifactId>${delta43x.spark.artifactId}</delta.test.spark.artifactId>
                 <delta.test.version>${delta43x.version}</delta.test.version>
+                <!-- Empty by default so local and Blossom serial/parallel GPU runs keep SQLPlugin
+                     enabled; CPU-only GitHub Actions overrides with -Ddelta43.spark.plugins="spark.plugins= ," -->
+                <delta43.spark.plugins/>
                 <parallelSparkConfs>spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</parallelSparkConfs>
                 <parallelExtraJvmArgs>-Drapids.test.delta43.version=${delta.test.version}</parallelExtraJvmArgs>
             </properties>
@@ -458,7 +461,7 @@
                                 <rapids.test.delta43.version>${delta.test.version}</rapids.test.delta43.version>
                             </systemProperties>
                             <environmentVariables>
-                                <SPARK_CONF>spark.plugins= ,spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</SPARK_CONF>
+                                <SPARK_CONF>${delta43.spark.plugins}spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</SPARK_CONF>
                             </environmentVariables>
                         </configuration>
                     </plugin>
