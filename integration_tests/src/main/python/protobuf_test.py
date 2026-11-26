@@ -1000,12 +1000,68 @@ def _build_nested_empty_message_field_descriptor_set_bytes(spark):
     ])
 
 
+def _build_empty_root_descriptor_set_bytes(spark):
+    """Roots Spark turns into an empty schema, either directly or after dropping every field."""
+    return _build_proto2_descriptor(spark, "empty_root.proto", [
+        _msg("Empty", []),
+        _msg("OnlyEmpty", [
+            _field("e", 1, "MESSAGE", type_name=".test.Empty"),
+        ]),
+    ])
+
+
+def _build_wrapper_required_empty_descriptor_set_bytes(spark):
+    """Wrapper only holds a required empty message, so an absent one is malformed."""
+    return _build_proto2_descriptor(spark, "wrapper_required_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Wrapper", [
+            _field("empty", 1, "MESSAGE", label="required", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("wrapper", 2, "MESSAGE", type_name=".test.Wrapper"),
+        ]),
+    ])
+
+
+def _build_nested_required_empty_descriptor_set_bytes(spark):
+    """A visible Child with a required empty message field Spark drops from its schema."""
+    return _build_proto2_descriptor(spark, "nested_required_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", label="required", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", type_name=".test.Child"),
+        ]),
+    ])
+
+
+def _build_repeated_nested_empty_message_descriptor_set_bytes(spark):
+    """A repeated message whose element hides an empty message, so the list child is trimmed."""
+    return _build_proto2_descriptor(spark, "repeated_nested_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", label="repeated", type_name=".test.Child"),
+        ]),
+    ])
+
+
 def _empty_label(label):
     return lambda spark: _build_empty_message_field_descriptor_set_bytes(spark, label)
 
 
-_empty_nested_row = _encode_length_delimited_field(
-    2, _encode_varint_field(1, 9) + _encode_length_delimited_field(2, b""))
+_empty_nested_child = _encode_varint_field(1, 9) + _encode_length_delimited_field(2, b"")
+_empty_nested_row = _encode_length_delimited_field(2, _empty_nested_child)
+_repeated_nested_row = _encode_length_delimited_field(2, _empty_nested_child) * 2
+_wrapper_row = _encode_length_delimited_field(2, _encode_length_delimited_field(1, b""))
 
 # Shapes of empty-message fields Spark omits from its schema, with a row that carries them.
 _empty_message_cases = [
@@ -1028,6 +1084,11 @@ _empty_message_cases = [
                  _encode_length_delimited_field(
                      2, _encode_varint_field(1, 9) + _encode_varint_field(2, 1)),
                  id="nested_wrong_wire_type"),
+    # A repeated message element hides a field, so the trimming walks into the list child.
+    pytest.param(_build_repeated_nested_empty_message_descriptor_set_bytes,
+                 _repeated_nested_row, id="repeated_nested_two"),
+    pytest.param(_build_repeated_nested_empty_message_descriptor_set_bytes, b"",
+                 id="repeated_nested_empty"),
 ]
 
 
@@ -1644,12 +1705,40 @@ _malformed_cases = [
                     _encode_varint_field(1, 8) + _encode_length_delimited_field(
                         2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
                             2, _encode_tag(1, 7)))),
-    _malformed_case("invalid_wire_type_in_wrapper_empty_message",
+    _malformed_case("truncated_varint_in_repeated_nested_empty_message",
+                    _build_repeated_nested_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _repeated_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 0) + _MALFORMED_VARINT))),
+    _malformed_case("invalid_wire_type_in_repeated_nested_empty_message",
+                    _build_repeated_nested_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _repeated_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 7)))),
+    # Bytes inside the hidden Wrapper itself, and inside the Empty nested below it. The second
+    # one only fails when the whole omitted subtree is registered with the decoder.
+    _malformed_case("invalid_wire_type_in_wrapper",
                     _build_wrapper_empty_message_descriptor_set_bytes, "Root",
-                    _encode_varint_field(1, 7) + _encode_length_delimited_field(
-                        2, _encode_length_delimited_field(1, b"")),
+                    _encode_varint_field(1, 7) + _wrapper_row,
                     _encode_varint_field(1, 8) + _encode_length_delimited_field(
                         2, _encode_tag(1, 7))),
+    _malformed_case("invalid_wire_type_in_wrapper_empty",
+                    _build_wrapper_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _wrapper_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_length_delimited_field(1, _encode_tag(1, 7)))),
+    # A required empty message below a hidden parent and below a visible one.
+    _malformed_case("missing_required_empty_in_wrapper",
+                    _build_wrapper_required_empty_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _wrapper_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(2, b"")),
+    _malformed_case("missing_required_empty_in_child",
+                    _build_nested_required_empty_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _empty_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9))),
 ]
 
 
@@ -1834,6 +1923,11 @@ _fallback_cases = [
     _fallback_case("nested_oneof_member", _build_oneof_descriptor_set_bytes, "OuterChoice",
                    _encode_length_delimited_field(1, _oneof_child) + _encode_varint_field(2, 9),
                    ["child.int_value", "sibling"]),
+    # The decoder cannot build a struct without children, so a message Spark reads as an
+    # empty schema stays on the CPU.
+    _fallback_case("empty_root_message", _build_empty_root_descriptor_set_bytes, "Empty", b""),
+    _fallback_case("root_with_only_empty_message", _build_empty_root_descriptor_set_bytes,
+                   "OnlyEmpty", _encode_length_delimited_field(1, b"")),
     # Groups decode to structs like messages, but use their own wire types.
     _fallback_case("group_field", _build_group_descriptor_set_bytes, "WithGroup",
                    _encode_varint_field(1, 7) + _encode_tag(2, 3) + _encode_varint_field(1, 9) +

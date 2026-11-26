@@ -126,9 +126,11 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       location: String): Either[String, Seq[ProtobufFieldDescriptor]] =
     Try {
       val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
-      val (hidden, unsupported) = omitted.partition(emptyMessageField(desc, _).isDefined)
-      Either.cond(unsupported.isEmpty, hidden.flatMap(emptyMessageField(desc, _)),
-        s"$location has fields missing from the Spark schema: ${unsupported.mkString(", ")}")
+        .map(name => name -> emptyMessageField(desc, name))
+      val (hidden, unsupported) = omitted.partition(_._2.isDefined)
+      Either.cond(unsupported.isEmpty, hidden.flatMap(_._2),
+        s"$location has fields missing from the Spark schema: " +
+          unsupported.map(_._1).mkString(", "))
     }.toEither.left.map { t =>
       s"Failed to read protobuf metadata for $location: ${t.getMessage}"
     }.flatMap(identity)
@@ -251,7 +253,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     override lazy val fieldNames: Seq[String] = ProtobufReflection.getFieldNames(raw)
 
     override lazy val fullName: String =
-      Try(ProtobufReflection.invoke0[String](raw, "getFullName")).getOrElse("")
+      ProtobufReflection.invoke0[String](raw, "getFullName")
   }
 
   private final class ReflectiveFieldDescriptor(raw: AnyRef) extends ProtobufFieldDescriptor {
@@ -262,8 +264,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     override lazy val isRequired: Boolean = ProtobufReflection.isRequired(raw)
     override lazy val isInOneof: Boolean = ProtobufReflection.getRealContainingOneof(raw) != null
     override lazy val isMapField: Boolean =
-      Try(ProtobufReflection.invoke0[java.lang.Boolean](raw, "isMapField").booleanValue())
-        .getOrElse(false)
+      ProtobufReflection.invoke0[java.lang.Boolean](raw, "isMapField").booleanValue()
     override lazy val enumMetadata: Option[ProtobufEnumMetadata] =
       if (protoTypeName == "ENUM") {
         Some(ProtobufEnumMetadata(
