@@ -29,7 +29,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
   NamedExpression}
 import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, Inner, JoinType, LeftSemi}
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan}
-import org.apache.spark.sql.rapids.{GpuAdd, GpuGreaterThan, GpuMultiply, GpuSubtract}
+import org.apache.spark.sql.rapids.{GpuAdd, GpuBitwiseXor, GpuGreaterThan, GpuMultiply}
 import org.apache.spark.sql.types.{BooleanType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -70,8 +70,8 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
     val shared = GpuMultiply(
       GpuAdd(x, y, failOnError = false)(), z, failOnError = false)()
     List(
-      GpuAlias(GpuSubtract(shared, x, failOnError = false)(), "shared_minus_x")(),
-      GpuAlias(GpuSubtract(shared, y, failOnError = false)(), "shared_minus_y")(),
+      GpuAlias(GpuBitwiseXor(shared, x), "shared_xor_x")(),
+      GpuAlias(GpuBitwiseXor(shared, y), "shared_xor_y")(),
       x,
       y,
       z)
@@ -106,7 +106,7 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
         .getOrCreate()
     val conf = spark.sessionState.conf
     // x=[1,2,3], y=[4,5,6], z=[2,3,4]
-    // [((x+y)*z)-x AS shared_minus_x, ((x+y)*z)-y AS shared_minus_y, x, y, z]
+    // [((x+y)*z)^x AS shared_xor_x, ((x+y)*z)^y AS shared_xor_y, x, y, z]
     val expressions = postBuildExpressions
     val buildProject = GpuProjectExec(expressions, TestLeafExec(buildAttributes))()
     val join = TestBroadcastNestedLoopJoin(
@@ -117,7 +117,7 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
         expressions, buildAttributes, conf, Map.empty, enableAstJit = true)
       // after CSE:
       // tier 0: [x, y, z, AST_JIT((x+y)*z) AS t1]
-      // tier 1: [t1-x AS shared_minus_x, t1-y AS shared_minus_y, x, y, z]
+      // tier 1: [t1^x AS shared_xor_x, t1^y AS shared_xor_y, x, y, z]
       val jitExpressions = collectExpressions[GpuAstJitExpression](boundProject.exprTiers.flatten)
       assertResult(Seq(4, 5))(boundProject.exprTiers.map(_.size))
       assertResult(1)(jitExpressions.size)
@@ -137,8 +137,8 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
       withResource(projectBuildSide(retryInput)) { output =>
         assertResult(3)(output.numRows())
         assertResult(5)(output.numCols())
-        assertResult(Seq(9, 19, 33))(collectInts(output, 0))
-        assertResult(Seq(6, 16, 30))(collectInts(output, 1))
+        assertResult(Seq(11, 23, 39))(collectInts(output, 0))
+        assertResult(Seq(14, 16, 34))(collectInts(output, 1))
       }
       assert(RmmSpark.getAndResetNumRetryThrow(taskId) > 0)
       assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(taskId))

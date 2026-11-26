@@ -1299,6 +1299,60 @@ def test_read_round_trip_for_multithreaded_combining(spark_tmp_path, gens, keep_
         lambda spark: spark.read.orc(data_path), conf=all_confs)
 
 
+@pytest.mark.parametrize('reader_type,keep_order', [
+    ('COALESCING', True),
+    ('MULTITHREADED', True),
+    ('MULTITHREADED', False)])
+@ignore_order(local=True)
+def test_read_combined_orc_files_with_different_compression_sizes(
+        spark_tmp_path, reader_type, keep_order):
+    data_path = spark_tmp_path + '/ORC_DATA'
+
+    def write_data(spark):
+        write_specs = [
+            ('small-first', 10000, '4096'),
+            ('large', 7500, '262144'),
+            ('small-last', 5000, '4096')]
+        for part, row_count, compression_size in write_specs:
+            (spark.range(row_count).selectExpr(
+                "id", "sha2(concat(cast(id as string), '{}'), 512) AS s".format(part))
+                .coalesce(1).write.option('orc.compress.size', compression_size)
+                .orc(data_path + '/part=' + part))
+
+        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+        file_details = []
+        for file_path in spark.read.orc(data_path).inputFiles():
+            path = spark._jvm.org.apache.hadoop.fs.Path(file_path)
+            reader = spark._jvm.org.apache.orc.OrcFile.createReader(
+                path,
+                spark._jvm.org.apache.orc.OrcFile.readerOptions(hadoop_conf))
+            try:
+                file_size = path.getFileSystem(hadoop_conf).getFileStatus(path).getLen()
+                file_details.append((file_size, reader.getCompressionSize()))
+            finally:
+                reader.close()
+        assert sorted(size for _, size in file_details) == [4096, 4096, 262144]
+        compression_sizes_by_file_size = [
+            size for _, size in sorted(file_details, reverse=True)]
+        assert compression_sizes_by_file_size == [4096, 262144, 4096]
+
+    with_cpu_session(write_data)
+
+    all_confs = {
+        'spark.rapids.sql.format.orc.reader.type': reader_type,
+        'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+        'spark.rapids.sql.reader.multithreaded.read.keepOrder': keep_order,
+        'spark.rapids.sql.reader.multithreaded.combine.waitTime': '10000',
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.openCostInBytes': '1',
+        'spark.sql.files.minPartitionNum': '1'}
+
+    def read_data(spark):
+        return spark.read.orc(data_path).select('part', 'id', 's')
+
+    assert_gpu_and_cpu_are_equal_collect(read_data, conf=all_confs)
+
+
 @pytest.mark.parametrize('keep_order', [True, pytest.param(False, marks=pytest.mark.ignore_order(local=True))])
 def test_simple_partitioned_read_for_multithreaded_combining(spark_tmp_path, keep_order):
     # Use every type except boolean, see https://github.com/NVIDIA/spark-rapids/issues/11762 and
@@ -1530,7 +1584,8 @@ def test_orc_version_V_0_11_and_V_0_12(std_input_path):
 
 def test_orc_not_support_timestamp_ltz(std_input_path):
     """
-    Test both CPU and GPU does not support ORC type: timestamp with local time zone.
+    Test GPU does not support ORC type: timestamp with local time zone.
+    Spark 4.2+ and DBR 18.3+ support it on CPU, while older runtimes reject it.
     The meta of `timestamp_ltz.orc` is: Type: struct<ts:timestamp with local time zone>
     Refer to ORC types: https://orc.apache.org/docs/types.html
     The error message is like:
@@ -1540,12 +1595,20 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
         ----------^^^
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
+    cpu_supports_orc_timestamp_ltz = \
+        is_spark_420_or_later() or is_databricks_version_or_later(18, 3)
     expected_error_message = "timestamp with local time zone" \
-        if is_spark_420_or_later() or is_databricks_version_or_later(18, 3) \
+        if cpu_supports_orc_timestamp_ltz \
         else "ParseException"
-    assert_gpu_and_cpu_error(lambda spark: spark.read.orc(data_path).collect(),
-                             conf={},
-                             error_message=expected_error_message)
+    read = lambda spark: spark.read.orc(data_path).collect()
+    if cpu_supports_orc_timestamp_ltz:
+        with_cpu_session(read, conf={})
+        # TODO(https://github.com/NVIDIA/cudf-spark/issues/17042):
+        # GPU should support this ORC type or fall back to the CPU reader.
+        assert_spark_exception(
+            lambda: with_gpu_session(read, conf={}), expected_error_message)
+    else:
+        assert_gpu_and_cpu_error(read, conf={}, error_message=expected_error_message)
 
 # Timestamp writes must use the JVM writer timezone and stay compatible with CPU ORC readers.
 # The `tz_sensitive_test` mark runs this in both UTC and non-UTC JVM timezones.

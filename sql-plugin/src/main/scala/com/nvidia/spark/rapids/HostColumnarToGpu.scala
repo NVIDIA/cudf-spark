@@ -33,7 +33,8 @@ import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
+import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 import org.apache.spark.sql.types._
@@ -209,6 +210,17 @@ object HostColumnarToGpu extends Logging {
   }
 }
 
+// Defines who closes a host input batch after HostToGpuCoalesceIterator consumes it.
+sealed trait HostBatchCleanupPolicy extends Serializable
+
+object HostBatchCleanupPolicy {
+  // The producer retains ownership of the batch.
+  case object ProducerCloses extends HostBatchCleanupPolicy
+
+  // The consumer closes the batch after its synchronous copy.
+  case object CloseAfterCopy extends HostBatchCleanupPolicy
+}
+
 /**
  * This iterator builds GPU batches from host batches. The host batches potentially use Spark's
  * UnsafeRow so it is not safe to cache these batches. Rows must be read and immediately written
@@ -227,6 +239,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     opTime: GpuMetric,
     opName: String,
     useArrowCopyOpt: Boolean,
+    inputBatchCleanup: HostBatchCleanupPolicy,
     releaseSemaphoreWhilePulling: Boolean = false)
   extends AbstractGpuCoalesceIterator(iter,
     goal,
@@ -289,12 +302,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
   }
 
 
-  /**
-   * addBatchToConcat for HostToGpuCoalesceIterator does not need to close `batch`
-   * because the batch is closed by the producer iterator.
-   * See: https://github.com/NVIDIA/spark-rapids/issues/6995
-   * @param batch the batch to add in.
-   */
+  /** Copy `batch` into the GPU batch builder, then apply its configured cleanup policy. */
   override def addBatchToConcat(batch: ColumnarBatch): Unit = {
     withResource(new MetricRange(copyBufTime)) { _ =>
       val rows = batch.numRows()
@@ -307,6 +315,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
         batchRowLimit = GpuBatchUtils.estimateRowCount(goal.targetSizeBytes, bytesCopied, rows)
       }
     }
+    cleanupInputBatch(batch)
   }
 
   override def getBatchDataSize(batch: ColumnarBatch): Long = {
@@ -371,14 +380,23 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     ret
   }
   override protected def cleanupInputBatch(batch: ColumnarBatch): Unit = {
-    // Host batches are closed by the producer not the consumer, so nothing to do.
+    inputBatchCleanup match {
+      case HostBatchCleanupPolicy.ProducerCloses =>
+        // Host batches are normally closed by the producer, not the consumer.
+        // See: https://github.com/NVIDIA/spark-rapids/issues/6995
+      case HostBatchCleanupPolicy.CloseAfterCopy =>
+        batch.close()
+    }
   }
 }
 
 /**
  * Put columnar formatted data on the GPU.
  */
-case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
+case class HostColumnarToGpu(
+    child: SparkPlan,
+    goal: CoalesceSizeGoal,
+    inputBatchCleanup: HostBatchCleanupPolicy = HostBatchCleanupPolicy.ProducerCloses)
   extends ShimUnaryExecNode
   with GpuExec {
   import GpuMetric._
@@ -394,6 +412,10 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
     )
 
   override def output: Seq[Attribute] = child.output
+
+  override def outputPartitioning: Partitioning = child.outputPartitioning
+
+  override def outputOrdering: Seq[SortOrder] = child.outputOrdering
 
   override def supportsColumnar: Boolean = true
 
@@ -425,6 +447,8 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
 
     // cache in a local to avoid serializing the plan
     val outputSchema = schema
+    val coalesceGoal = goal
+    val cleanupPolicy = inputBatchCleanup
 
     val batches = child.executeColumnar()
 
@@ -432,10 +456,10 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
     val confUseArrow = rapidsConf.useArrowCopyOptimization
     val releaseSemaphore = rapidsConf.hostColumnarToGpuReleaseSemaphore
     batches.mapPartitions { iter =>
-      new HostToGpuCoalesceIterator(iter, goal, outputSchema,
+      new HostToGpuCoalesceIterator(iter, coalesceGoal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,
         streamTime, concatTime, copyBufTime, opTime,
-        "HostColumnarToGpu", confUseArrow, releaseSemaphore)
+        "HostColumnarToGpu", confUseArrow, cleanupPolicy, releaseSemaphore)
     }
   }
 }

@@ -117,9 +117,9 @@ sealed trait HashProbeBackend extends AutoCloseable with Retryable {
   def buildSide: GpuBuildSide
   def isCached: Boolean
 
-  override def checkpoint(): Unit = {}
+  override def checkpoint(): Unit = { /* Stateless probe backend */ }
 
-  override def restore(): Unit = {}
+  override def restore(): Unit = { /* Stateless probe backend */ }
 
   final def execute(
       request: BackendJoinRequest,
@@ -221,7 +221,7 @@ private final class OnDemandHashProbeBackend(
 
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Table lifetime is owned by the caller */ }
 }
 
 /**

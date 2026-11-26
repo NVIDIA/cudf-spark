@@ -444,7 +444,7 @@ trait MergeExecutor extends AnalysisHelper with PredicateHelper with Logging wit
 
   def execute(): Seq[FileAction]
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Nothing to close by default */ }
 
   protected def targetOutputCols: Seq[NamedExpression] = {
     context.deltaTxn.metadata.schema.map { col =>

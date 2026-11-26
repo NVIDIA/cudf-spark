@@ -16,7 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["330","350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -30,13 +30,19 @@ object GpuFileWriteJobShim {
 
   def setBeforeWriteJob(
       command: InsertIntoHadoopFsRelationCommand,
-      callback: () => Unit): Unit = {}
+      callback: () => Unit): Unit = {
+    // Delayed overwrite deletion is not supported in these Spark versions.
+  }
 
   def copyBeforeWriteJob(
       from: InsertIntoHadoopFsRelationCommand,
-      to: GpuInsertIntoHadoopFsRelationCommand): Unit = {}
+      to: GpuInsertIntoHadoopFsRelationCommand): Unit = {
+    // Delayed overwrite deletion is not supported in these Spark versions.
+  }
 
-  def runBeforeWriteJob(command: GpuInsertIntoHadoopFsRelationCommand): Unit = {}
+  def runBeforeWriteJob(command: GpuInsertIntoHadoopFsRelationCommand): Unit = {
+    // Delayed overwrite deletion is not supported in these Spark versions.
+  }
 
   def executeWriteCommand(
       sparkSession: SparkSession,

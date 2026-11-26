@@ -16,7 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["330","350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims.parquet
@@ -27,5 +27,7 @@ import org.apache.spark.sql.types.StructField
 
 object ParquetFieldRequestShims {
   def checkNoFieldRequestedMoreThanOnce(
-      fields: Seq[(StructField, Type)]): Unit = {}
+      fields: Seq[(StructField, Type)]): Unit = {
+    // Duplicate field check is not enforced in these Spark versions.
+  }
 }

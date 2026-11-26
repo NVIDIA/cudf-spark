@@ -22,7 +22,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_databricks_runtime, is_databricks143, get_java_major_version, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_databricks_runtime, get_java_major_version, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
 
 if not is_jvm_charset_utf8():
     pytestmark = [pytest.mark.regexp, pytest.mark.skip(reason=str("Current locale doesn't support UTF-8, regexp support is disabled"))]
@@ -1132,16 +1132,12 @@ def test_rlike():
         'a rlike "(?-s:abc)"',
         'a rlike "(?i-s:abc)"',
     ]
-    # Databricks 14.3 uses Java 8, which serializes Patterns with position-sensitive inline flags
-    # incorrectly (JDK-8194667), changing the CPU result. Exclude those patterns to avoid the bug.
-    # The bug is fixed in Java 11, so DBR 17.3 and Apache Spark are unaffected.
-    if not is_databricks143():
-        exprs += [
-            'a rlike "a(?i)b"',
-            'a rlike "a|(?i)b"',
-            'a rlike "a(?i)b|c"',
-            'a rlike "a|(?i)b|c"',
-        ]
+    exprs += [
+        'a rlike "a(?i)b"',
+        'a rlike "a|(?i)b"',
+        'a rlike "a(?i)b|c"',
+        'a rlike "a|(?i)b|c"',
+    ]
     conf = _regexp_conf
     if is_databricks_runtime():
         # Databricks' SimplifyRLike optimizer rule rewrites `RLIKE '(?i)<const>'` into

@@ -147,7 +147,7 @@ class GpuFileScanRDD(
                 }
               }
 
-              override def close(): Unit = {}
+              override def close(): Unit = { /* Underlying iterator is closed separately */ }
             }
           } else {
             currentIterator = readCurrentFile()

@@ -493,7 +493,7 @@ def test_csv_corrected_date_default_formatter(spark_tmp_path, prefer_date,
 
 @ignore_order(local=True)
 @allow_non_gpu('ProjectExec')
-@pytest.mark.skipif(not (is_databricks_version(14, 3) or is_databricks_version(17, 3)),
+@pytest.mark.skipif(not is_databricks_version(17, 3),
         reason='Requires detected CSV date-format metadata')
 @pytest.mark.parametrize('v1_enabled_list', ['', 'csv'])
 @pytest.mark.parametrize('parsing_fallback', ['false', 'true'])
@@ -536,7 +536,7 @@ def test_csv_corrected_date_detected_formats(spark_tmp_path, v1_enabled_list,
 
 @ignore_order(local=True)
 @allow_non_gpu('ProjectExec')
-@pytest.mark.skipif(not (is_databricks_version(14, 3) or is_databricks_version(17, 3)),
+@pytest.mark.skipif(not is_databricks_version(17, 3),
         reason='Requires detected CSV date-format metadata')
 @pytest.mark.parametrize('v1_enabled_list', ['', 'csv'])
 @pytest.mark.parametrize('date_format,columns', [
@@ -578,7 +578,7 @@ def test_csv_corrected_date_ignored_detected_format(spark_tmp_path, v1_enabled_l
 
 @ignore_order(local=True)
 @allow_non_gpu('FileSourceScanExec', 'BatchScanExec')
-@pytest.mark.skipif(not (is_databricks_version(14, 3) or is_databricks_version(17, 3)),
+@pytest.mark.skipif(not is_databricks_version(17, 3),
         reason='Requires detected CSV date-format metadata')
 @pytest.mark.parametrize('v1_enabled_list', ['', 'csv'])
 @pytest.mark.parametrize('date_format', ['dd-MMM-yyyy', 'dd-MM-yyyy'])

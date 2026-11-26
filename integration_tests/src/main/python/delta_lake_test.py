@@ -972,8 +972,6 @@ def test_delta_scan_split_with_DV_enabled_with_no_DV(spark_tmp_path):
 @allow_non_gpu("FileSourceScanExec", *delta_meta_allow)
 @delta_lake
 @pytest.mark.parametrize("pushdown_dv_predicate", [True, False], ids=idfn)
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_scan_split_with_DV_enabled_with_DVs(spark_tmp_path, pushdown_dv_predicate):
@@ -1304,8 +1302,6 @@ def test_delta_deletion_vector_coalescing_partitioned_table(
                          ids=idfn)
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Delta Lake deletion vector support requires Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 def test_delta_deletion_vector_interleaved_file_splits(
         spark_tmp_path, parquet_reader_type):
     """
@@ -1552,8 +1548,6 @@ def test_delta_deletion_vector_ignore_corrupt_files(spark_tmp_path, reader_type)
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 @pytest.mark.parametrize("dv_predicate_pushdown", [True, False], ids=idfn)
@@ -1608,8 +1602,6 @@ def test_delta_filter_out_metadata_col(spark_tmp_path, dv_predicate_pushdown):
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
                     reason="Delta Lake deletion vector support is required")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_dv_pushdown_keeps_alias_producer(spark_tmp_path, spark_tmp_table_factory):
@@ -1755,8 +1747,6 @@ def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
                     reason="Delta Lake deletion vector support is required")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
@@ -1795,8 +1785,6 @@ def test_delta_bitmap_serialization_java_compatibility(serialization_format):
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
                     reason="Delta Lake deletion vector support is required")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_dv_cpu_bridge_filter_after_native_scan(spark_tmp_path):
@@ -1814,8 +1802,6 @@ def test_delta_dv_cpu_bridge_filter_after_native_scan(spark_tmp_path):
 ], ids=["one_col", "two_cols"])
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 def test_delta_deletion_vector_native_footer_multi_row_group(spark_tmp_path, parquet_reader_type,
                                                              footer_type, query):
     """
@@ -1914,8 +1900,6 @@ def test_db173_missing_row_index_filter_assertion_guard():
                     reason="Delta Lake deletion vector support is required")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 def test_delta_deletion_vector_count_empty_splits(
         spark_tmp_path, parquet_reader_type, footer_type, with_plain_file, chunked):
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -1979,8 +1963,6 @@ def test_delta_deletion_vector_count_empty_splits(
 ], ids=["count_star", "partition_aggregate"])
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 def test_delta_deletion_vector_native_footer_multi_row_group_zero_column_aggregate(
         spark_tmp_path, parquet_reader_type, footer_type, query):
     """

@@ -44,6 +44,7 @@ import com.nvidia.spark.rapids.jni.{DateTimeRebase, ParquetFooter, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims,
   ParquetMissingStructShims, ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
@@ -119,11 +120,11 @@ case class GpuParquetScan(
     dataFilters: Seq[Expression],
     rapidsConf: RapidsConf,
     queryUsesInputFile: Boolean = false)
-  extends FileScan with GpuScan with Logging {
+  extends FileScan with GpuScan with HistorySizedFileScan with Logging {
 
   override def isSplitable(path: Path): Boolean = true
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val broadcastedConf = sparkSession.sparkContext.broadcast(
       new SerializableConfiguration(hadoopConf))
 
@@ -954,7 +955,7 @@ protected case class GpuParquetFileFilterHandler(
           checkSchemaCompat(clippedSchema, readDataSchema,
             (t: Type, d: DataType) => throwTypeIncompatibleError(t, d, file.filePath.toString()),
             isCaseSensitive, readUseFieldId)
-          val clipped = GpuParquetUtils.clipBlocksToSchema(clippedSchema, blocks, isCaseSensitive)
+          val clipped = GpuParquetUtils.clipBlocksToSchema(clippedSchema, blocks)
           (clipped, clippedSchema)
         }
       val hasDateTimeInReadSchema = DataTypeUtils.hasDateOrTimestampType(readDataSchema)
@@ -1630,9 +1631,11 @@ case class GpuParquetMultiFilePartitionReaderFactory(
           filterHandler.readThriftFooter(fileIO, filePath, fileConf)
         }
       }
+      // GPUDirect Storage is not supported here yet, so every mode reads through host memory.
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, execMetrics),
+          config.maxH2DPackSize, config.minH2DPackSize, execMetrics,
+          RapidsConf.GpuDirectStorageMode.OFF),
         readFooter,
         maxReadBatchSizeRows = maxReadBatchSizeRows,
         maxReadBatchSizeBytes = maxReadBatchSizeBytes,
@@ -1773,12 +1776,13 @@ case class GpuParquetPartitionReaderFactory(
       _ += (System.nanoTime() - startTime)
     }
     closeOnExcept(footer) { _ =>
-      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics)
+      val rangeReader = HybridScanFileByteSource.createRangeReader(filePath, metrics)
+      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics, rangeReader)
       val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
       new HybridScanPerFileParquetPartitionReader(
         HybridScanSplit(byteSource, file.start, file.length), footer, options,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, metrics))
+          config.maxH2DPackSize, config.minH2DPackSize, metrics, config.gdsMode))
     }
   }
 
@@ -2583,10 +2587,18 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       useFieldId: Boolean): ParquetOptions = {
     val includeColumns = toCudfColumnNames(readDataSchema, clippedSchema,
       isSchemaCaseSensitive, useFieldId)
-    ParquetOptions.builder()
-        .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
-        .includeColumn(includeColumns : _*)
-        .build()
+    val builder = ParquetOptions.builder()
+      .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
+    // cuDF's name selector cannot distinguish a flat "a.b" from the struct field a.b.
+    // Missing requested columns can still appear in includeColumns after footer clipping.
+    // The in-memory footer is already clipped in read-schema order, so read all its
+    // columns when either a selector or a physical root name contains a dot.
+    val hasDottedName = includeColumns.exists(_.contains(".")) ||
+      clippedSchema.getFields.asScala.exists(_.getName.contains("."))
+    if (!hasDottedName) {
+      builder.includeColumn(includeColumns: _*)
+    }
+    builder.build()
   }
 
   /** conversions used by multithreaded reader and coalescing reader */

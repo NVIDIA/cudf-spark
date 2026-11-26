@@ -25,6 +25,8 @@ import org.apache.spark.shuffle.FetchFailedException
 /**
  * Owns one build per source-output identity in an executor. Consumers retain independent
  * references. Invalidation detaches existing entries; a later reader may rebuild the shuffle.
+ * A reclaim of a shuffle detaches its published builds. A task that looked one up first still
+ * borrows it.
  */
 private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends AutoCloseable {
   private class BuildFailure(val original: Throwable, val fetch: Option[FetchFailed])
@@ -34,6 +36,9 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     val ready = new CompletableFuture[Unit]()
     var value: Option[T] = None
     var invalidated = false
+    var reclaimed = false
+    // Tasks between their lookup and their borrow.
+    var pins = 0
     var borrowers = 0
   }
 
@@ -51,7 +56,8 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
 
   /**
    * `beforeWait` releases task resources; `checkCancelled` throws for a cancelled task.
-   * `releaseBorrowed` releases a borrowed result if invalidation fails before it can be returned.
+   * `releaseBorrowed` releases a borrowed result if the owner's disposal fails before it can be
+   * returned.
    */
   def getOrBuild[B](
       id: Int,
@@ -67,64 +73,80 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
       var builder = false
       val entry = entries.synchronized {
         require(!closed, "Executor broadcast cache is closed")
-        entries.getOrElseUpdate(id, mutable.Map.empty).getOrElseUpdate(identity, {
+        val found = entries.getOrElseUpdate(id, mutable.Map.empty).getOrElseUpdate(identity, {
           builder = true
           new Entry
         })
+        // Pinned under both locks, so a reclaim that detaches the entry leaves this task its value.
+        found.synchronized(found.pins += 1)
+        found
       }
-      if (builder) {
-        try {
-          val value = build()
-          val accepted = entry.synchronized {
-            if (entry.invalidated) {
-              false
-            } else {
-              entry.value = Some(value)
-              entry.ready.complete(())
-              true
+      var pinned = true
+      var failure: Throwable = null
+      try {
+        if (builder) {
+          try {
+            val value = build()
+            val accepted = entry.synchronized {
+              if (entry.invalidated) {
+                false
+              } else {
+                entry.value = Some(value)
+                entry.ready.complete(())
+                true
+              }
             }
-          }
-          if (!accepted) {
-            val rejection = removed(id)
-            try dispose(value) catch {
-              case cleanup: Throwable => suppress(rejection, cleanup)
+            if (!accepted) {
+              val rejection = removed(id)
+              try dispose(value) catch {
+                case cleanup: Throwable => suppress(rejection, cleanup)
+              }
+              throw rejection
             }
-            throw rejection
-          }
-        } catch {
-          case error: Throwable =>
-            // Detach the failed attempt before waking waiters that may elect a new builder.
-            entries.synchronized {
-              if (!entry.invalidated) {
-                entries.get(id).foreach { identities =>
-                  if (identities.get(identity).contains(entry)) {
-                    identities.remove(identity)
-                    if (identities.isEmpty) entries.remove(id)
+          } catch {
+            case error: Throwable =>
+              // Detach the failed attempt before waking waiters that may elect a new builder.
+              entries.synchronized {
+                if (!entry.invalidated) {
+                  entries.get(id).foreach { identities =>
+                    if (identities.get(identity).contains(entry)) {
+                      identities.remove(identity)
+                      if (identities.isEmpty) entries.remove(id)
+                    }
                   }
                 }
               }
-            }
-            val fetch = Option(TaskContext.get()).flatMap(_.fetchFailed).orElse(error match {
-              case failed: FetchFailedException => Some(failed)
-              case _ => None
-            }).map(_.toTaskFailedReason.asInstanceOf[FetchFailed])
-            entry.ready.completeExceptionally(new BuildFailure(error, fetch))
-            throw error
+              val fetch = Option(TaskContext.get()).flatMap(_.fetchFailed).orElse(error match {
+                case failed: FetchFailedException => Some(failed)
+                case _ => None
+              }).map(_.toTaskFailedReason.asInstanceOf[FetchFailed])
+              entry.ready.completeExceptionally(new BuildFailure(error, fetch))
+              throw error
+          }
+        } else if (!entry.ready.isDone) {
+          beforeWait()
         }
-      } else if (!entry.ready.isDone) {
-        beforeWait()
-      }
 
-      val retryBuilder = awaitReady(entry, checkCancelled)
-      if (!retryBuilder) {
-        checkCancelled()
-        beforeBorrow()
-        val value = entry.synchronized {
-          if (entry.invalidated) throw removed(id)
-          entry.borrowers += 1
-          entry.value.get
+        val retryBuilder = awaitReady(entry, checkCancelled)
+        if (!retryBuilder) {
+          checkCancelled()
+          beforeBorrow()
+          val value = entry.synchronized {
+            if (entry.invalidated) throw removed(id)
+            // The pin becomes a borrow under one lock, so a reclaim always sees one of them.
+            entry.pins -= 1
+            pinned = false
+            entry.borrowers += 1
+            entry.value.get
+          }
+          result = Some(borrowEntry(entry, value, borrow, releaseBorrowed))
         }
-        result = Some(borrowEntry(entry, value, borrow, releaseBorrowed))
+      } catch {
+        case error: Throwable =>
+          failure = error
+          throw error
+      } finally {
+        if (pinned) unpin(entry, failure)
       }
     }
     result.get
@@ -179,11 +201,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     } finally {
       val released = entry.synchronized {
         entry.borrowers -= 1
-        if (entry.invalidated && entry.borrowers == 0) {
-          val owned = entry.value
-          entry.value = None
-          owned
-        } else None
+        takeReleased(entry)
       }
       try {
         released.foreach(dispose)
@@ -192,7 +210,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
           if (failure != null) {
             suppress(failure, cleanup)
           } else {
-            // Ownership has not reached the caller when invalidation fails.
+            // Ownership has not reached the caller when the owner's disposal fails.
             result.foreach { borrowed =>
               try releaseBorrowed(borrowed) catch {
                 case secondary: Throwable => suppress(cleanup, secondary)
@@ -205,6 +223,32 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     result.get
   }
 
+  /**
+   * Takes the value for its last holder to dispose: an invalidated entry's at zero borrowers, and
+   * a reclaimed entry's at zero pins and borrowers. Runs under the entry's lock.
+   */
+  private def takeReleased(entry: Entry): Option[T] = {
+    if (entry.borrowers == 0 && (entry.invalidated || (entry.reclaimed && entry.pins == 0))) {
+      val owned = entry.value
+      entry.value = None
+      owned
+    } else None
+  }
+
+  /** Releases a pin that did not become a borrow, and disposes the value if it was the last. */
+  private def unpin(entry: Entry, failure: Throwable): Unit = {
+    val released = entry.synchronized {
+      entry.pins -= 1
+      takeReleased(entry)
+    }
+    try {
+      released.foreach(dispose)
+    } catch {
+      case cleanup: Throwable =>
+        if (failure != null) suppress(failure, cleanup) else throw cleanup
+    }
+  }
+
   private def suppress(primary: Throwable, secondary: Throwable): Unit = {
     if (primary ne secondary) primary.addSuppressed(secondary)
     if (secondary.isInstanceOf[InterruptedException]) Thread.currentThread().interrupt()
@@ -212,11 +256,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
 
   private def invalidateEntry(id: Int, entry: Entry): Option[T] = entry.synchronized {
     entry.invalidated = true
-    val owned = if (entry.borrowers == 0) {
-      val value = entry.value
-      entry.value = None
-      value
-    } else None
+    val owned = takeReleased(entry)
     // Only an in-flight builder has waiters that need an exception notification.
     if (!entry.ready.isDone) {
       entry.ready.completeExceptionally(removed(id))
@@ -224,14 +264,17 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     owned
   }
 
-  private def disposeAll(values: Iterable[T]): Unit = {
+  private def disposeAll(values: Iterable[T], isStopped: () => Boolean = () => false): Unit = {
     var failure: Throwable = null
     values.foreach { value =>
-      try {
-        dispose(value)
-      } catch {
-        case error: Throwable =>
-          if (failure == null) failure = error else suppress(failure, error)
+      // A stopped reclaim leaves the rest to the spill framework's shutdown.
+      if (!isStopped()) {
+        try {
+          dispose(value)
+        } catch {
+          case error: Throwable =>
+            if (failure == null) failure = error else suppress(failure, error)
+        }
       }
     }
     if (failure != null) {
@@ -248,6 +291,44 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
       }
     }
     disposeAll(owned)
+  }
+
+  /**
+   * Detaches every published build of shuffle `id`, a rerun's included, and disposes each build
+   * no task holds. A rerun's later tasks build again from the outputs the catalog keeps for it.
+   * The last task to let go of a build disposes it. A build in flight stays. Once `isStopped`
+   * reads true, this detaches nothing and disposes no further build, and the spill framework's
+   * shutdown closes what it left.
+   *
+   * @param sizeOf the bytes a build holds
+   * @return how many builds this detached, and their bytes
+   */
+  def reclaim(id: Int, isStopped: () => Boolean, sizeOf: T => Long): (Int, Long) = {
+    var builds = 0
+    var bytes = 0L
+    val owned = mutable.ArrayBuffer.empty[T]
+    entries.synchronized {
+      if (!closed && !isStopped()) {
+        entries.get(id).foreach { identities =>
+          // A snapshot, since the loop removes from the map.
+          identities.toList.foreach { case (identity, entry) =>
+            entry.synchronized {
+              // A build in flight keeps its entry for its builder and its waiters.
+              if (entry.ready.isDone) {
+                identities.remove(identity)
+                entry.reclaimed = true
+                builds += 1
+                entry.value.foreach(value => bytes += sizeOf(value))
+                takeReleased(entry).foreach(owned += _)
+              }
+            }
+          }
+          if (identities.isEmpty) entries.remove(id)
+        }
+      }
+    }
+    disposeAll(owned, isStopped)
+    (builds, bytes)
   }
 
   override def close(): Unit = {

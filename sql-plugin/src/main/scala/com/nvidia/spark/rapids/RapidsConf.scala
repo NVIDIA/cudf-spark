@@ -23,7 +23,6 @@ import scala.collection.mutable.ListBuffer
 
 import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
 import org.apache.spark.SparkConf
@@ -47,6 +46,10 @@ object RapidsConf extends Logging with RapidsConfEntries {
 
   object ParquetFooterReaderType extends Enumeration {
     val JAVA, NATIVE, AUTO = Value
+  }
+
+  object GpuDirectStorageMode extends Enumeration {
+    val OFF, ON, AUTO = Value
   }
 
   private lazy val registeredConfs = new ListBuffer[ConfEntry[_]]()
@@ -570,6 +573,19 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
 
+  lazy val historyPlanningTimeoutMs: Int = get(HISTORY_PLANNING_TIMEOUT_MS)
+
+  lazy val historyDeclareTimeoutMs: Int = get(HISTORY_DECLARE_TIMEOUT_MS)
+
+  lazy val historyScanSplitEnabled: Boolean = get(HISTORY_SCAN_SPLIT_ENABLED)
+
+  lazy val historyScanSplitMaxAge: java.time.Duration =
+    java.time.Duration.ofDays(get(HISTORY_SCAN_SPLIT_MAX_AGE_DAYS).toLong)
+
+  lazy val historyScanSplitMaxBytes: Long = get(HISTORY_SCAN_SPLIT_MAX_BYTES)
+
+  lazy val historyScanSplitMinBytes: Long = get(HISTORY_SCAN_SPLIT_MIN_BYTES)
+
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
   lazy val isWindowCollectSetEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_SET)
@@ -751,6 +767,11 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val hybridScanSingleStageFilterKeepThreshold: Double =
     get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
+  lazy val readerGdsMode: GpuDirectStorageMode.Value =
+    GpuDirectStorageMode.withName(get(READER_GPU_DIRECT_STORAGE_MODE))
+
+  lazy val readerKvikioNumThreads: Option[Int] = get(READER_KVIKIO_NUM_THREADS).map(_.toInt)
 
   lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
 
@@ -955,45 +976,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     get(SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED)
 
   lazy val shuffleAsyncReadEnabled: Boolean = get(SHUFFLE_ASYNC_READ_ENABLED)
-
-  lazy val shuffleKudoSerializerDebugMode: DumpOption = {
-    val mode = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE)
-    mode match {
-      case "NEVER" => DumpOption.Never
-      case "ALWAYS" => DumpOption.Always
-      case "ONFAILURE" => DumpOption.OnFailure
-      case _ => {
-        logWarning(s"Invalid value for ${SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE.key}: $mode. " +
-          "Using default value: Never")
-        DumpOption.Never
-      }
-    }
-  }
-
-  lazy val shuffleKudoSerializerDebugDumpPrefix: Option[String] = {
-    val prefix = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX)
-    shuffleKudoSerializerDebugMode match {
-      case DumpOption.Never => prefix
-      case _ => {
-        prefix match {
-          case None => {
-            logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is not set, " +
-              "so Kudo serializer debug will not be enabled")
-            None
-          }
-          case Some(p) => {
-            if (p.isEmpty) {
-              logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is empty, " +
-                "so Kudo serializer debug will not be enabled")
-              Some("")
-            } else {
-              Some(p)
-            }
-          }
-        }
-      }
-    }
-  }
 
   def isUCXShuffleManagerMode: Boolean =
     RapidsShuffleManagerMode

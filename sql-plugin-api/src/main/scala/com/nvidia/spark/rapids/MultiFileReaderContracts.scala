@@ -76,7 +76,7 @@ trait SchemaBase {
  * A common trait for the extra information for different file format.
  */
 trait ExtraInfo extends AutoCloseable {
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Nothing to close by default */ }
 }
 
 /**

@@ -26,14 +26,6 @@ import com.nvidia.spark.rapids.Arm.withResource
 import org.apache.spark.internal.Logging
 
 /**
- * Memory allocation kind for retry coverage tracking.
- */
-object AllocationKind extends Enumeration {
-  type AllocationKind = Value
-  val HOST, DEVICE = Value
-}
-
-/**
  * Utility object to track memory allocations that are not covered by retry methods.
  * 
  * This is a debugging tool to help ensure all memory allocation code paths are
@@ -241,4 +233,3 @@ object AllocationRetryCoverageTracker extends Logging {
     loggedStacks.clear()
   }
 }
-

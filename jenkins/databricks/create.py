@@ -29,7 +29,7 @@ def main():
   sshkey = ''
   cluster_name = 'CI-GPU-databricks-26.12.0-SNAPSHOT'
   idletime = 240
-  runtime = '14.3.x-gpu-ml-scala2.12'
+  runtime = '17.3.x-gpu-ml-scala2.13'
   num_workers = 1
   worker_type = 'g4dn.xlarge'
   driver_type = 'g4dn.xlarge'

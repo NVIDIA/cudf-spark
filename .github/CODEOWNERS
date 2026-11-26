@@ -12,13 +12,10 @@
 # Build-related
 /jenkins/  @NVIDIA/sparkrapids-cicd-codeowners
 pom.xml    @NVIDIA/sparkrapids-cicd-codeowners
-/dist/     @NVIDIA/sparkrapids-cicd-codeowners
+/dist/     @NVIDIA/sparkrapids-cicd-codeowners @NVIDIA/sparkrapids-feature-team
 /.github/  @NVIDIA/sparkrapids-cicd-codeowners
-/build/    @NVIDIA/sparkrapids-cicd-codeowners
-/scripts/  @NVIDIA/sparkrapids-cicd-codeowners
-
-# Baseline updates accompany code fixes and use normal PR review.
-/scripts/with_resource_nesting_baseline.json
+/build/    @NVIDIA/sparkrapids-cicd-codeowners @NVIDIA/sparkrapids-feature-team
+/scripts/  @NVIDIA/sparkrapids-cicd-codeowners @NVIDIA/sparkrapids-feature-team
 
 # AI review and agent configuration
 /.greptile/  @NVIDIA/sparkrapids-feature-team @NVIDIA/sparkrapids-perf-team

@@ -20,7 +20,7 @@ import java.io.{File, FileNotFoundException}
 
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.ql.exec.vector.StructColumnVector
-import org.apache.orc.{OrcFile, TypeDescription}
+import org.apache.orc.{CompressionKind, OrcFile, OrcProto, TypeDescription}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.execution.FileSourceScanExec
@@ -33,6 +33,29 @@ import org.apache.spark.sql.types.{DateType, IntegerType, LongType, StringType, 
 class OrcScanSuite extends SparkQueryCompareTestSuite {
 
   private val fileSplitsOrc = frameFromOrc("file-splits.orc")
+
+  test("ORC compression size for combining") {
+    assertResult(0)(
+      OrcCommonFunctions.compressionSizeForCombining(CompressionKind.NONE, 64 * 1024))
+    assertResult(0)(
+      OrcCommonFunctions.compressionSizeForCombining(CompressionKind.NONE, 256 * 1024))
+    assertResult(4096)(
+      OrcCommonFunctions.compressionSizeForCombining(CompressionKind.ZLIB, 4096))
+  }
+
+  test("ORC synthetic PostScript clears stripe statistics length") {
+    val sourcePostscript = OrcProto.PostScript.newBuilder()
+      .setFooterLength(1)
+      .setMetadataLength(2)
+      .setStripeStatisticsLength(3)
+      .build()
+
+    val postscript = OrcCommonFunctions.buildPostscript(sourcePostscript, 42)
+
+    assertResult(42)(postscript.getFooterLength)
+    assertResult(0)(postscript.getMetadataLength)
+    assert(!postscript.hasStripeStatisticsLength)
+  }
 
   testSparkResultsAreEqual("Test ORC chunks", fileSplitsOrc,
     new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key, "2048")) {

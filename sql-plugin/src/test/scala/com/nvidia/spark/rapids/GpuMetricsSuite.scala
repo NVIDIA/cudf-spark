@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
+
+import org.apache.spark.sql.execution.metric.SQLMetric
 
 class GpuMetricsSuite extends AnyFunSuite {
 
@@ -95,5 +97,41 @@ class GpuMetricsSuite extends AnyFunSuite {
       s"Parent should have at least 150ms of recorded time, got ${parentOpTime.value}ns")
     assert(parentOpTime.value < expectedParentTime + tolerance,
       s"Parent time (${parentOpTime.value}ns) should be close to expected ~200ms with tolerance")
+  }
+
+  test("GpuMetricFactory.create(level, metric) gates by level and evaluates lazily") {
+    val essentialFactory = new GpuMetricFactory(GpuMetric.ESSENTIAL_LEVEL, null)
+    var evaluated = 0
+
+    val gatedModerate = essentialFactory.create(GpuMetric.MODERATE_LEVEL, {
+      evaluated += 1
+      new SQLMetric("sum")
+    })
+    assert(gatedModerate eq NoopMetric)
+    assert(evaluated === 0)
+
+    val customMetric = new SQLMetric("sum")
+    val wrapped = essentialFactory.create(GpuMetric.ESSENTIAL_LEVEL, {
+      evaluated += 1
+      customMetric
+    })
+    assert(evaluated === 1)
+    wrapped match {
+      case WrappedGpuMetric(m, withExclSemWait) =>
+        assert(m eq customMetric)
+        assert(!withExclSemWait)
+      case other =>
+        fail(s"Expected WrappedGpuMetric, got $other")
+    }
+
+    val debugFactory = new GpuMetricFactory(GpuMetric.DEBUG_LEVEL, null)
+    val debugWrapped = debugFactory.create(GpuMetric.DEBUG_LEVEL, customMetric)
+    debugWrapped match {
+      case WrappedGpuMetric(m, withExclSemWait) =>
+        assert(m eq customMetric)
+        assert(withExclSemWait)
+      case other =>
+        fail(s"Expected WrappedGpuMetric, got $other")
+    }
   }
 }

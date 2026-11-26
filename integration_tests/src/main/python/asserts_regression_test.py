@@ -14,8 +14,110 @@
 
 import pytest
 
+import asserts
 from asserts import assert_equal, collect_plan_nodes
 from spark_session import with_cpu_session, with_gpu_session
+
+
+def _patch_cpu_gpu_sessions(monkeypatch):
+    monkeypatch.setattr(asserts, "with_cpu_session", lambda func, conf: func("cpu"))
+    monkeypatch.setattr(asserts, "with_gpu_session", lambda func, conf: func("gpu"))
+
+
+def test_assert_gpu_and_cpu_error_requires_cpu_failure(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def gpu_only_failure(mode):
+        if mode == "gpu":
+            raise RuntimeError("expected error")
+        return "cpu result"
+
+    with pytest.raises(AssertionError, match="expected exception"):
+        asserts.assert_gpu_and_cpu_error(gpu_only_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_error_accepts_matching_failures(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def matching_failure(_):
+        raise RuntimeError("expected error")
+
+    asserts.assert_gpu_and_cpu_error(matching_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_error_requires_gpu_failure(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def cpu_only_failure(mode):
+        if mode == "cpu":
+            raise RuntimeError("expected error")
+        return "gpu result"
+
+    with pytest.raises(AssertionError, match="expected exception"):
+        asserts.assert_gpu_and_cpu_error(cpu_only_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_error_rejects_different_gpu_error(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def different_failure(mode):
+        if mode == "cpu":
+            raise RuntimeError("expected error")
+        raise RuntimeError("different error")
+
+    with pytest.raises(AssertionError, match="Expected error 'expected error' did not appear"):
+        asserts.assert_gpu_and_cpu_error(different_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_same_data_or_error_accepts_matching_results(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    asserts.assert_gpu_and_cpu_same_data_or_error(
+        lambda _: ["matching result"], {}, "unused error")
+
+
+def test_assert_gpu_and_cpu_same_data_or_error_accepts_matching_failures(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def matching_failure(_):
+        raise RuntimeError("expected error")
+
+    asserts.assert_gpu_and_cpu_same_data_or_error(
+        matching_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_same_data_or_error_rejects_gpu_only_failure(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def gpu_only_failure(mode):
+        if mode == "gpu":
+            raise RuntimeError("expected error")
+        return "cpu result"
+
+    with pytest.raises(AssertionError, match="no exception was expected"):
+        asserts.assert_gpu_and_cpu_same_data_or_error(
+            gpu_only_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_same_data_or_error_rejects_cpu_only_failure(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    def cpu_only_failure(mode):
+        if mode == "cpu":
+            raise RuntimeError("expected error")
+        return "gpu result"
+
+    with pytest.raises(AssertionError, match="expected exception"):
+        asserts.assert_gpu_and_cpu_same_data_or_error(
+            cpu_only_failure, {}, "expected error")
+
+
+def test_assert_gpu_and_cpu_same_data_or_error_rejects_different_results(monkeypatch):
+    _patch_cpu_gpu_sessions(monkeypatch)
+
+    with pytest.raises(AssertionError, match="string values are different"):
+        asserts.assert_gpu_and_cpu_same_data_or_error(
+            lambda mode: [mode], {}, "unused error")
 
 
 def test_assert_equal_row_count_match():

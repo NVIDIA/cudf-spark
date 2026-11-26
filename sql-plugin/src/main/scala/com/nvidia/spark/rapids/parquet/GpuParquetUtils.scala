@@ -16,8 +16,6 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.util.Locale
-
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.shims.parquet.GpuParquetUtilsShims
@@ -32,9 +30,8 @@ object GpuParquetUtils extends Logging {
    * The column chunks that are returned are preserved verbatim
    * (i.e.: file offsets remain unchanged).
    *
-   * @param readSchema the schema to preserve
+   * @param readSchema the clipped schema with physical column names
    * @param blocks the block metadata from the original Parquet file
-   * @param isCaseSensitive indicate if it is case sensitive
    * @return the updated block metadata with undesired column chunks removed
    */
   @scala.annotation.nowarn(
@@ -42,22 +39,14 @@ object GpuParquetUtils extends Logging {
   )
   def clipBlocksToSchema(
       readSchema: MessageType,
-      blocks: java.util.List[BlockMetaData],
-      isCaseSensitive: Boolean): Seq[BlockMetaData] = {
-    val columnPaths = readSchema.getPaths.asScala.map(x => ColumnPath.get(x: _*))
-    val pathSet = if (isCaseSensitive) {
-      columnPaths.map(cp => cp.toDotString).toSet
-    } else {
-      columnPaths.map(cp => cp.toDotString.toLowerCase(Locale.ROOT)).toSet
-    }
+      blocks: java.util.List[BlockMetaData]): Seq[BlockMetaData] = {
+    // Schema clipping has already resolved names and IDs, preserving physical names.
+    // Match exact components: case-folding can retain excluded fields, and joining with
+    // dots would conflate a flat "a.b" with the struct field a.b.
+    val pathSet = readSchema.getPaths.asScala.map(path => ColumnPath.get(path: _*)).toSet
     blocks.asScala.toSeq.map { oldBlock =>
       //noinspection ScalaDeprecation
-      val newColumns = if (isCaseSensitive) {
-        oldBlock.getColumns.asScala.filter(c => pathSet.contains(c.getPath.toDotString))
-      } else {
-        oldBlock.getColumns.asScala.filter(c =>
-          pathSet.contains(c.getPath.toDotString.toLowerCase(Locale.ROOT)))
-      }
+      val newColumns = oldBlock.getColumns.asScala.filter(c => pathSet.contains(c.getPath))
       newBlockMeta(oldBlock, newColumns.toSeq)
     }
   }

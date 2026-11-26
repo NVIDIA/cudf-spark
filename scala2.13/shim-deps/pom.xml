@@ -119,8 +119,7 @@
              (see thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py). Importing
              Spark's BOM there would drag in OSS transitives (e.g.
              commons-io 2.8.0 from hadoop-client) that conflict with the
-             Databricks-shipped jars (e.g. commons-io 2.13.0 needed by
-             NullOutputStream.INSTANCE in spark350db143).
+             versions provided by the Databricks runtime.
 
              TODO: when another proprietary shim lands, replace the
              !databricks gate with a single sentinel property such as

@@ -181,7 +181,7 @@ object SplittableJoinIterator {
    */
   trait PreparedJoinBatch extends AutoCloseable {
     def numJoinRows: Long
-    override def close(): Unit = {}
+    override def close(): Unit = { /* Nothing to close by default */ }
   }
 
   object PreparedJoinBatch {

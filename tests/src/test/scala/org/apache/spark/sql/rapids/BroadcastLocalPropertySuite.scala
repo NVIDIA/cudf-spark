@@ -296,18 +296,29 @@ class BroadcastLocalPropertySuite
     test(s"cancellation interrupts saturated nested preparation (timeout: $cancelByTimeout)") {
       withGpuSparkSession(_ => withPreparationThreads(1) {
         withSQLConf(SQLConf.BROADCAST_TIMEOUT.key -> "1") {
+          val executor = GpuBroadcastExchangeExecBase.preparationExecutor
+          val outerEntered = new CountDownLatch(1)
+          val outerRelease = new CountDownLatch(1)
           val entered = new CountDownLatch(1)
           val release = new CountDownLatch(1)
           val collected = new CountDownLatch(1)
           val nested = controlledBroadcast(entered, release, collected)
-          val exchange = controlledBroadcast(new CountDownLatch(0), new CountDownLatch(0),
+          val exchange = controlledBroadcast(outerEntered, outerRelease,
             collected, beforeResult = () => {
               nested.prepare()
               nested.relationFuture.get(10, TimeUnit.SECONDS)
             })
           try {
+            // An idle worker may not yet accept a handoff. Leave room for a new worker so
+            // CallerRunsPolicy cannot block initialization of the outer relation future.
+            executor.setMaximumPoolSize(2)
             exchange.prepare()
+            assert(outerEntered.await(10, TimeUnit.SECONDS))
+            executor.setMaximumPoolSize(1)
+            eventually(timeout(10.seconds)) { assert(executor.getPoolSize == 1) }
+            outerRelease.countDown()
             assert(entered.await(10, TimeUnit.SECONDS))
+            assert(!exchange.relationFuture.isDone)
             if (cancelByTimeout) {
               intercept[SparkException] { exchange.executeColumnarBroadcast[Any]() }
             } else {
@@ -321,6 +332,7 @@ class BroadcastLocalPropertySuite
             release.countDown()
             assert(!collected.await(100, TimeUnit.MILLISECONDS))
           } finally {
+            outerRelease.countDown()
             release.countDown()
             exchange.relationFuture.cancel(true)
             nested.relationFuture.cancel(true)

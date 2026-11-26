@@ -56,8 +56,8 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Scala 2.13: Spark 3.5.0 through 3.5.9, and Spark 4.0.0 through 4.0.5, Spark 4.1.1 through 4.1.4, and Spark 4.2.0 through 4.2.1
 	
 	Supported Databricks runtime versions for Azure and AWS:
-		Databricks 14.3 ML LTS (GPU, Scala 2.12, Spark 3.5.0)
 		Databricks 17.3 ML LTS (GPU, Scala 2.13, Spark 4.0.0)
+		Databricks 18 ML LTS (GPU, Scala 2.13, Spark 4.1.0)
 
 	Supported Dataproc versions (Debian/Ubuntu/Rocky):
 		GCP Dataproc 2.1
@@ -85,31 +85,33 @@ Use the JDK provided by the Databricks runtime.
 
 | Databricks Runtime | Apache Spark | Scala | JDK runtime | CUDA jar variants | Minimum NVIDIA driver |
 |---------------------|--------------|-------|-------------|-------------------|-----------------------|
-| 14.3 ML LTS GPU | 3.5.0 | 2.12 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
 | 17.3 ML LTS GPU | 4.0.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
+| 18 ML LTS GPU | 4.1.0 | 2.13 | Databricks runtime default | CUDA 12, CUDA 13 | CUDA 12: R525+; CUDA 13: R580+ |
 
 Use the Scala artifact that matches the runtime's Spark/Scala line. The CUDA
 classifier selects the bundled cuDF native libraries.
 
+The 26.12 release retires support for Databricks 14.3 ML LTS. The 26.10 release supports this runtime.
+
 #### Delta Lake GPU Support on Databricks
 
-| Delta feature | DBR 14.3 | DBR 17.3 |
-|---------------|----------|----------|
-| Reads without deletion vectors | GPU | GPU |
-| Deletion vector reads | CPU fallback | GPU with metadata row index and cuDF plugin deletion-vector predicate pushdown |
-| Delta writes | GPU for append, overwrite, CTAS, and RTAS | GPU for append, overwrite, CTAS, and RTAS |
-| Delta writes with deletion vectors | CPU fallback | GPU for persistent-DV DELETE, UPDATE, and MERGE when metadata row indexes and cuDF plugin deletion-vector predicate pushdown are enabled; CPU fallback otherwise |
-| DELETE and UPDATE | GPU for copy-on-write. Operations that write deletion vectors fall back to CPU. | GPU for copy-on-write, including liquid-clustered tables, and for supported persistent-DV writes |
-| MERGE | GPU, including liquid clustering | GPU, including supported persistent-DV writes |
-| OPTIMIZE | GPU for supported native non-clustered write paths; the outer command remains on CPU | GPU for supported native non-clustered and ordinary liquid-clustering write paths; the outer command remains on CPU |
-| Auto compaction | GPU when triggered by supported GPU writes | GPU for supported inline, deletion-vector-free paths |
-| Liquid clustering | GPU | GPU for writes, DELETE, UPDATE, MERGE, and ordinary OPTIMIZE |
+| Delta feature | DBR 17.3 |
+|---------------|----------|
+| Reads without deletion vectors | GPU |
+| Deletion vector reads | GPU with metadata row index and cuDF plugin deletion-vector predicate pushdown |
+| Delta writes | GPU for append, overwrite, CTAS, and RTAS |
+| Delta writes with deletion vectors | GPU for persistent-DV DELETE, UPDATE, and MERGE when metadata row indexes and cuDF plugin deletion-vector predicate pushdown are enabled; CPU fallback otherwise |
+| DELETE and UPDATE | GPU for copy-on-write, including liquid-clustered tables, and for supported persistent-DV writes |
+| MERGE | GPU, including supported persistent-DV writes |
+| OPTIMIZE | GPU for supported native non-clustered and ordinary liquid-clustering write paths; the outer command remains on CPU |
+| Auto compaction | GPU for supported inline, deletion-vector-free paths |
+| Liquid clustering | GPU for writes, DELETE, UPDATE, MERGE, and ordinary OPTIMIZE |
 
 DBR 17.3 supports GPU data-file writes for qualified liquid-clustering,
 CTAS, and RTAS paths while retaining Databricks-native planning and commit
 semantics. See [#15278](https://github.com/NVIDIA/cudf-spark/pull/15278) and
 [#15320](https://github.com/NVIDIA/cudf-spark/pull/15320) for details and
-expected fallback cases.
+expected fallback cases. See the [DBR 18 LTS Delta shim notes](https://github.com/NVIDIA/cudf-spark/blob/main/delta-lake/delta-spark410db183/README.md) for the separate DBR 18 LTS implementation and fallback details.
 
 Databricks may patch existing runtime versions without changing the public
 runtime line. If a binary compatibility error such as `NoSuchMethodError`
