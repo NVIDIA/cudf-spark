@@ -7,6 +7,9 @@ inputs:
   scala:
     description: Scala binary version of the Spark distribution
     required: true
+  distribution:
+    description: Select standalone Spark or the upstream Spark smoke test for Databricks PART1
+    default: standalone
   save:
     description: Warm the cache without restoring existing entries (trusted branch warmer only)
     default: 'false'
@@ -25,12 +28,13 @@ runs:
       shell: bash
       env:
         SCALA: ${{ inputs.scala }}
+        DISTRIBUTION: ${{ inputs.distribution }}
         WARM_ONLY: >-
           ${{ inputs.save == 'true' && github.repository == 'NVIDIA/cudf-spark' &&
           (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) &&
           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
       run: |
-        python3 "$GITHUB_ACTION_PATH/archive.py" metadata "$SCALA" >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/archive.py" metadata "$SCALA" --distribution "$DISTRIBUTION" >> "$GITHUB_OUTPUT"
         printf 'warm_only=%s\n' "$WARM_ONLY" >> "$GITHUB_OUTPUT"
     - name: Restore archive
       id: restore
@@ -46,7 +50,8 @@ runs:
       shell: bash
       env:
         SCALA: ${{ inputs.scala }}
-      run: python3 "$GITHUB_ACTION_PATH/archive.py" ensure "$SCALA"
+        DISTRIBUTION: ${{ inputs.distribution }}
+      run: python3 "$GITHUB_ACTION_PATH/archive.py" ensure "$SCALA" --distribution "$DISTRIBUTION"
     - name: Save archive
       id: save
       # A PR miss may seed only its merge ref, never a trusted caller's branch.

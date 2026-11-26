@@ -170,13 +170,16 @@ def resolve_images(requests, allow_main):
     return result
 
 
-def select():
+def select(pr_base=None):
     event = os.environ["GITHUB_EVENT_NAME"]
     payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     ref = os.environ["GITHUB_REF_NAME"]
+    if pr_base is not None and (event != "push" or not re.fullmatch(r"pull-request/[1-9][0-9]*", ref)):
+        raise ValueError("--pr-base expects an approved copy-branch push")
+    validate = pr_base is not None or event == "pull_request"
     tag = "validate"
     base = None
-    if event == "pull_request":
+    if validate:
         # Checkout is the synthetic merge; its first parent is the base it was tested against.
         base = "HEAD^1"
     else:
@@ -208,7 +211,7 @@ def select():
     rules = json.loads(PATH_RULES.read_text())
     version_file = rules["release-version-file"]
     line = release_line("HEAD", version_file)
-    target = os.environ["GITHUB_BASE_REF"] if event == "pull_request" else ref
+    target = (pr_base or os.environ["GITHUB_BASE_REF"]) if validate else ref
     if target.startswith("release/") and target != f"release/{line}":
         raise ValueError(f"Branch {target} does not match root {version_file} release line {line}")
     # A shared change already selects all recipes. Its new version file may not exist at base.
@@ -230,10 +233,10 @@ def select():
         inputs = entry.get("recipe-inputs", [])
         if not all(p in tracked for p in [smoke, *inputs]):
             raise ValueError(f"{name}: missing tracked smoke script or recipe input")
-        if not ci and event != "pull_request":
+        if not ci and not validate:
             # Examples and templates are checked before merge; they are never published.
             continue
-        publish = ci and event != "pull_request"
+        publish = ci and not validate
         rollover = "variants" in entry and line_changed
         if base and not (rollover or affected(entry, changed, rules, publish=publish)
                          or previous.get(name) != (suite, entry)):
@@ -242,7 +245,7 @@ def select():
             configurations(name, entry, tracked, tag, line, publish, has_publisher=ci)
         )
     run_tests = None
-    if event == "pull_request":
+    if validate:
         tests = rules["unit-tests"]
         run_tests = bool(jobs["validate"])
         if not run_tests and tests["include"]:
@@ -254,6 +257,8 @@ def select():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--pr-base", metavar="BRANCH",
+                      help="Validate the checked-out PR merge for an approved copy-branch push")
     mode.add_argument("--current", metavar="IMAGE", help="Check whether this publisher is still current")
     mode.add_argument("--resolve", nargs="+", metavar="PACKAGE/[OS/]ARCH",
                       help="Print consumer metadata for the named selections at this checkout")
@@ -272,7 +277,7 @@ if __name__ == "__main__":
         if not current:
             print(f"Skipping superseded recipe for {args.current}; its branch inputs changed.")
         sys.exit(0)
-    jobs, run_tests = select()
+    jobs, run_tests = select(args.pr_base)
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         for operation, matrix in jobs.items():
             print(f"{operation}=" + json.dumps(matrix, separators=(",", ":")), file=output)

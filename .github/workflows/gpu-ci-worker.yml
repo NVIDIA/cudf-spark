@@ -25,7 +25,7 @@ jobs:
     name: worker
     if: github.repository == 'NVIDIA/cudf-spark'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 240
+    timeout-minutes: &worker-minutes ${{ fromJSON(inputs.workload).kind == 'integration' && 240 || fromJSON(inputs.workload).shims[1] && 180 || 150 }}
     env:
       SCALA: ${{ fromJSON(inputs.workload).scala }}
       GROUP: ${{ fromJSON(inputs.workload).group }}
@@ -40,6 +40,7 @@ jobs:
           source-ref: ${{ inputs.source-ref }}
           source-sha: ${{ inputs.source-sha }}
 
+      # No candidate code or checkout until the coordinator, runner and live PR all match.
       - name: Check worker definition and current PR merge
         uses: actions/github-script@v9
         env:
@@ -47,6 +48,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source-sha }}
           PARENT: ${{ inputs.parent-run-id }}
           WORKLOAD: ${{ inputs.workload }}
+          WORKER_MINUTES: *worker-minutes
         with:
           script: |
             const w = JSON.parse(process.env.WORKLOAD);
@@ -75,7 +77,7 @@ jobs:
               throw new Error('PR head, base or merge commit changed; rerun for the current PR');
             }
             // Budget includes checkout, image pull and restore. Leave time for cleanup and upload.
-            core.exportVariable('GPU_DEADLINE', Math.floor(Date.now() / 1000) + 210 * 60);
+            core.exportVariable('GPU_DEADLINE', Math.floor(Date.now() / 1000) + (Number(process.env.WORKER_MINUTES) - 30) * 60);
 
       - name: Checkout tested merge and pinned submodules
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -93,31 +95,11 @@ jobs:
           WORKLOAD: ${{ inputs.workload }}
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$MERGE_SHA" ]]
-          [[ "$(git show -s --format=%P HEAD)" == "$BASE_SHA $HEAD_SHA" ]]
-          [[ "$(git -C thirdparty/parquet-testing rev-parse HEAD)" == "$(git rev-parse HEAD:thirdparty/parquet-testing)" ]]
-          compgen -G 'thirdparty/parquet-testing/data/*.parquet' >/dev/null
-          suites=$(jq -cn '[env.KIND]')
-          row=$(jq -ce '
-            if .kind == "unit" then {kind, group, scala, shims}
-            elif .kind == "integration" then {kind, group, scala, shim, shard}
-            else error("Unknown GPU workload kind") end | .arch = env.GPU_ARCH' <<< "$WORKLOAD")
-          if ! python3 .github/workflows/gpu-ci/groups.py "$suites" | jq -e --argjson row "$row" '
-            any(.include[]; ({arch: "amd64"} + .) == $row)' >/dev/null; then
-            echo "::error::Dispatched group does not match the $GPU_ARCH merge catalog or the catalog could not be read."
+          if [[ "$(git rev-parse HEAD)" != "$MERGE_SHA" || "$(git show -s --format=%P HEAD)" != "$BASE_SHA $HEAD_SHA" ]]; then
+            echo "::error::Checked-out revision or parents do not match the approved PR merge."
             exit 1
           fi
-          if jq -e 'has("targets")' <<< "$WORKLOAD" >/dev/null; then
-            targets=$(jq -ce 'if (.targets | type == "array" and length > 0 and all(.[]; type == "string"))
-              then .targets else error("Expected nonempty suite or case targets") end' <<< "$WORKLOAD")
-            if ! python3 .github/workflows/gpu-ci/groups.py "$suites" --base "$BASE_SHA" --merge "$MERGE_SHA" |
-              jq -e --argjson row "$row" --argjson targets "$targets" '
-                any(.include[]; . == ($row + {targets: $targets}))' >/dev/null; then
-              echo "::error::Could not verify targets for $GROUP against $BASE_SHA..$MERGE_SHA."
-              exit 1
-            fi
-            printf 'targets=%s\n' "$targets" >> "$GITHUB_OUTPUT"
-          fi
+          bash .github/workflows/gpu-ci/verify-group.sh
       - name: Checkout the shared image recipe helper
         uses: NVIDIA/spark-rapids-common/checkout@main
         with:
@@ -139,16 +121,7 @@ jobs:
         timeout-minutes: 60
         env:
           IMAGE_CONFIG: ${{ steps.image.outputs.build }}
-        run: |
-          set -euo pipefail
-          home=$(mktemp -d "$RUNNER_TEMP/gpu-image.XXXXXXXX")
-          trap 'rm -rf -- "$home"' EXIT
-          env -i PATH="$PATH" HOME="$home" DOCKER_CONFIG="$home" DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}" \
-            IMAGE_CONFIG="$IMAGE_CONFIG" PUBLISH_IMAGE=false bash .ci-common/container-image/image.sh
-          image=$(docker image inspect "image-validation:$(jq -er .tag <<< "$IMAGE_CONFIG")" |
-            jq -er --arg arch "$GPU_ARCH" '.[0] | select(.Os == "linux" and .Architecture == $arch) | .Id')
-          [[ $image =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=$image" >> "$GITHUB_OUTPUT"
+        run: bash .github/workflows/gpu-ci/build-local-image.sh
 
       - name: Restore Maven dependencies
         id: cache

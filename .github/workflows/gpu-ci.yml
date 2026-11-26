@@ -20,12 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      base-branch: ${{ steps.pr.outputs.base }}
+      base-branch: ${{ steps.pr.outputs.base-branch }}
       base-sha: ${{ steps.pr.outputs.base-sha }}
       merge-sha: ${{ steps.pr.outputs.merge-sha }}
+      title-policy: ${{ steps.pr.outputs.title-policy }}
       parallel-ut: ${{ steps.pr.outputs.parallel-ut }}
       reduced-it: ${{ steps.pr.outputs.reduced-it }}
       matrix: ${{ steps.groups.outputs.matrix }}
+      selection-attempt: ${{ steps.pr.outputs.attempt }}
+      cache212: ${{ steps.groups.outputs.cache212 }}
+      cache213: ${{ steps.groups.outputs.cache213 }}
       required-jobs: ${{ steps.groups.outputs.matrix && '["select","gpu-test"]' || '["select"]' }}
     steps:
       - name: Identify the approved PR and merge candidate
@@ -33,94 +37,72 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const match = /^refs\/heads\/pull-request\/([1-9]\d*)$/.exec(context.ref);
-            if (!match) throw new Error('Expected a copy-pr-bot branch');
-            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: +match[1]});
-            if (pr.state !== 'open' || pr.head.sha !== context.sha) {
-              throw new Error('The copied revision no longer matches the open PR');
-            }
-            const base = pr.base.ref;
-            const release = /^release\/(\d{2}\.\d{2})$/.exec(base);
-            if (base !== 'main' && !(release && release[1] >= '27.02')) {
-              core.notice('Standalone GPU CI is not enabled for this target branch');
-              return;
-            }
-            if (/\[skip ci\]/i.test(pr.title)) {
-              core.notice('GPU tests skipped by PR title');
-              return;
-            }
-            if (!pr.merge_commit_sha || pr.mergeable === false) {
-              throw new Error('No testable PR merge revision; resolve conflicts or retry when GitHub has computed it');
-            }
-            core.setOutput('base', base);
-            core.setOutput('base-sha', pr.base.sha);
-            core.setOutput('merge-sha', pr.merge_commit_sha);
-            core.setOutput('parallel-ut', !/\[serial[ -]ut\]/i.test(pr.title));
-            core.setOutput('reduced-it', /\[reduced-it\]/i.test(pr.title));
+            const copy = /^refs\/heads\/pull-request\/([1-9]\d*)$/.exec(context.ref);
+            if (!copy) throw new Error('Expected a copied PR branch');
+            core.setOutput('attempt', process.env.GITHUB_RUN_ATTEMPT);
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: Number(copy[1])});
+            if (pr.state !== 'open' || pr.head.sha !== context.sha || !pr.merge_commit_sha || pr.mergeable === false)
+              throw new Error('Copied head no longer matches a testable open PR');
+            const flags = [/\[skip ci\]/i, /\[databricks\]/i, /\[reduced-it\]/i, /\[serial[ -]ut\]/i].map(re => re.test(pr.title));
+            for (const [key, value] of Object.entries({'base-branch': pr.base.ref, 'base-sha': pr.base.sha,
+              'merge-sha': pr.merge_commit_sha, 'skip-ci': flags[0], 'parallel-ut': !flags[3],
+              'reduced-it': flags[2], 'title-policy': flags.map(Number).join('')})) core.setOutput(key, value);
+      - id: eligible
+        env:
+          BASE: ${{ steps.pr.outputs.base-branch }}
+          SKIP: ${{ steps.pr.outputs.skip-ci }}
+        run: |
+          if [[ $SKIP != true && ( $BASE == main || ( $BASE =~ ^release/[0-9]{2}\.[0-9]{2}$ && ! $BASE < release/27.02 ) ) ]]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          fi
       - uses: NVIDIA/spark-rapids-common/checkout@main
-        if: steps.pr.outputs.merge-sha != ''
+        if: steps.eligible.outputs.run == 'true'
         with:
           ref: ${{ steps.pr.outputs.merge-sha }}
           fetch-depth: 2
           persist-credentials: false
       - name: Check both merge parents
-        if: steps.pr.outputs.merge-sha != ''
+        if: steps.eligible.outputs.run == 'true'
         env:
           BASE_SHA: ${{ steps.pr.outputs.base-sha }}
         run: test "$(git show -s --format=%P HEAD)" = "$BASE_SHA $GITHUB_SHA"
       - id: suites
-        if: steps.pr.outputs.merge-sha != ''
+        if: steps.eligible.outputs.run == 'true'
         continue-on-error: true
         uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
         with:
           catalog-path: .github/gpu-ci-suites.json
-          base-branch: ${{ steps.pr.outputs.base }}
+          base-branch: ${{ steps.pr.outputs.base-branch }}
           selector-job: select
       - name: Select GPU runner assignments
         id: groups
-        if: steps.pr.outputs.merge-sha != ''
+        if: steps.eligible.outputs.run == 'true'
         env:
           SELECT_OUTCOME: ${{ steps.suites.outcome }}
           SUITES: ${{ steps.suites.outputs.suites }}
           GH_TOKEN: ${{ github.token }}
-          BASE: ${{ steps.pr.outputs.base }}
+          BASE: ${{ steps.pr.outputs.base-branch }}
           BASE_SHA: ${{ steps.pr.outputs.base-sha }}
           MERGE_SHA: ${{ steps.pr.outputs.merge-sha }}
-        run: |
-          revisions=(--base "$BASE_SHA" --merge "$MERGE_SHA")
-          if [[ $SELECT_OUTCOME != success || -z $SUITES ]]; then
-            echo "::warning::Could not establish changed-file scope; running all configured GPU suites"
-            SUITES=$(jq -ce '[.suites | to_entries[] | select(.value.enabled != false) | .key] | select(length > 0)' .github/gpu-ci-suites.json)
-            revisions=()
-          fi
-          if [[ $SUITES == '[]' ]]; then
-            # A docs-only result must belong to the original merge, even if the base moved.
-            gh api "repos/$GITHUB_REPOSITORY/pulls/${GITHUB_REF_NAME#pull-request/}" |
-              jq -e '.state == "open" and .head.sha == env.GITHUB_SHA and .base.ref == env.BASE and
-                .base.sha == env.BASE_SHA and .merge_commit_sha == env.MERGE_SHA' >/dev/null ||
-              { echo "::error::Cannot confirm the current PR merge for the no-test decision"; exit 1; }
-            exit 0
-          fi
-          matrix=$(python3 .github/workflows/gpu-ci/groups.py "$SUITES" "${revisions[@]}")
-          jq -er '.include[] | .group + " (" + .arch + "): " + ((.targets // ["full group"]) | join(", "))' \
-            <<< "$matrix" >> "$GITHUB_STEP_SUMMARY"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+        run: bash .github/workflows/gpu-ci/select-groups.sh
 
   cache-212:
     needs: select
-    if: needs.select.outputs.matrix != ''
+    if: needs.select.outputs.cache212 != '' && needs.select.outputs.cache212 != 'none'
     uses: ./.github/workflows/gpu-ci-cache-key.yml
     with:
       scala: '2.12'
+      integration: ${{ needs.select.outputs.cache212 == 'integration' }}
       base-branch: ${{ needs.select.outputs.base-branch }}
       merge-sha: ${{ needs.select.outputs.merge-sha }}
 
   cache-213:
     needs: select
-    if: needs.select.outputs.matrix != ''
+    if: needs.select.outputs.cache213 != '' && needs.select.outputs.cache213 != 'none'
     uses: ./.github/workflows/gpu-ci-cache-key.yml
     with:
       scala: '2.13'
+      integration: ${{ needs.select.outputs.cache213 == 'integration' }}
       base-branch: ${{ needs.select.outputs.base-branch }}
       merge-sha: ${{ needs.select.outputs.merge-sha }}
 
@@ -131,11 +113,12 @@ jobs:
     if: >-
       !cancelled() && needs.select.result == 'success' && needs.select.outputs.matrix != ''
     strategy:
-      fail-fast: false
+      fail-fast: true
       max-parallel: 8
       matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[]}') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    # Allow up to six 15-minute queue waits in addition to the worker and cleanup.
+    timeout-minutes: ${{ matrix.kind == 'integration' && 360 || matrix.shims[1] && 300 || 270 }}
     permissions:
       contents: read
       actions: write
@@ -178,16 +161,33 @@ jobs:
           workload: ${{ steps.workload.outputs.payload }}
           runner-type: gpu-${{ matrix.arch }}
           queue-timeout-minutes: '15'
-          execution-timeout-minutes: '240'
+          execution-timeout-minutes: ${{ matrix.kind == 'integration' && '240' || matrix.shims[1] && '180' || '150' }}
 
   gate:
-    name: GPU CI gate
+    # The trusted controller combines this attempt's result with any selected DB cells.
+    name: Standalone GPU CI result / ${{ needs.select.outputs.merge-sha }} / ${{ needs.select.outputs.title-policy }}
     if: always() && github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted
     needs: [select, gpu-test]
     runs-on: ubuntu-latest
-    permissions: {}
+    timeout-minutes: 5
+    permissions: {contents: read, actions: read}
     steps:
-      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+      - id: native
+        uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
         with:
           needs: ${{ toJSON(needs) }}
           required-jobs: ${{ needs.select.outputs.required-jobs }}
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        if: &check-receipts steps.native.outcome == 'success' && github.run_attempt > 1 && needs.select.outputs.matrix != ''
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/workflows/gpu-ci/job_receipts.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Verify each selected GPU group passed
+        if: *check-receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MATRIX: ${{ needs.select.outputs.matrix }}
+          SELECTION_ATTEMPT: ${{ needs.select.outputs.selection-attempt }}
+        run: python3 -I .github/workflows/gpu-ci/job_receipts.py

@@ -6,6 +6,7 @@ on:
   workflow_call:
     inputs:
       scala: {type: string, required: true}
+      integration: {type: boolean, default: false}
       base-branch: {type: string, required: true}
       merge-sha: {type: string, required: true}
     outputs:
@@ -18,7 +19,7 @@ permissions:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: ${{ inputs.integration && 90 || 60 }}
     outputs:
       key: ${{ steps.maven.outcome == 'success' && steps.maven.outputs.key || '' }}
     steps:
@@ -38,3 +39,4 @@ jobs:
           scala: ${{ inputs.scala }}
           base-branch: ${{ inputs.base-branch }}
           key-only: 'true'
+          premerge: ${{ inputs.integration && 'true' || 'false' }}

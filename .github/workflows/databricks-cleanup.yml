@@ -1,0 +1,34 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Clean up GHA Databricks clusters
+on:
+  schedule:
+    - cron: '23 * * * *'
+
+permissions: {contents: read, actions: read}
+
+jobs:
+  reconcile:
+    if: github.repository == 'NVIDIA/cudf-spark' && github.ref == 'refs/heads/main' && vars.DATABRICKS_CI_ENABLED == 'true'
+    runs-on:
+      group: ${{ vars.DATABRICKS_CI_RUNNER_GROUP }}
+    environment: databricks-ci
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [aws2, aws, azure3]
+    concurrency:
+      group: db-orphan-cleanup-${{ matrix.profile }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - name: Reconcile only clusters owned by finished GHA attempts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROFILE: ${{ matrix.profile }}
+          DATABRICKS_TOKEN: ${{ secrets[format('DATABRICKS_{0}_TOKEN', matrix.profile)] }}
+          DATABRICKS_PROFILES_JSON: ${{ vars.DATABRICKS_PROFILES_JSON }}
+        run: python3 -I .github/workflows/databricks-ci/cleanup-orphans.py --profile "$PROFILE"

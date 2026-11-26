@@ -13,21 +13,31 @@ import sys
 import tempfile
 
 
-def archive(scala):
+def archive(scala, distribution="standalone"):
     release = json.loads(Path(__file__).with_name("releases.json").read_text())[scala]
+    suffix = ""
+    if distribution == "databricks-smoke" and distribution in release:
+        release = release[distribution]
+        suffix = f"-scala{scala}"
+    elif distribution != "standalone":
+        raise ValueError(f"Unsupported Spark distribution {distribution} for Scala {scala}")
     version, digest = release["version"], release["sha512"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"[0-9a-f]{128}", digest):
         raise ValueError(f"Invalid Spark release or SHA-512 for Scala {scala}")
-    name = f"spark-{version}-bin-hadoop3.tgz"
+    name = f"spark-{version}-bin-hadoop3{suffix}.tgz"
     return name, f"https://archive.apache.org/dist/spark/spark-{version}/{name}", digest
 
 
-def sha512(path):
+def stream_sha512(stream):
     digest = hashlib.sha512()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha512(path):
+    with path.open("rb") as stream:
+        return stream_sha512(stream)
 
 
 def download(url, path):
@@ -76,8 +86,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("metadata", "ensure"))
     parser.add_argument("scala", choices=("2.12", "2.13"))
+    parser.add_argument("--distribution", choices=("standalone", "databricks-smoke"), default="standalone")
     args = parser.parse_args()
-    name, url, digest = archive(args.scala)
+    name, url, digest = archive(args.scala, args.distribution)
     path = Path.home().resolve() / ".cache/cudf-spark/spark" / name
     if args.operation == "metadata":
         check_path(path)

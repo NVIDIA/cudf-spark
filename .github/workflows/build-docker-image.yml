@@ -10,6 +10,9 @@ on:
       config:
         required: true
         type: string
+      merge-sha:
+        description: Exact merge commit for premerge validation only
+        type: string
       publish:
         type: boolean
         default: false
@@ -22,10 +25,12 @@ jobs:
       matrix:
         worker: ${{ fromJSON(inputs.config).workers }}
     runs-on: ${{ matrix.worker.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    timeout-minutes: 90
+    # PR validation peaked near 16 minutes on Rocky amd64; allow for a cold native build.
+    timeout-minutes: ${{ inputs.publish && 90 || 45 }}
     steps:
       - uses: NVIDIA/spark-rapids-common/checkout@main
         with:
+          ref: ${{ !inputs.publish && inputs.merge-sha || '' }}
           persist-credentials: false
       - uses: NVIDIA/spark-rapids-common/checkout@main
         with:

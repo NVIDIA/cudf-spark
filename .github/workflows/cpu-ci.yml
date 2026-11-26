@@ -1,60 +1,65 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Run the CPU checks selected for each pull request and report their combined result.
+# Run the selected CPU checks after the copy bot approves a PR revision.
 name: CPU CI
 
 on:
-  pull_request:
-    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
-    types: [opened, synchronize, reopened]
+  push:
+    branches: ['pull-request/[0-9]+']
 
 permissions:
   contents: read
 
 concurrency:
   # Reject stale manual reruns in select without cancelling a newer automatic run.
-  group: cpu-ci-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt > 1 && github.run_id || 'auto' }}
+  group: cpu-ci-${{ github.ref }}-${{ github.run_attempt > 1 && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:
   select:
     name: Select CPU checks
+    # Selection may run a cold Maven RAT check and the affected CI helper tests.
+    timeout-minutes: 20
+    if: github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
-      validate: ${{ steps.title.outputs.skip == 'true' && '[]' || steps.recipes.outputs.validate }}
+      base: ${{ steps.pr.outputs.base-branch }}
+      merge: ${{ steps.pr.outputs.merge-sha }}
+      cpu-scope: ${{ steps.pr.outputs.cpu-scope }}
+      validate: ${{ steps.recipes.outputs.validate }}
       maven: ${{ steps.maven.outputs.mode }}
       required: ${{ steps.required.outputs.jobs }}
     steps:
-      - name: Read the current PR title
-        id: title
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          # A manual rerun reuses the original event payload, including its old title.
-          if [[ $GITHUB_RUN_ATTEMPT == 1 ]]; then
-            pr=$(jq -c '.pull_request' "$GITHUB_EVENT_PATH")
-          else
-            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
-          fi
-          skip=$(jq -er --arg head "$HEAD_SHA" --arg base "$BASE_REF" '
-            if .state == "open" and .head.sha == $head and .base.ref == $base
-            then .title | ascii_downcase | contains("[skip ci]") | tostring
-            else error("PR is closed or its head or base has changed")
-            end' <<< "$pr")
-          echo "skip=$skip" >> "$GITHUB_OUTPUT"
-          if [[ $skip == true ]]; then
-            echo 'Docker validation skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - uses: NVIDIA/spark-rapids-common/checkout@main
+      - name: Resolve the approved PR merge
+        id: pr
+        uses: actions/github-script@v9
         with:
+          script: |
+            const number = /^refs\/heads\/pull-request\/([1-9]\d*)$/.exec(context.ref)?.[1];
+            if (!number) throw new Error('Expected a copied PR branch');
+            const {data: copy} = await github.rest.git.getRef({...context.repo, ref: context.ref.slice(5)});
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: Number(number)});
+            if (copy.object.sha !== context.sha || pr.state !== 'open' || pr.head.sha !== context.sha ||
+                !pr.base.ref || !pr.merge_commit_sha || pr.mergeable === false) throw new Error('No current testable PR for this copy');
+            const {data: merge} = await github.rest.git.getCommit({...context.repo, commit_sha: pr.merge_commit_sha});
+            if (merge.sha !== pr.merge_commit_sha ||
+                merge.parents.map(p => p.sha).join(' ') !== `${pr.base.sha} ${context.sha}`) throw new Error('Stale test merge');
+            core.setOutput('base-branch', pr.base.ref);
+            core.setOutput('merge-sha', pr.merge_commit_sha);
+            core.setOutput('skip-ci', /\[skip ci\]/i.test(pr.title));
+            core.setOutput('cpu-scope', pr.base.ref === 'main' || /^release\/\d{2}\.\d{2}$/.test(pr.base.ref));
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        if: steps.pr.outputs.cpu-scope == 'true'
+        with:
+          ref: ${{ steps.pr.outputs.merge-sha }}
           fetch-depth: 2
           persist-credentials: false
       - name: Select hosted Maven checks
+        if: steps.pr.outputs.cpu-scope == 'true'
         id: maven
         shell: bash
         run: |
@@ -64,32 +69,36 @@ jobs:
       - name: Check licenses for standalone pytest edits
         if: steps.maven.outputs.mode == 'rat'
         run: mvn --batch-mode -s .github/actions/maven-cache/settings.xml -N -f integration_tests/pom.xml apache-rat:check
+      - name: Test Databricks CI helpers when changed
+        if: steps.pr.outputs.cpu-scope == 'true'
+        run: bash .github/workflows/cpu-ci.sh db-tests
       - name: Select image recipes
         id: recipes
-        if: steps.title.outputs.skip == 'false'
-        run: python3 .github/workflows/ci-images/select.py
+        if: steps.pr.outputs.cpu-scope == 'true' && steps.pr.outputs.skip-ci == 'false'
+        env:
+          BASE: ${{ steps.pr.outputs.base-branch }}
+        run: python3 .github/workflows/ci-images/select.py --pr-base "$BASE"
       - name: Test image CI
         if: steps.recipes.outputs.run-tests == 'true'
         run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
       - name: Set required jobs
+        if: steps.pr.outputs.cpu-scope == 'true'
         id: required
         shell: bash
         env:
-          VALIDATE: ${{ steps.title.outputs.skip == 'true' && '[]' || steps.recipes.outputs.validate }}
+          VALIDATE: ${{ steps.pr.outputs.skip-ci == 'true' && '[]' || steps.recipes.outputs.validate }}
           MAVEN: ${{ steps.maven.outputs.mode }}
-        run: |
-          jobs=$(jq -cne --argjson images "$VALIDATE" --arg maven "$MAVEN" '
-            if ($images | type) != "array" or (["full","rat","skip"] | index($maven)) == null
-            then error("Invalid CPU selection")
-            else ["select", (if ($images | length) > 0 then "validate" else empty end),
-                 (if $maven == "full" then "maven" else empty end)] end')
-          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+        run: bash .github/workflows/cpu-ci.sh required
 
   maven:
     name: Maven Verify
     needs: select
-    if: needs.select.outputs.maven == 'full'
+    # Other PR bases retain their existing full Maven Verify, but only after approval.
+    if: needs.select.outputs.maven == 'full' || needs.select.outputs.cpu-scope == 'false'
     uses: ./.github/workflows/mvn-verify-check.yml
+    with:
+      merge-sha: ${{ needs.select.outputs.merge }}
+      base-branch: ${{ needs.select.outputs.base }}
 
   validate:
     name: Validate ${{ matrix.image.id }}
@@ -102,10 +111,12 @@ jobs:
     uses: ./.github/workflows/build-docker-image.yml
     with:
       config: ${{ toJSON(matrix.image) }}
+      merge-sha: ${{ needs.select.outputs.merge }}
 
   result:
     name: CPU CI gate
-    if: always()
+    timeout-minutes: 5
+    if: always() && needs.select.result != 'skipped' && needs.select.outputs.cpu-scope != 'false'
     needs: [select, validate, maven]
     runs-on: ubuntu-latest
     steps:
@@ -117,8 +128,9 @@ jobs:
   # Remove after main and release branch rules require CPU CI gate instead.
   legacy-maven-check:
     name: ${{ matrix.context }}
+    timeout-minutes: 5
     needs: [select, maven]
-    if: always()
+    if: always() && needs.select.result != 'skipped' && needs.select.outputs.cpu-scope != 'false'
     runs-on: ubuntu-slim
     strategy:
       fail-fast: false
@@ -129,7 +141,7 @@ jobs:
           - package-tests-scala213 (400, false)
           - verify-213-modules (400, 17)
         include: >-
-          ${{ fromJSON(github.base_ref == 'main' &&
+          ${{ fromJSON(needs.select.outputs.base == 'main' &&
           '[{"context":"package-tests (333, false)"},{"context":"package-tests-scala213 (350, false)"},{"context":"package-tests-scala213 (356, false)"}]'
           || '[]') }}
     steps:
@@ -144,7 +156,8 @@ jobs:
         run: |
           case "$SELECT:$MODE:$MAVEN" in
             success:full:success)
-              jq -en --arg context "$CONTEXT" --argjson verified "$VERIFIED" '$verified | index($context) != null' ;;
+              jq -en --arg context "$CONTEXT" --argjson verified "$VERIFIED" \
+                '$verified | type == "array" and index($context) != null' ;;
             success:rat:skipped|success:skip:skipped) echo "Full Maven Verify not selected ($MODE)." ;;
             *) echo "::error::Maven check $CONTEXT: selector=$SELECT mode=$MODE workload=$MAVEN"; exit 1 ;;
           esac

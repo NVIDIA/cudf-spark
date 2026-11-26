@@ -89,14 +89,18 @@ if [[ $IT_SHARD == 1 ]]; then
 else
   run_phase shuffle rapids_shuffle_smoke_test "$SPARK_VER"
   if [[ $SCALA_BINARY_VER == 2.13 ]]; then
-    run_phase iceberg-versions run_iceberg_version_detect_tests "$SPARK_VER" "$SCALA_BINARY_VER"
     artifact="iceberg-spark-runtime-${SPARK_VER%.*}_$SCALA_BINARY_VER"
     version=1.10.1
     jar="$HOME/.m2/repository/org/apache/iceberg/$artifact/$version/$artifact-$version.jar"
-    if [[ ! -s $jar ]]; then
+    if [[ ! -s $jar || ! -s ${jar%.jar}.pom ]]; then
       mvn -N -B -s "$settings" org.apache.maven.plugins:maven-dependency-plugin:2.10:get \
-        -Dartifact="org.apache.iceberg:$artifact:$version" -Dtransitive=false
+        -Dartifact="org.apache.iceberg:$artifact:$version"
     fi
+    # Both spark-submit and parallel PySpark read this job's extracted Spark configuration.
+    # Ivy does not read Maven settings; use the staged Maven repository before the public mirror.
+    printf '\nspark.jars.ivySettings %s\n' "$PWD/.github/actions/maven-cache/ivysettings.xml" \
+      >> "$SPARK_HOME/conf/spark-defaults.conf"
+    run_phase iceberg-versions run_iceberg_version_detect_tests "$SPARK_VER" "$SCALA_BINARY_VER"
     run_phase iceberg-classpath run_iceberg_extra_classpath_tests \
       "$SPARK_VER" "$SCALA_BINARY_VER" "$version" "$jar"
   fi
