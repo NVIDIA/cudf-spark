@@ -41,9 +41,7 @@ VERSION_NUM=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS//.}
 SPARK_VERSION_STR=spark$VERSION_NUM
 SPARK_PLUGIN_JAR_VERSION=$($MVN help:evaluate -q -pl dist -Dexpression=project.version -DforceStdout)
 # Append the runtime version to DB shims that need an exact Databricks line.
-if [[ "$DB_RUNTIME" == "14.3"* ]]; then
-    DB_SHIM_NAME="${SPARK_VERSION_STR}db143"
-elif [[ "$DB_RUNTIME" == "17.3"* ]]; then
+if [[ "$DB_RUNTIME" == "17.3"* ]]; then
     # Databricks 17.3 based on Spark 4.0.0
     DB_SHIM_NAME="${SPARK_VERSION_STR}db173"
 elif [[ "$DB_RUNTIME" == "18.3"* ]]; then

@@ -450,23 +450,27 @@ expression bridge are enabled. Strict `variant_get` and negative-scale decimal t
 remain on the CPU.
 
 For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQL null for
-final target overflow. SQL-null parent rows do not require runtime CPU fallback.
-Other source representations,
-including integer, string, boolean, and floating-point values, are converted by Spark through
-the CPU bridge. A missing path or encoded Variant null also uses that bridge: the native
-status alone cannot establish Spark's error behavior for malformed paths. Any row requiring
-the bridge sends the entire input batch through CPU evaluation, even when the surrounding
-plan contains `GpuVariantGet`. Temporary extraction and decoding columns are released before
-CPU conversion.
+final target overflow. Other source representations, including integer, string, boolean, and
+floating-point values, are converted by Spark through the CPU bridge.
+
+SQL-null parents stay on the GPU for every target, and missing paths and encoded Variant
+nulls do for every target except decimal. For decimal targets, a missing path or encoded
+Variant null uses the bridge, so that malformed object field ids raise Spark's error.
+Malformed bytes that extraction reports, rows that Spark's Variant constructor rejects, and
+path steps that meet a primitive type ID Spark does not recognize use the bridge so that Spark
+raises its error. Any row requiring the bridge sends the entire input batch through CPU
+evaluation, even when the surrounding plan contains `GpuVariantGet`. Temporary extraction and
+decoding columns are released before CPU conversion.
 
 Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
 intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
 Values outside that intermediate range fall back even if the final target could hold them;
 for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
 Width-specific decimal payload precision and scale are checked, but these checks do not
-validate the entire Variant path.
-As with boolean, integer, floating-point, and string extraction, malformed or noncanonical
-object/metadata encodings may therefore differ from Spark; incompatible-operation gating
+validate the entire Variant path. For targets other than decimal, object field ids that are
+unsorted or outside the metadata dictionary, which the Variant spec forbids, can return SQL
+null where Spark returns a value or raises an error. Malformed or noncanonical object and
+metadata encodings may also differ from Spark for any target; incompatible-operation gating
 remains in place.
 
 ## Parquet
@@ -487,6 +491,21 @@ When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently i
 The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files.
 At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
 format, and will error out in that case.
+
+## Delta Lake Parquet format version
+
+OSS Delta Lake 4.3 lets a table choose the Parquet data page version of the files Delta writes
+through the `delta.parquet.format.version` table property, or the `parquet.writer.version`
+Spark configuration when the property is unset. The plugin's GPU Parquet writer only writes
+`DataPageV1` pages: libcudf can write version 2 page headers, but the cuDF Java API does not
+expose that option yet. A write whose requested version resolves to `1.0.0`, or that does not
+request one, stays on the GPU. A write that resolves to a newer version, which would produce
+`DataPageV2` pages, falls back to the CPU for append, overwrite, CTAS, RTAS, UPDATE, DELETE,
+MERGE, OPTIMIZE, REORG, `replaceWhere` and dynamic partition overwrite. Delta 4.3
+knows the versions `1.0.0` and `2.12.0` and picks the highest known one that is at or below the
+requested value, so `2.0.0` through `2.11.x` resolve to `1.0.0` and stay on the GPU. An
+invalid value falls back so that the CPU raises Delta's own error. A table can hold files of both
+page versions, and the GPU reads both.
 
 ## Delta Lake selective replacement
 
@@ -1010,12 +1029,9 @@ hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising he
 
 Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
 ([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks
-runtimes, including 14.3 and 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
+Runtime 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
 `0x0ABC`. The GPU returns the corrected result for every Spark version, so results for
-odd-length input differ from the CPU on those runtimes. On Databricks 14.3, setting the internal
-configuration `spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled` to `true`
-(default: `false`) enables the corrected CPU behavior. The GPU behavior is unchanged by this
-setting.
+odd-length input differ from the CPU on those runtimes.
 
 ### String to Date
 

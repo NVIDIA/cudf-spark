@@ -20,7 +20,7 @@ from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from spark_session import is_databricks173_or_later, is_spark_400_or_later
 from marks import ignore_order, allow_non_gpu
-from spark_session import with_cpu_session, is_databricks113_or_later, is_databricks_version, is_databricks_version_or_later
+from spark_session import with_cpu_session, is_databricks113_or_later
 
 # allow non gpu when time zone is non-UTC because of https://github.com/NVIDIA/spark-rapids/issues/9653'
 not_utc_aqe_allow=['ShuffleExchangeExec', 'HashAggregateExec'] if is_not_utc() else []
@@ -473,8 +473,6 @@ def test_aqe_bhj_executor_broadcast_shuffle_coalesce_with_residual_condition(spa
         """)
 
     exist_classes = "GpuBroadcastHashJoinExec"
-    if is_databricks_version(14, 3):
-        exist_classes += ",GpuShuffleCoalesceExec"
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
@@ -507,7 +505,7 @@ def test_aqe_join_and_agg_single_value():
 
 # this should be fixed by https://github.com/NVIDIA/spark-rapids/issues/11120
 aqe_join_with_dpp_fallback=["FilterExec", "InSubqueryExec"] if is_databricks_runtime() else []
-if is_databricks_version_or_later(14, 3):
+if is_databricks173_or_later():
     aqe_join_with_dpp_fallback.append("CollectLimitExec")
 
 # Verify that DPP and AQE can coexist in even some odd cases involving multiple tables

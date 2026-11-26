@@ -1,0 +1,81 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Prepare Spark archive
+description: Restore or download the checksum-verified Apache Spark distribution.
+inputs:
+  scala:
+    description: Scala binary version of the Spark distribution
+    required: true
+  save:
+    description: Warm the cache without restoring existing entries (trusted branch warmer only)
+    default: 'false'
+outputs:
+  path:
+    description: Absolute path of the verified tarball for consumers; empty in warm-only mode
+    value: ${{ steps.verify.outcome == 'success' && steps.archive.outputs.warm_only != 'true' && steps.archive.outputs.path || '' }}
+  key:
+    description: Exact cache key of this immutable Apache archive
+    value: ${{ steps.archive.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - name: Select Spark distribution
+      id: archive
+      shell: bash
+      env:
+        SCALA: ${{ inputs.scala }}
+        WARM_ONLY: >-
+          ${{ inputs.save == 'true' && github.repository == 'NVIDIA/cudf-spark' &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) &&
+          (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/archive.py" metadata "$SCALA" >> "$GITHUB_OUTPUT"
+        printf 'warm_only=%s\n' "$WARM_ONLY" >> "$GITHUB_OUTPUT"
+    - name: Restore archive
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      continue-on-error: true
+      with:
+        path: ~/.cache/cudf-spark/spark/${{ steps.archive.outputs.name }}
+        key: ${{ steps.archive.outputs.key }}
+        lookup-only: ${{ steps.archive.outputs.warm_only }}
+    - name: Verify or fetch archive
+      id: verify
+      if: steps.archive.outputs.warm_only != 'true' || steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SCALA: ${{ inputs.scala }}
+      run: python3 "$GITHUB_ACTION_PATH/archive.py" ensure "$SCALA"
+    - name: Save archive
+      id: save
+      # A PR miss may seed only its merge ref, never a trusted caller's branch.
+      if: >-
+        steps.restore.outputs.cache-hit != 'true' &&
+        (steps.archive.outputs.warm_only == 'true' ||
+        (github.event_name == 'pull_request' &&
+        github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)))
+      continue-on-error: ${{ steps.archive.outputs.warm_only != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/cudf-spark/spark/${{ steps.archive.outputs.name }}
+        key: ${{ steps.archive.outputs.key }}
+    - name: Look up saved archive
+      id: saved
+      if: steps.archive.outputs.warm_only == 'true' && steps.save.outcome == 'success'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      continue-on-error: true
+      with:
+        path: ~/.cache/cudf-spark/spark/${{ steps.archive.outputs.name }}
+        key: ${{ steps.archive.outputs.key }}
+        lookup-only: true
+    - name: Report unconfirmed trusted cache
+      if: >-
+        steps.archive.outputs.warm_only == 'true' && steps.save.outcome == 'success' &&
+        (steps.saved.outcome != 'success' || steps.saved.outputs.cache-hit != 'true')
+      shell: bash
+      env:
+        KEY: ${{ steps.archive.outputs.key }}
+      run: |
+        echo "::error::Could not confirm exact Spark archive cache after save: $KEY"
+        exit 1

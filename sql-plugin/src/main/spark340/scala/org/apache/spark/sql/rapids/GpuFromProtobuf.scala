@@ -17,7 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
@@ -46,10 +46,10 @@ import org.apache.spark.sql.types._
  * supported.
  *
  * The schema uses the JNI flattened representation: nested message fields follow their parent
- * entry and point to it through parentIndices. The planner returns every field of the Spark
- * schema, and message fields Spark cannot represent carry isOutput == false so that they are
- * parsed and validated; the decoder returns those as all-null columns, which this expression
- * drops to match the Spark schema.
+ * entry and point to it through parentIndices. Fields with isOutput == false are validated by
+ * the decoder but returned as nulls: either the query does not read them, or Spark cannot
+ * represent them at all. The planner appends the latter after the Spark fields of their level,
+ * so this expression drops those trailing columns to match the Spark schema.
  *
  * @param decodedSchema Spark output schema
  * @param schema Flattened JNI schema; callers must not mutate its arrays after construction.
@@ -92,7 +92,17 @@ case class GpuFromProtobuf(
     if (malformedRowsAsNullFields) restoreInputValidity(visible, input.getBase) else visible
   }
 
-  @transient private lazy val hasHiddenFields = schema.isOutput.contains(false)
+  // The decoder returns one column per schema entry, including the fields a query does not
+  // read. Entries beyond the Spark schema are the fields Spark cannot represent, so only
+  // those require trimming.
+  @transient private lazy val hasOmittedFields =
+    schema.fieldNumbers.length > countEntries(decodedSchema)
+
+  private def countEntries(dataType: DataType): Int = dataType match {
+    case st: StructType => st.fields.map(f => 1 + countEntries(f.dataType)).sum
+    case ArrayType(elementType, _) => countEntries(elementType)
+    case _ => 0
+  }
 
   /**
    * The decoder returns an all-null column for every hidden field, and the planner appends those
@@ -100,7 +110,7 @@ case class GpuFromProtobuf(
    * Takes ownership of the decoded column.
    */
   private def dropHiddenColumns(decoded: cudf.ColumnVector): cudf.ColumnVector = {
-    if (!hasHiddenFields) {
+    if (!hasOmittedFields) {
       decoded
     } else {
       withResource(decoded) { _ =>

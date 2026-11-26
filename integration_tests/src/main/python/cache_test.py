@@ -549,9 +549,11 @@ def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value
     if gpu_cache_supported:
         conf['spark.rapids.sql.exec.InMemoryTableScanExec'] = 'true'
     # Spark 3.5.0/3.5.1 cannot wrap a GPU cache scan in a table-cache stage (#10603).
+    # AQE can create that stage for row input too, without an explicit repartition.
     # Databricks 17.3+ has no GPU replacement for that stage and also keeps its cache scan on CPU.
-    aqe_cache_fallback = ((is_spark_350_or_351() or is_databricks173_or_later()) and
-                          aqe_enabled == 'true' and cache_input == 'repartition')
+    aqe_cache_fallback = (aqe_enabled == 'true' and
+                          (is_spark_350_or_351() or
+                           (is_databricks173_or_later() and cache_input == 'repartition')))
     if gpu_cache_supported and not aqe_cache_fallback:
         assert_cpu_and_gpu_are_equal_collect_with_capture(
             fun, exist_classes='GpuInMemoryTableScanExec', conf=conf)

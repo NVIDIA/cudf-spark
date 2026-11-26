@@ -15,19 +15,19 @@ records=$3
   die 'expected a main or YY.MM tag with an optional toolchain suffix'
 [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ && $GITHUB_RUN_ID =~ ^[0-9]+$ && $GITHUB_RUN_ATTEMPT =~ ^[0-9]+$ ]] ||
   die 'invalid workflow source or run identity'
-# A rerun can reuse old native records even after another run published the same source SHA.
-[[ $GITHUB_RUN_ATTEMPT == 1 ]] ||
-  die "run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT cannot promote $base:$tag; dispatch a new 'Docker image CI' run on the target branch"
+if [[ $GITHUB_RUN_ATTEMPT != 1 ]]; then
+  : "${PLATFORM_RECORDS:?missing original tag baseline directory for retry}"
+fi
 
 image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')/$base"
 sources=()
 for arch in amd64 arm64; do
   digest=$(jq -ser --arg image "$image" --arg tag "$tag" --arg platform "linux/$arch" \
-    --arg source "$GITHUB_SHA" '
+    --arg source "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" '
       select(length == 1) | .[0] |
-      select(.image == $image and .tag == $tag and .platform == $platform and .source == $source) |
+      select(.image == $image and .tag == $tag and .platform == $platform and .source == $source and .run == $run) |
       .digest | select(type == "string" and test("^sha256:[0-9a-f]{64}\\z"))
-    ' "$records/$arch.json") || die "missing or invalid $arch record for $image:$tag at $GITHUB_SHA"
+    ' "$records/$arch.json") || die "missing or invalid $arch record for $image:$tag in run $GITHUB_RUN_ID at $GITHUB_SHA; dispatch Docker image CI for $base if the record expired"
   sources+=("$image@$digest")
 done
 [[ ${sources[0]} != "${sources[1]}" ]] || die 'expected two different native image digests'
