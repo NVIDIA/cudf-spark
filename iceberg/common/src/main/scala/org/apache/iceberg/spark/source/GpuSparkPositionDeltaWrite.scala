@@ -94,7 +94,7 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
     val sparkContext: JavaSparkContext = GpuSparkWriteAccess.deltaSparkContext(cpu)
     val tableBroadcast = sparkContext.broadcast(SerializableTable.copyOf(table))
     val command = GpuSparkWriteAccess.deltaCommand(cpu)
-    val context = GpuWriteContext(GpuSparkWriteAccess.deltaContext(cpu))
+    val context = GpuWriteContext(GpuSparkWriteAccess.deltaContext(cpu), command)
     val rewritableDeletes = if (context.useDVs) {
       Option(ShimUtils.broadcastRewritableDeletes(cpuBatchWrite))
     } else {
@@ -123,9 +123,6 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
       tmpJob
     }
 
-    val dataSparkTypeWithFieldIds = GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(
-      command, context)
-
     // Iceberg's Parquet writers always encode timestamps as INT64 microseconds and preserve
     // proleptic-Gregorian values; they do not inherit Spark's Parquet timestamp or rebase settings.
     // The GPU path reuses Spark's Parquet writer, so force the equivalent physical type and rebase
@@ -135,7 +132,7 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
       SparkSession.active,
       job,
       GpuSparkWrite.translateIcebergWriteProperties(writeProps),
-      dataSparkTypeWithFieldIds,
+      context.dataSparkType,
       ParquetOutputTimestampType.TIMESTAMP_MICROS,
       DateTimeRebaseCorrected
     )
@@ -150,7 +147,6 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
       rewritableDeletes,
       command,
       context,
-      dataSparkTypeWithFieldIds,
       outputWriterFactory,
       statsTracker,
       serializedHadoopConf)
@@ -162,12 +158,13 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
 object GpuSparkPositionDeltaWrite {
   private[source] def dataWriterSparkTypeFor(
       command: Command,
-      context: GpuWriteContext): StructType = {
+      dataSchema: Schema): StructType = {
     if (command == Command.DELETE) {
       positionDeleteSparkType
     } else {
-      val dataSchema = Option(context.dataSchema).getOrElse(
-        throw new IllegalStateException(s"Missing data schema for delta command: $command"))
+      if (dataSchema == null) {
+        throw new IllegalStateException(s"Missing data schema for delta command: $command")
+      }
       GpuSparkWrite.dataWriterSparkTypeFor(dataSchema)
     }
   }
@@ -184,7 +181,8 @@ object GpuSparkPositionDeltaWrite {
       return
     }
     val command = GpuSparkWriteAccess.deltaCommand(deltaWrite)
-    val context = GpuWriteContext(GpuSparkWriteAccess.deltaContext(deltaWrite))
+    val cpuContext = GpuSparkWriteAccess.deltaContext(deltaWrite)
+    val deleteFormat = GpuSparkWriteAccess.contextDeleteFileFormat(cpuContext)
 
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
@@ -205,10 +203,10 @@ object GpuSparkPositionDeltaWrite {
     // additionally. Position deletes have only two data types: string + int. So it's
     // safe to use normal write tag method
     GpuSparkWrite.tagForGpuWrite(
-      Option(context.dataFileFormat),
+      Option(GpuSparkWriteAccess.contextDataFileFormat(cpuContext)),
       Option(toSparkType(table.schema())),
       Option(table.schema()),
-      Option(context.deleteFileFormat),
+      Option(deleteFormat),
       partitionSpec,
       meta)
 
@@ -216,7 +214,7 @@ object GpuSparkPositionDeltaWrite {
     // delete codec matters too.
     GpuSparkWrite.tagParquetCompressionForGpu(
       GpuSparkWriteAccess.deltaWriteProperties(deltaWrite),
-      hasDeleteFiles = !context.useDVs, meta)
+      hasDeleteFiles = !ShimUtils.isPuffinFormat(deleteFormat), meta)
   }
 
   def convert(deltaWrite: DeltaWrite): GpuSparkPositionDeltaWrite = {
@@ -229,7 +227,6 @@ class GpuPositionDeltaWriterFactory(
   val rewritableDeletesSer: Option[IcebergShimUtils.RewritableDeletes],
   val command: Command,
   val context: GpuWriteContext,
-  val dataSparkTypeWithFieldIds: StructType,
   val outputWriterFactory: ColumnarOutputWriterFactory,
   val statsTracker: GpuWriteJobStatsTracker,
   val hadoopConf: SerializableConfiguration) extends DeltaWriterFactory {
@@ -250,7 +247,7 @@ class GpuPositionDeltaWriterFactory(
     val writerFactory = new GpuSparkFileWriterFactory(
       table,
       context.dataFileFormat,
-      dataSparkTypeWithFieldIds,
+      context.dataSparkType,
       table.sortOrder(),
       context.deleteFileFormat,
       positionDeleteSparkType,
@@ -945,9 +942,9 @@ object GpuWriteContext {
   /**
    * Creates a GpuWriteContext from a CPU Context object through the root-layout helper.
    */
-  private[iceberg] def apply(cpu: AnyRef): GpuWriteContext = {
+  private[iceberg] def apply(cpu: AnyRef, command: Command): GpuWriteContext = {
     val dataSchema = GpuSparkWriteAccess.contextDataSchema(cpu)
-    val dataSparkType = GpuSparkWriteAccess.contextDataSparkType(cpu)
+    val dataSparkType = GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, dataSchema)
     val dataFileFormat = GpuSparkWriteAccess.contextDataFileFormat(cpu)
     val targetDataFileSize = GpuSparkWriteAccess.contextTargetDataFileSize(cpu)
     val deleteSparkType = GpuSparkWriteAccess.contextDeleteSparkType(cpu)

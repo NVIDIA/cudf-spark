@@ -33,7 +33,6 @@ import org.apache.iceberg.{Schema, TableProperties}
 import org.apache.iceberg.types.{Type, Types}
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.hadoop.util.HadoopInputFile
-import org.mockito.Mockito.{mock, when}
 
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command
@@ -52,12 +51,10 @@ class GpuSparkWriteSuite extends SparkQueryCompareTestSuite {
         initialDefault = Some(Int.box(2)))).getOrElse(
         Types.NestedField.optional(2, "value", intType))
       val schema = new Schema(Types.NestedField.optional(1, "payload", Types.StructType.of(field)))
-      val context = mock(classOf[GpuWriteContext])
-      when(context.dataSchema).thenReturn(schema)
 
       val schemas = Seq(GpuSparkWrite.dataWriterSparkTypeFor(schema)) ++
         Seq(Command.UPDATE, Command.MERGE).map { command =>
-          GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, context)
+          GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, schema)
         }
       schemas.foreach { sparkSchema =>
         assert(sparkSchema("payload").metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
@@ -186,8 +183,7 @@ class GpuSparkWriteSuite extends SparkQueryCompareTestSuite {
   }
 
   test("a position-only DELETE uses the position-delete schema") {
-    val context = mock(classOf[GpuWriteContext])
-    assert(GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(Command.DELETE, context) ==
+    assert(GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(Command.DELETE, null) ==
       GpuWriteContext.positionDeleteSparkType)
   }
 
