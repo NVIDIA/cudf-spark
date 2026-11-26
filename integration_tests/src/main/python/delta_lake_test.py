@@ -953,8 +953,8 @@ def do_test_scan_split(spark_tmp_path, enable_deletion_vectors, expected_num_par
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(is_databricks_runtime(),
-                    reason="Scan split works differently on Databricks")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Scan split works differently on Databricks before 17.3")
 def test_delta_scan_split_with_no_dv(spark_tmp_path):
     do_test_scan_split(spark_tmp_path, enable_deletion_vectors=False, expected_num_partitions=2)
 
@@ -1033,6 +1033,8 @@ def test_delta_scan_split_with_DV_enabled_after_DVs_materialized(spark_tmp_path)
         metrics = _latest_delta_history(spark, data_path)["operationMetrics"]
         assert int(metrics.get("numDeletionVectorsAdded", "0")) > 0, metrics
         spark.sql(f"REORG table delta.`{data_path}` APPLY (PURGE)") # will rewrite files to purge soft-deleted data
+        metrics = _latest_delta_history(spark, data_path)["operationMetrics"]
+        assert int(metrics.get("numDeletionVectorsRemoved", "0")) > 0, metrics
     do_test_scan_split(spark_tmp_path, enable_deletion_vectors=True, expected_num_partitions=2, post_setup_table_func=do_delete_and_reorg)
 
 

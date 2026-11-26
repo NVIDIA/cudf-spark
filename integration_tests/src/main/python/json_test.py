@@ -1178,10 +1178,8 @@ def test_from_json_struct_decimal():
     "\"" + optional_whitespace_regex + "[0-9]{2}/[0-9]{2}/[1-8]{1}[0-9]{3}" + optional_whitespace_regex + "\"",
     # special constant values
     "\"" + optional_whitespace_regex + "(now|today|tomorrow|epoch)" + optional_whitespace_regex + "\"",
-    # Quoted numeric strings can use legacy parsing fallback with custom formats before Spark 3.4.
-    pytest.param("\"[0-9]{5}\"", marks=pytest.mark.xfail(
-        condition=is_before_spark_340(),
-        reason="https://github.com/NVIDIA/spark-rapids/issues/9664")),
+    # five-digit quoted year
+    "\"[0-9]{5}\"",
     # integral
     "[0-9]{1,5}",
     # floating-point

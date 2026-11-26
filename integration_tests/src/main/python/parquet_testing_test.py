@@ -62,14 +62,11 @@ if is_before_spark_340():
     _xfail_files["delta_length_byte_array.parquet"] = (
         "https://issues.apache.org/jira/browse/SPARK-40128")
 
-# Apache Spark's CPU reader supports LZ4_RAW starting in Spark 3.5.0.
-if not is_spark_350_or_later():
+# LZ4_RAW requires Spark 3.5+ and is absent from DBR 14.3's Parquet 1.12.
+# Both GPU footer readers also decode the footer through ParquetFileReader.
+if not is_spark_350_or_later() or is_databricks143():
     _error_files["lz4_raw_compressed.parquet"] = "Exception"
     _error_files["lz4_raw_compressed_larger.parquet"] = "Exception"
-elif is_databricks143():
-    # DBR 14.3 still uses Parquet 1.12, which does not define the LZ4_RAW codec.
-    _xfail_files["lz4_raw_compressed.parquet"] = "DBR 14.3's CPU reader does not support LZ4_RAW"
-    _xfail_files["lz4_raw_compressed_larger.parquet"] = "DBR 14.3's CPU reader does not support LZ4_RAW"
 
 if is_spark_411_or_later():
     # XFAIL null_list.parquet for Spark 4.1.0+ due to https://github.com/NVIDIA/spark-rapids/issues/14242
