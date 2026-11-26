@@ -1173,16 +1173,16 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
             layout = os.path.join(root, "layout")
             iceberg_manifest = os.path.join(root, "iceberg.txt")
             spark_manifest = os.path.join(root, "spark.txt")
-            write_class(layout, "spark350db143/org/apache/spark/p/Caller.class",
+            write_class(layout, "spark400db173/org/apache/spark/p/Caller.class",
                         "org.apache.spark.p.Caller")
             with open(iceberg_manifest, "w") as output:
-                output.write("350db143\t-\n")
+                output.write("400db173\t-\n")
             with open(spark_manifest, "w") as output:
-                output.write("350db143\t-\n")
+                output.write("400db173\t-\n")
             self.assertEqual(0, LINT.main([
                 "--runtime-manifest", iceberg_manifest,
                 "--spark-runtime-manifest", spark_manifest,
-                "--expected-build-versions", "350db143", layout]))
+                "--expected-build-versions", "400db173", layout]))
 
     def test_spark_runtime_requires_spark_plugin_classes(self):
         with temporary_directory() as root:

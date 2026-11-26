@@ -213,9 +213,8 @@ class SourceResolverTest(unittest.TestCase):
                                           EXTERNAL_EXACT_TARGETS)
         logical = 'src/main/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala'
         expected = {
-            '350db143': 'spark350db143',
-            '400db173': 'spark350db143',
-            '410db183': 'spark350db143',
+            '400db173': 'spark400db173',
+            '410db183': 'spark400db173',
             '400': 'spark400',
             '401': 'spark400',
         }
@@ -231,7 +230,7 @@ class SourceResolverTest(unittest.TestCase):
         variants, _ = scan_module_sources(str(ROOT / 'sql-plugin'),
                                           set().union(*graphs), EXTERNAL_EXACT_TARGETS)
         selections = {}
-        for target in ('359', '413', '350db143', '400db173', '410db183', '500'):
+        for target in ('359', '413', '400db173', '410db183', '500'):
             graph = next(graph for graph in graphs if target in graph)
             selections[target] = resolve_sources(graph, variants, target)
 
@@ -351,10 +350,10 @@ class SourceResolverTest(unittest.TestCase):
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/GpuFileFormatWriter405Suite.scala',
              'spark405', ('421', '500'), ('420', '421', '500')),
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/shims/'
-             'Spark40GpuDataSourceCustomMetricsSuite.scala', 'spark350db143',
-             ('350db143', '400', '400db173', '401', '402', '403', '404',
+             'Spark40GpuDataSourceCustomMetricsSuite.scala', 'spark400',
+             ('400', '400db173', '401', '402', '403', '404',
               '410db183', '411'),
-             ('350db143', '400', '400db173', '401', '402', '403', '404',
+             ('400', '400db173', '401', '402', '403', '404',
               '410db183', '411', '412', '413', '420', '500')),
         )
         for module, logical, owner, expected, checked in cases:

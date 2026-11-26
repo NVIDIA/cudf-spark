@@ -121,8 +121,7 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
   }
 
   private def getWriteOptions(options: Any): Map[String, String] = {
-    // Databricks 14.3 writeOptions is a Map[String, String], while newer supported
-    // Databricks runtimes use CaseInsensitiveStringMap.
+    // Normalize Scala and Java write option maps to the format used by Delta tagging.
     options match {
       case c: CaseInsensitiveStringMap => c.asCaseSensitiveMap().asScala.toMap
       case _ => options.asInstanceOf[Map[String, String]]
