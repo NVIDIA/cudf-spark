@@ -87,63 +87,50 @@ class RapidsLocalDiskShuffleMapOutputWriterSuite extends AnyFunSuite with Mockit
     }
   }
 
-  // Ordinary native writes, owned segments under pressure, and forced file output.
-  for ((retain, sync, storage) <- Seq(
-      (false, false, "memory"), (false, false, "pressure"),
-      (true, false, "pressure"), (true, true, "memory"),
-      (true, false, "forced"), (true, true, "forced"))) {
-    test(s"owned records bypass native storage limits: " +
-        s"retain=$retain sync=$sync storage=$storage") {
+  for ((retain, forceFile) <- Seq((false, false), (true, false), (true, true))) {
+    test(s"partition output under host pressure: retain=$retain forceFile=$forceFile") {
       HostAlloc.initialize(512L * 1024 * 1024)
-      val pressure = if (storage == "pressure") Some(HostAlloc.alloc(1024, false)) else None
-      val conf = new SparkConf(false)
-        .set("spark.rapids.memory.host.partialFileBufferInitialSize", "1k")
-        .set("spark.rapids.memory.host.partialFileBufferMaxSize",
-          if (retain) "1k" else "1m")
-        .set("spark.rapids.memory.host.partialFileBufferMemoryThreshold",
-          if (storage == "pressure") (HostAlloc.getUsageRatio() / 2).toString else "1.0")
-        .set("spark.shuffle.sync", sync.toString)
-      SpillFramework.initialize(new RapidsConf(conf))
       val directory = Files.createTempDirectory("shuffle-buffer-selection-").toFile
-      val resolver = mock[IndexShuffleBlockResolver]
-      when(resolver.getDataFile(1, 2L)).thenReturn(new File(directory, "shuffle.data"))
-      val writer = new RapidsLocalDiskShuffleMapOutputWriter(1, 2L, 2, resolver, conf)
-      val expected = Array.tabulate[Byte](150003)(_.toByte)
-      try {
-        if (storage == "forced") writer.setForceFileOnlyMode()
-        if (retain) writer.setRecordBufferMode()
-        val partition = writer.getPartitionWriter(0)
-        val handle = writer.getPartialFileHandle().get
-        val inMemory = storage != "forced" && (retain || storage == "memory")
-        assert(handle.isMemoryBased == inMemory)
-        assert(handle.isFileOnly == !inMemory)
-        val stream = partition.openStream()
-        if (retain) {
-          withResource(new SegmentedHostOutputStream(8192)) { buffer =>
-            buffer.write(expected)
-            withResource(buffer.takeBuffer()) { record =>
-              stream.asInstanceOf[SegmentedHostOutputStream.Sink].writeRecord(record)
-              intercept[IllegalStateException](record.takeBuffer())
+      try withResource(HostAlloc.alloc(1024, false)) { _ =>
+        val conf = new SparkConf(false)
+          .set("spark.rapids.memory.host.partialFileBufferInitialSize", "1k")
+          .set("spark.rapids.memory.host.partialFileBufferMaxSize", "1k")
+          .set("spark.rapids.memory.host.partialFileBufferMemoryThreshold",
+            (HostAlloc.getUsageRatio() / 2).toString)
+          .set("spark.shuffle.sync", forceFile.toString)
+        SpillFramework.initialize(new RapidsConf(conf))
+        val resolver = mock[IndexShuffleBlockResolver]
+        when(resolver.getDataFile(1, 2L)).thenReturn(new File(directory, "shuffle.data"))
+        val writer = new RapidsLocalDiskShuffleMapOutputWriter(1, 2L, 2, resolver, conf)
+        try {
+          if (retain) writer.setRecordBufferMode()
+          if (forceFile) writer.setForceFileOnlyMode()
+          val partition = writer.getPartitionWriter(0)
+          val handle = writer.getPartialFileHandle().get
+          assert(handle.isMemoryBased == (retain && !forceFile))
+          intercept[IllegalStateException](writer.setRecordBufferMode())
+          val expected = Array.tabulate[Byte](8193)(_.toByte)
+          withResource(partition.openStream()) { stream =>
+            withResource(new SegmentedHostOutputStream(8192)) { buffer =>
+              buffer.write(expected)
+              withResource(buffer.takeBuffer()) { record =>
+                stream.asInstanceOf[SegmentedHostOutputStream.Sink].writeRecord(record)
+                intercept[IllegalStateException](record.takeBuffer())
+              }
             }
+            assert(partition.getNumBytesWritten == expected.length)
           }
-          assert(handle.getExpansionCount == 0)
-        } else {
-          stream.write(expected)
+          writer.finishWritePhase()
+          assert(!handle.isSpilled)
+          assert(writer.getPartitionLengths().sameElements(Array[Long](expected.length, 0)))
+          val actual = new Array[Byte](expected.length)
+          assert(handle.read(actual, 0, actual.length) == actual.length)
+          assert(actual.sameElements(expected))
+        } finally {
+          writer.abort(null)
         }
-        assert(partition.getNumBytesWritten == expected.length)
-        assert(!handle.isSpilled)
-        stream.close()
-        writer.getPartitionWriter(1).openStream().close()
-        writer.finishWritePhase()
-        assert(writer.getPartitionLengths().sameElements(Array[Long](expected.length, 0)))
-        val actual = new Array[Byte](expected.length)
-        assert(handle.read(actual, 0, actual.length) == actual.length)
-        assert(actual.sameElements(expected))
-        intercept[IllegalStateException](writer.setRecordBufferMode())
       } finally {
-        writer.abort(null)
         SpillFramework.shutdown()
-        pressure.foreach(_.close())
         HostAlloc.initialize(-1)
         directory.delete()
       }

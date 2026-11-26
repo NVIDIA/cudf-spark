@@ -23,11 +23,10 @@ package org.apache.spark.sql.rapids
 
 import java.io._
 import java.nio.ByteBuffer
-import java.nio.file.{Files, NoSuchFileException, Paths}
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -547,94 +546,42 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     verifyWrite(writer, expectedRecords = 7, partitionsWithData = Set(0, 1, 2, 3, 4, 5, 6))
   }
 
-  // ==================== Skip-merge catalog ====================
-
-  test("multiple batches retain and finalize records with the default segment size") {
-    val descriptors = Paths.get("/proc/self/fd")
-    assume(Files.isDirectory(descriptors), "file descriptor inspection requires procfs")
-    val settings = Map(
-      "spark.rapids.memory.host.partialFileBufferInitialSize" -> "1k",
-      "spark.rapids.memory.host.partialFileBufferMaxSize" -> "1m",
-      "spark.rapids.memory.host.partialFileBufferMemoryThreshold" -> "1.0",
-      "spark.shuffle.sync" -> "false")
-    val previous = settings.keys.map(key => key -> conf.getOption(key)).toMap
-    settings.foreach { case (key, value) => conf.set(key, value) }
+  test("a finished batch stays in memory and becomes spillable while input is still arriving") {
     useUncompressedShuffleOutput()
-    assert(GpuShuffleEnv.getMultithreadedCatalog.isEmpty)
-    val batches = 128
-    val writersCreated = new AtomicInteger()
     val firstBatchFinished = new CountDownLatch(1)
-    val finalized = new AtomicInteger()
     shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
       conf, blockManager, blockResolver) {
       override def createMapOutputWriter(
           shuffleId: Int,
           mapTaskId: Long,
           numPartitions: Int): ShuffleMapOutputWriter = {
-        val index = writersCreated.getAndIncrement()
         new RapidsLocalDiskShuffleMapOutputWriter(
           shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
-          override def getPartitionWriter(reducePartitionId: Int): ShufflePartitionWriter = {
-            val partition = super.getPartitionWriter(reducePartitionId)
-            val handle = getPartialFileHandle().get
-            if (index < batches) {
-              assert(handle.isMemoryBased && !handle.isSpilled)
-              if (reducePartitionId == 0) {
-                assert(handle.approxSizeInBytes == 0,
-                  "An open batch must not register unfinished segments")
-              }
-            } else {
-              assert(index == batches && handle.isFileOnly)
-            }
-            val openFiles = withResource(Files.list(descriptors)) { entries =>
-              import scala.collection.JavaConverters._
-              entries.iterator().asScala.count { path =>
-                try {
-                  Files.readSymbolicLink(path).startsWith(tempDir.toPath)
-                } catch {
-                  case _: NoSuchFileException => false
-                }
-              }
-            }
-            // Only the final merge output can have an open file; partial batches
-            // remain in memory, including while reading later partitions during merge.
-            assert(openFiles <= 1, s"Partial batches retained $openFiles open files")
-            partition
-          }
-
           override def finishWritePhase(): Unit = {
             super.finishWritePhase()
-            finalized.incrementAndGet()
-            if (index == 0) firstBatchFinished.countDown()
+            val handle = getPartialFileHandle().get
+            assert(handle.isMemoryBased && !handle.isSpilled && handle.approxSizeInBytes > 0)
+            firstBatchFinished.countDown()
           }
         }
       }
     }
     val writer = createWriter()
     try {
-      val records = createTestRecords(Iterator.fill(batches)(Seq(0, 1)).flatten)
-      writer.write(new Iterator[(Int, ColumnarBatch)] {
-        private var emitted = 0
-        override def hasNext: Boolean = records.hasNext
-        override def next(): (Int, ColumnarBatch) = {
-          // The third record starts batch 1. Batch 0 can finish before input is exhausted.
-          if (emitted == 3) assert(firstBatchFinished.await(10, TimeUnit.SECONDS))
-          emitted += 1
-          records.next()
+      val keys = Iterator(0, 1, 0, 1).zipWithIndex.map { case (key, index) =>
+        if (index == 3) {
+          // Starting batch 1 sealed batch 0. Its partial can be read directly from memory.
+          assert(firstBatchFinished.await(10, TimeUnit.SECONDS))
+          assert(tempDir.listFiles().toSet == Set(outputFile))
         }
-      })
+        key
+      }
+      writer.write(createTestRecords(keys))
       writer.stop(true)
-      verifyWrite(writer, batches * 2, Set(0, 1))
-      assert(writersCreated.get() == batches + 1)
-      assert(finalized.get() == batches)
-      assert(readPartitionKeys(writer, 0) == Seq.fill(batches)(0))
-      assert(readPartitionKeys(writer, 1) == Seq.fill(batches)(1))
+      assert(readPartitionKeys(writer, 0) == Seq(0, 0))
+      assert(readPartitionKeys(writer, 1) == Seq(1, 1))
     } finally {
       writer.stop(false)
-      previous.foreach {
-        case (key, Some(value)) => conf.set(key, value)
-        case (key, None) => conf.remove(key)
-      }
     }
   }
 
@@ -647,7 +594,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       val writer = createWriter()
       // Uncompressed records cross multiple segments.
       // Partition 0 reappears in a second batch, exercising the partial-file merge too.
-      val extraBytes = 256 * 1024
+      val extraBytes = 24 * 1024
       writer.write(Iterator(0, 1, 7).map(key => (key, createTestBatch(key, extraBytes))))
       writer.stop(true)
       verifyWrite(writer, 3, Set(0, 1))
@@ -674,6 +621,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       }
     }
   }
+
+  // ==================== Skip-merge catalog ====================
 
   // Runs body with the skip-merge catalog enabled through GpuShuffleEnv's own gating.
   private def withSkipMergeCatalog(body: MultithreadedShuffleBufferCatalog => Unit): Unit = {

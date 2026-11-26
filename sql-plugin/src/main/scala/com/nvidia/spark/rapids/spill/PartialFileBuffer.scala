@@ -21,6 +21,8 @@ import java.util.ArrayList
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf.HostMemoryBuffer
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.SegmentedHostOutputStream
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 
 /** Storage owned by one partial-file handle. Reads/spills/close use the handle's locks. */
@@ -66,10 +68,20 @@ private[spill] final class OwnedRecordBuffer extends PartialFileBuffer {
     size += data.getCount
   }
 
+  // Ordinary OutputStream writes borrow their input. Only the new bytes need a copy.
+  private def appendCopy(offset: Long, length: Int)(
+      write: SegmentedHostOutputStream => Unit): Unit = {
+    require(offset == size)
+    withResource(new SegmentedHostOutputStream(length)) { stream =>
+      write(stream)
+      closeOnExcept(stream.takeBuffer())(append)
+    }
+  }
+
   override def setByte(offset: Long, value: Byte): Unit =
-    throw new UnsupportedOperationException("Owned records are immutable")
+    appendCopy(offset, 1)(_.write(value))
   override def setBytes(offset: Long, bytes: Array[Byte], start: Int, length: Int): Unit =
-    throw new UnsupportedOperationException("Owned records are immutable")
+    appendCopy(offset, length)(_.write(bytes, start, length))
 
   override def getBytes(bytes: Array[Byte], start: Int, offset: Long, length: Int): Unit = {
     if (start < 0 || length < 0 || start > bytes.length - length ||

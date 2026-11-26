@@ -160,16 +160,11 @@ class RapidsLocalDiskShuffleMapOutputWriter(
             spillFile = outputTempFile,
             priority = Long.MinValue,
             syncWrites = syncWrites,
-            capacityHintProvider = if (retainRecords) None else Some(capacityHintProvider),
+            capacityHintProvider = Some(capacityHintProvider),
             retainRecords = retainRecords)
           partialFileHandle = Some(handle)
-          if (retainRecords) {
-            logDebug(s"Retaining host segments for shuffle $shuffleId map $mapId")
-          } else {
-            logDebug(s"Using memory-with-spill mode for shuffle $shuffleId map $mapId " +
-              s"with predictive sizing (initial=${initialBufferSize / 1024 / 1024}MB, " +
-              s"max=${maxBufferSize / 1024 / 1024}MB, numPartitions=$numPartitions)")
-          }
+          logDebug(s"Using memory-with-spill mode for shuffle $shuffleId map $mapId " +
+            s"(retainRecords=$retainRecords)")
         } catch {
           case e: Exception =>
             logWarning(s"Failed to create memory buffer, " +

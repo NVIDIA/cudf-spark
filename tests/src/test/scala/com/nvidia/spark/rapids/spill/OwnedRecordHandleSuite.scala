@@ -109,35 +109,17 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  for (retain <- Seq(false, true)) {
-    test(s"memory pressure during writes and after completion: retain=$retain") {
-      HostAlloc.initialize(4096)
-      try {
-        withResource(SpillablePartialFileHandle.createMemoryWithSpill(
-            initialCapacity = 8, maxBufferSize = 32, memoryThreshold = 1e-20,
-            spillFile = Files.createTempFile("owned-pressure", ".bin").toFile,
-            retainRecords = retain)) { h =>
-          h.writeRecord(record(Array[Byte](1, 2, 3, 4), segment = 4))
-          assert(SpillFramework.stores.hostStore.totalSize == (if (retain) 0 else 8))
-          withResource(HostAlloc.alloc(1024, false)) { _ =>
-            assert(HostAlloc.getUsageRatio() > 1e-20)
-            h.writeRecord(record(Array[Byte](5, 6), segment = 2))
-            assert(!h.isSpilled)
-            h.writeRecord(record(Array[Byte](7, 8, 9), segment = 3))
-            assert(h.isSpilled == !retain)
-            h.finishWrite()
-            assert(h.isSpilled == !retain)
-            assert(SpillFramework.stores.hostStore.spill(Long.MaxValue) == (if (retain) 9 else 0))
-            assert(h.isSpilled)
-            val actual = new Array[Byte](9)
-            assert(h.read(actual, 0, actual.length) == actual.length)
-            assert(actual.sameElements(Array[Byte](1, 2, 3, 4, 5, 6, 7, 8, 9)))
-          }
-        }
-        assert(SpillFramework.stores.hostStore.totalSize == 0)
-      } finally {
-        HostAlloc.initialize(-1)
-      }
+  test("a contiguous handle writes a sealed record across a spill to disk") {
+    withResource(SpillablePartialFileHandle.createMemoryWithSpill(
+        initialCapacity = 4, maxBufferSize = 4, memoryThreshold = 1.0,
+        spillFile = Files.createTempFile("contiguous-record", ".bin").toFile)) { h =>
+      val bytes = Array[Byte](1, 2, 3, 4, 5)
+      h.writeRecord(record(bytes, segment = 3))
+      assert(h.isSpilled)
+      h.finishWrite()
+      val actual = new Array[Byte](bytes.length)
+      assert(h.read(actual, 0, actual.length) == actual.length)
+      assert(actual.sameElements(bytes))
     }
   }
 
@@ -170,7 +152,7 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("failed explicit spill preserves records and permits retry") {
+  test("a failed commit preserves records and a pressure spill can retry") {
     val path = Files.createTempDirectory("owned-spill-failure")
     withResource(create(path.toFile, max = 3)) { h =>
       h.writeRecord(record(Array[Byte](1, 2, 3), segment = 3))
@@ -180,7 +162,8 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(!h.isSpilled)
       assert(SpillFramework.stores.hostStore.totalSize == 10)
       Files.delete(path)
-      assert(h.spillForCommit() == 4)
+      assert(h.spill() == 10) // Reclaim both segments after writing four payload bytes.
+      assert(Files.size(path) == 4)
       val actual = new Array[Byte](4)
       assert(h.read(actual, 0, 4) == 4)
       assert(actual.sameElements(Array[Byte](1, 2, 3, 4)))

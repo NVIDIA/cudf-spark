@@ -16,15 +16,15 @@
 
 package com.nvidia.spark.rapids.spill
 
-import java.io.{BufferedInputStream, BufferedOutputStream, File, FileInputStream, FileOutputStream, IOException, RandomAccessFile}
+import java.io.{BufferedInputStream, BufferedOutputStream, File, FileInputStream, FileOutputStream, IOException, OutputStream, RandomAccessFile}
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{HostAlloc, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.HostAlloc
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 
 import org.apache.spark.internal.Logging
@@ -85,7 +85,7 @@ class SpillablePartialFileHandle private (
     bufferedOutputStreamFactory: FileOutputStream => BufferedOutputStream,
     capacityHintProvider: Option[(Long, Long) => Long],
     retainRecords: Boolean)
-  extends HostSpillableHandle[PartialFileBuffer] with Logging {
+  extends OutputStream with HostSpillableHandle[PartialFileBuffer] with Logging {
 
   // State management
   @volatile private var spilledToDisk: Boolean = false
@@ -93,9 +93,6 @@ class SpillablePartialFileHandle private (
   // Keep this value stable from host-store registration through removal.
   @volatile private var trackedCapacity: Long = if (retainRecords) 0L else initialCapacity
   override def approxSizeInBytes: Long = trackedCapacity
-
-  // Capacity and expansion apply only to the native buffer used by ordinary stream writers.
-  private var currentBufferCapacity: Long = if (retainRecords) 0L else initialCapacity
 
   // Protect from spill during write phase
   @volatile private var protectedFromSpill: Boolean = true
@@ -149,7 +146,6 @@ class SpillablePartialFileHandle private (
         host.foreach(_.close())
         host = None
         spilledToDisk = true
-        currentBufferCapacity = 0L
     }
   }
 
@@ -171,12 +167,12 @@ class SpillablePartialFileHandle private (
    * 2. Current memory usage is below configured threshold
    *
    * @param requiredCapacity The minimum capacity needed
-   * @return true if successfully expanded, false if spilled to file instead
    */
-  private def expandBuffer(requiredCapacity: Long): Boolean = {
+  private def expandBufferIfNeeded(requiredCapacity: Long): Unit = {
     host match {
-      case Some(currentBuffer) =>
-        val oldCapacity = currentBufferCapacity
+      case Some(currentBuffer: ContiguousPartialFileBuffer)
+          if requiredCapacity > currentBuffer.capacity =>
+        val oldCapacity = currentBuffer.capacity
 
         // Calculate new capacity using hint provider if available, otherwise double
         var newCapacity = capacityHintProvider match {
@@ -206,15 +202,7 @@ class SpillablePartialFileHandle private (
             s"(need $requiredCapacity bytes, max limit is $maxBufferSize bytes), " +
             s"spilling to disk")
           spillBufferToFileAndSwitch(currentBuffer)
-          return false
-        }
-
-        // Check if new capacity exceeds limit (should not happen due to math.min)
-        if (newCapacity > maxBufferSize) {
-          logDebug(s"Buffer expansion would exceed configured limit " +
-            s"(need $newCapacity bytes, limit is $maxBufferSize bytes), spilling to disk")
-          spillBufferToFileAndSwitch(currentBuffer)
-          return false
+          return
         }
 
         // Check for Int.MaxValue limit due to ByteBuffer constraints
@@ -223,7 +211,7 @@ class SpillablePartialFileHandle private (
             s"required by buffer.asByteBuffer() used during spill " +
             s"(need $newCapacity bytes, limit is ${Int.MaxValue} bytes), spilling to disk")
           spillBufferToFileAndSwitch(currentBuffer)
-          return false
+          return
         }
 
         // Check if memory usage is still below threshold
@@ -231,7 +219,7 @@ class SpillablePartialFileHandle private (
           logDebug(s"Memory usage above ${memoryThreshold * 100}% threshold, " +
             s"spilling to disk instead of expanding")
           spillBufferToFileAndSwitch(currentBuffer)
-          return false
+          return
         }
 
         try {
@@ -241,61 +229,44 @@ class SpillablePartialFileHandle private (
           closeOnExcept(newBuffer) { _ =>
             // Copy existing data
             newBuffer.buffer.copyFromHostBuffer(0,
-              currentBuffer.asInstanceOf[ContiguousPartialFileBuffer].buffer, 0, writePosition)
+              currentBuffer.buffer, 0, writePosition)
 
             // Remove old buffer tracking and track new one
             SpillFramework.removeFromHostStore(this)
             currentBuffer.close()
             host = Some(newBuffer)
-            currentBufferCapacity = newCapacity
             SpillFramework.stores.hostStore.trackNoSpill(this)
 
             expansionCount += 1
             logDebug(s"Expanded buffer from $oldCapacity to $newCapacity bytes " +
               s"(required $requiredCapacity bytes)")
           }
-          true
         } catch {
           case e: Exception =>
             logDebug(s"Failed to allocate buffer of $newCapacity bytes, " +
               s"spilling to disk", e)
             spillBufferToFileAndSwitch(currentBuffer)
-            false
         }
-      case None =>
-        throw new IllegalStateException("Host buffer is null")
+      case _ =>
     }
   }
 
   /** Move a sealed record into owned storage, or write its valid bytes to the destination. */
   def writeRecord(record: OwnedBuffer): Unit = {
-    if (writeFinished || closeRequested || closed) {
-      throw new IllegalStateException("Cannot write to a finished or closed partial file")
-    }
-    val data = record.takeBuffer()
-    var adopted = false
-    try {
-      if (data.getCount > 0) {
-        host match {
-          case Some(buffer: OwnedRecordBuffer) =>
-            buffer.append(data)
-            adopted = true
-            writePosition += data.getCount
-          case _ if shouldUseFile =>
-            ensureFileOutputStreamOpen()
-            data.writeTo(bufferedOutputStream.get)
-            writePosition += data.getCount
-          case _ =>
-            // Preserve support for callers using the legacy contiguous host buffer.
-            data.writeTo(new java.io.OutputStream {
-              override def write(value: Int): Unit = SpillablePartialFileHandle.this.write(value)
-              override def write(bytes: Array[Byte], start: Int, length: Int): Unit =
-                SpillablePartialFileHandle.this.write(bytes, start, length)
-            })
+    requireWritable()
+    val length = record.getCount
+    host match {
+      case Some(records: OwnedRecordBuffer) if length > 0 =>
+        closeOnExcept(record.takeBuffer())(records.append)
+        writePosition += length
+      case _ if length > 0 && shouldUseFile =>
+        withResource(record.takeBuffer()) { data =>
+          ensureFileOutputStreamOpen()
+          data.writeTo(bufferedOutputStream.get)
         }
-      }
-    } finally {
-      if (!adopted) data.close()
+        writePosition += length
+      case _ =>
+        withResource(record.takeBuffer())(_.writeTo(this))
     }
   }
 
@@ -315,7 +286,6 @@ class SpillablePartialFileHandle private (
     SpillFramework.removeFromHostStore(this)
     buffer.close()
     host = None
-    currentBufferCapacity = 0L
     spilledToDisk = true
     spillCount += 1
 
@@ -323,105 +293,40 @@ class SpillablePartialFileHandle private (
       s"($writePosition bytes), continuing write to file")
   }
 
-  /**
-   * Write a single byte to the partial file.
-   * No synchronization needed: write phase is protected from spilling.
-   */
-  def write(b: Int): Unit = {
-    if (writeFinished) {
-      throw new IllegalStateException("Write phase already finished")
-    }
-
-    if (host.exists(_.isInstanceOf[OwnedRecordBuffer])) {
-      withResource(new SegmentedHostOutputStream(1)) { stream =>
-        stream.write(b)
-        withResource(stream.takeBuffer())(writeRecord)
-      }
-      return
-    }
-    if (shouldUseFile) {
-      // FILE_ONLY mode or spilled: write to file
-      ensureFileOutputStreamOpen()
-      bufferedOutputStream.get.write(b)
-      writePosition += 1
-    } else {
-      // MEMORY_WITH_SPILL mode: write to buffer (protected from spill)
-      host match {
-        case Some(_) =>
-          // Check if buffer needs expansion
-          val requiredCapacity = writePosition + 1
-          if (requiredCapacity > currentBufferCapacity) {
-            val expanded = expandBuffer(requiredCapacity)
-            // After expansion, may have spilled to file, recursively call write
-            if (!expanded) {
-              // Spilled to file, retry write (will go to file branch)
-              write(b)
-              return
-            }
-          }
-          // Write to buffer (may be new buffer after expansion)
-          host.get.setByte(writePosition, b.toByte)
-          writePosition += 1
-        case None =>
-          throw new IllegalStateException("Host buffer is null")
-      }
+  private def requireWritable(): Unit = {
+    if (writeFinished || closeRequested || closed) {
+      throw new IllegalStateException("Cannot write to a finished or closed partial file")
     }
   }
 
-  /**
-   * Write bytes to the partial file.
-   * No synchronization needed: write phase is protected from spilling.
-   */
-  def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
-    if (writeFinished) {
-      throw new IllegalStateException("Write phase already finished")
-    }
+  // Writes are single-threaded until finishWrite. Expansion may switch the destination to disk.
+  private def prepareWrite(length: Int): Option[PartialFileBuffer] = {
+    expandBufferIfNeeded(writePosition + length)
+    if (shouldUseFile) ensureFileOutputStreamOpen()
+    host
+  }
 
+  override def write(b: Int): Unit = {
+    requireWritable()
+    prepareWrite(1) match {
+      case Some(buffer) => buffer.setByte(writePosition, b.toByte)
+      case None => bufferedOutputStream.get.write(b)
+    }
+    writePosition += 1
+  }
+
+  override def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
+    requireWritable()
     if (bytes == null) throw new NullPointerException("bytes")
     if (offset < 0 || length < 0 || offset > bytes.length - length) {
       throw new IndexOutOfBoundsException()
     }
-    if (length == 0) return
-
-    if (host.exists(_.isInstanceOf[OwnedRecordBuffer])) {
-      // Ordinary OutputStream callers retain their array. Copy only the incoming bytes;
-      // existing segments remain untouched and subsequent writes append new segments.
-      withResource(new SegmentedHostOutputStream(length)) { stream =>
-        stream.write(bytes, offset, length)
-        withResource(stream.takeBuffer())(writeRecord)
+    if (length > 0) {
+      prepareWrite(length) match {
+        case Some(buffer) => buffer.setBytes(writePosition, bytes, offset, length)
+        case None => bufferedOutputStream.get.write(bytes, offset, length)
       }
-      return
-    }
-    if (shouldUseFile) {
-      // FILE_ONLY mode or spilled: write to file
-      ensureFileOutputStreamOpen()
-      bufferedOutputStream.get.write(bytes, offset, length)
       writePosition += length
-    } else {
-      // MEMORY_WITH_SPILL mode: write to buffer (protected from spill)
-      host match {
-        case Some(_) =>
-          // Check if buffer needs expansion
-          val requiredCapacity = writePosition + length
-          if (requiredCapacity > currentBufferCapacity) {
-            logDebug(s"Buffer expansion needed: writePos=$writePosition, length=$length, " +
-              s"required=$requiredCapacity, current=$currentBufferCapacity")
-            val expanded = expandBuffer(requiredCapacity)
-            // After expansion, may have spilled to file, recursively call write
-            if (!expanded) {
-              // Spilled to file, retry write (will go to file branch)
-              write(bytes, offset, length)
-              return
-            }
-            logDebug(s"After expansion: currentCapacity=$currentBufferCapacity, " +
-              s"bufferLength=${host.get.capacity}")
-          }
-          // Write to buffer (may be new buffer after expansion)
-          host.get.setBytes(writePosition, bytes, offset, length)
-          writePosition += length
-        case None =>
-          throw new IllegalStateException("Host buffer is null")
-      }
     }
   }
 
@@ -725,7 +630,6 @@ class SpillablePartialFileHandle private (
       spillCount += 1
       SpillFramework.removeFromHostStore(this)
       host = None
-      currentBufferCapacity = 0L
       bufferToSpill.close()
 
       if (!commit) {
@@ -940,7 +844,6 @@ class SpillablePartialFileHandle private (
 
         SpillFramework.removeFromHostStore(this)
         host = None
-        currentBufferCapacity = 0L
 
         result
       }
