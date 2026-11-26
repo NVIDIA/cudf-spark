@@ -319,7 +319,7 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
                "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Materialized partition columns were added in OSS Delta 4.3")
 @pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
 def test_delta_43_materialized_partition_columns_fallback(
@@ -362,7 +362,7 @@ def test_delta_43_materialized_partition_columns_fallback(
                *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Materialized partition columns were added in OSS Delta 4.3")
 def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
         spark_tmp_table_factory):
@@ -395,7 +395,7 @@ def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
                "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43() or not is_spark_41x(),
                     reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
 @pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
 def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode):
@@ -1213,7 +1213,7 @@ def test_delta_sql_insert_v1_write(spark_tmp_table_factory, spark_tmp_path, over
                *delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 writer option validation")
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason="Delta 4.3 V2 writer option validation")
 @pytest.mark.parametrize("option_name, error", [
     ("replaceUsing", "replaceUsing requires targetAlias"),
     ("replaceOn", "Expected a Project node"),

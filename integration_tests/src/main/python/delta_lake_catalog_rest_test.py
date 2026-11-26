@@ -32,13 +32,13 @@ from delta_lake_catalog_managed_test import (
     _table_rows,
     unity_catalog_server)
 from delta_lake_utils import (assert_rapids_delta_write, delta_meta_allow,
-                              is_oss_delta_lake_43)
+                              is_supported_oss_delta_lake_43)
 from marks import allow_non_gpu, delta_lake, unity_catalog
 from spark_session import with_cpu_session, with_gpu_session
 
 
 pytestmark = pytest.mark.skipif(
-    not is_oss_delta_lake_43(),
+    not is_supported_oss_delta_lake_43(),
     reason="Unity Catalog Delta REST API routing requires OSS Delta Lake 4.3.0, 4.3.1, or 4.3.2.2")
 
 _SERVER_REJECTION_MESSAGE = "Injected server-side Delta commit rejection"

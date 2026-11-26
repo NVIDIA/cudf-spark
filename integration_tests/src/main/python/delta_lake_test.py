@@ -2171,7 +2171,7 @@ def test_oss_delta_lake_version_classifiers(
         expected_43, expected_42_or_43, expected_41_to_43, expected_40_to_43):
     monkeypatch.setattr(delta_lake_utils, "is_databricks_runtime", lambda: is_db)
     monkeypatch.setattr(delta_lake_utils, "_loaded_delta_lake_version", lambda: version)
-    assert delta_lake_utils.is_oss_delta_lake_43() is expected_43
+    assert delta_lake_utils.is_supported_oss_delta_lake_43() is expected_43
     assert delta_lake_utils.is_oss_delta_lake_42_or_43() is expected_42_or_43
     assert delta_lake_utils.is_oss_delta_lake_41_to_43() is expected_41_to_43
     assert delta_lake_utils.is_oss_delta_lake_40_to_43() is expected_40_to_43
