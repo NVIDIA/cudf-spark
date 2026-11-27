@@ -13,6 +13,7 @@ on:
       - '.github/actions/spark-archive-cache/**'
       - 'jenkins/databricks/maven_seed_v2.py'
       - '.github/workflows/databricks-ci/*maven_seed*.py'
+      - '.github/workflows/databricks-ci/prime_legacy_maven.sh'
       - '**/pom.xml'
       - 'build/get_buildvers.py'
       - 'dist/build/package-parallel-worlds.py'
@@ -58,6 +59,7 @@ jobs:
           python3 -B -m unittest discover -s .github/actions/maven-cache
           python3 -B -m unittest discover -s .github/actions/spark-archive-cache
           python3 -B -m unittest discover -s .github/workflows/databricks-ci -p 'test_maven_seed.py'
+          bash -n .github/workflows/databricks-ci/prime_legacy_maven.sh
 
   prepare:
     name: Prepare Scala ${{ matrix.scala }} caches
@@ -124,6 +126,9 @@ jobs:
           key: spark-maven-Linux-X64-2.13-main-for-db-seed
           restore-keys: spark-maven-Linux-X64-2.13-main-
           fail-on-cache-miss: true
+      - name: Prime released plugin dependencies for the Databricks Maven version
+        timeout-minutes: 10
+        run: bash .github/workflows/databricks-ci/prime_legacy_maven.sh
       - name: Read previous trusted seed digest
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

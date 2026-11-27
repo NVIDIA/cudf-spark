@@ -45,6 +45,7 @@ reconciliation before retrying it.
   on `main`. Install Git, GitHub CLI, Bash, curl, Python 3.9+ and Requests. Set
   `DATABRICKS_CI_ENABLED=true` only after these controls are in place.
   Missing configuration fails a required Databricks selection before allocation.
+  The cache publisher also needs a JDK, Maven, and HTTPS access to public Maven repositories.
 
 After each phase, the Actions console shows stdout and stderr tails. Failed
 phases also show bounded diagnostic excerpts. No cloud credentials are passed
