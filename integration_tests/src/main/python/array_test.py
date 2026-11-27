@@ -489,6 +489,24 @@ def test_array_slice_invalid_args_on_rows_a_conditional_skips(data_gen):
             'if(b > 1000, slice(a, 0, 5), NULL)'))
 
 
+@pytest.mark.parametrize('data_gen', [ArrayGen(int_gen)], ids=idfn)
+def test_array_slice_mixed_selected_and_skipped_rows(data_gen):
+    # b is in [0, 10], so every batch mixes rows the predicate selects, whose arguments are
+    # valid, with rows it skips, whose length is negative (b < 5) or whose start is zero
+    # (b = 0). The GPU must evaluate slice only on the selected rows and put each result back
+    # on its own row, with slice in both the THEN and the ELSE position.
+    small_gen = IntegerGen(nullable=False, min_val=0, max_val=10, special_cases=[])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, data_gen, small_gen).selectExpr(
+            'b',
+            'CASE WHEN b >= 5 THEN slice(a, 1, b - 5) END',
+            'CASE WHEN b >= 1 THEN slice(a, b, 2) END',
+            'CASE WHEN b < 5 THEN NULL ELSE slice(a, 1, b - 5) END',
+            'if(b >= 5, slice(a, 1, b - 5), NULL)',
+            'if(b >= 1, slice(a, b, 2), NULL)',
+            'if(b < 1, NULL, slice(a, b, 2))'))
+
+
 def test_array_slice_zero_start_only_on_null_list_rows():
     # The list is null exactly on the rows where start is zero, and slice is null intolerant,
     # so Spark never validates the start on those rows.
