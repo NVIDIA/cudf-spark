@@ -18,8 +18,8 @@ package com.nvidia.spark.rapids.spill
 
 import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
-import java.util.concurrent.{CountDownLatch, CyclicBarrier, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, CyclicBarrier, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import ai.rapids.cudf.{HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool}
 import com.nvidia.spark.rapids.{HostAlloc, RapidsConf}
@@ -969,9 +969,11 @@ class SpillablePartialFileHandleSuite
     assert(PageableMemoryPool.getTotalPoolSizeBytes == 0L,
       "test requires PageableMemoryPool to be uninitialized so allocations enter host spill")
 
-    // Two 64 KiB handles (128 KiB total, 40% < 99% threshold) concurrently request 256 KiB each
-    // under a 320 KiB budget, forcing both allocations into SpillFramework host-spill selection.
-    val budgetBytes = 320L * 1024L
+    // Two 64 KiB handles (128 KiB total, 44% < 99% threshold) concurrently request 256 KiB each
+    // under a 288 KiB budget. Even if one handle spills and frees its 64 KiB first, the other
+    // still holds its own 64 KiB during allocate(256 KiB) (320 KiB > 288 KiB), so both expansions
+    // deterministically enter SpillFramework host-spill selection regardless of scheduling order.
+    val budgetBytes = 288L * 1024L
     HostAlloc.initialize(budgetBytes)
     try {
       val tempFileA = File.createTempFile("test-concurrent-expand-a-", ".tmp")
@@ -980,12 +982,12 @@ class SpillablePartialFileHandleSuite
       var handleB: SpillablePartialFileHandle = null
       var threadA: Thread = null
       var threadB: Thread = null
-      val spillSelectionProbes = new AtomicInteger(0)
+      val spillSelectionThreads = ConcurrentHashMap.newKeySet[Long]()
       val probeHandle = new HostSpillableHandle[HostMemoryBuffer] {
         override private[spill] var host: Option[HostMemoryBuffer] = None
         override val approxSizeInBytes: Long = 1L
         override private[spill] def spillable: Boolean = {
-          spillSelectionProbes.incrementAndGet()
+          spillSelectionThreads.add(Thread.currentThread().getId)
           false
         }
         override def spill(): Long = 0L
@@ -1044,11 +1046,13 @@ class SpillablePartialFileHandleSuite
         assert(errorB.get() == null, s"threadB failed: ${errorB.get()}")
 
         assert(handleA.isSpilled && handleB.isSpilled,
-          s"both handles must spill when 256 KiB expansions exceed 320 KiB budget " +
+          s"both handles must spill when 64 KiB + 256 KiB > 288 KiB budget " +
             s"(spilledA=${handleA.isSpilled}, spilledB=${handleB.isSpilled})")
-        assert(spillSelectionProbes.get() >= 2,
-          s"expected both expansions to invoke host-spill selection, " +
-            s"got ${spillSelectionProbes.get()}")
+        assert(
+          spillSelectionThreads.contains(threadA.getId) &&
+            spillSelectionThreads.contains(threadB.getId),
+          s"expected both expansion threads to invoke host-spill selection, " +
+            s"observed threads=$spillSelectionThreads")
 
         handleA.finishWrite()
         handleB.finishWrite()
