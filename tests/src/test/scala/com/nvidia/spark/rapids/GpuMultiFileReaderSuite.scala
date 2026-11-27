@@ -500,7 +500,6 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
         PartitionedFileUtilsShim.newPartitionedFile(
           InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
       }.toArray
-      val file0Finished = new CountDownLatch(1)
       val file1Finished = new CountDownLatch(1)
       val file2Blocker = new CountDownLatch(1)
       val file3Started = new CountDownLatch(1)
@@ -530,9 +529,8 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
           AsyncRunner.newUnboundedTask[BufferInfo](() => {
             tasksStarted.incrementAndGet()
             if (file.filePath.toString.contains("file0")) {
-              file0Finished.countDown()
-            } else if (file.filePath.toString.contains("file1")) {
-              file1Finished.countDown()
+              // Wait for file1 so both file0 and file1 are ready to combine in batch 1
+              assert(file1Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
             } else if (file.filePath.toString.contains("file2")) {
               file2Blocker.await()
             } else if (file.filePath.toString.contains("file3")) {
@@ -540,12 +538,16 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
             } else if (file.filePath.toString.contains("file4")) {
               file4Started.countDown()
             }
-            new HostMemoryBuffersWithMetaDataBase {
+            val result = new HostMemoryBuffersWithMetaDataBase {
               override def partitionedFile: PartitionedFile = file
               override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
                 Array(SingleHMBAndMeta.empty(1))
               override def bytesRead: Long = 100
             }
+            if (file.filePath.toString.contains("file1")) {
+              file1Finished.countDown()
+            }
+            result
           })
         }
 
@@ -559,28 +561,27 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
 
       try {
         withResource(reader) { r =>
-          // Ensure file0 and file1 have finished before consuming batch 1
-          assert(file0Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
-          assert(file1Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
-          // Batch 1: file0 and file1 complete, file2 is blocked.
+          // Batch 1: r.next() initializes the reader (submitting file0, file1, file2).
+          // file0 waits for file1 while file2 is blocked, so batch 1 combines file0 and file1.
           assert(r.next())
           withResource(r.get()) { batch =>
             assert(batch.numRows() == 2)
           }
-          // At this point, 2 slots were freed. Unblock file2.
-          file2Blocker.countDown()
-          // Batch 2 triggers refill: BOTH freed slots (file3 and file4) must be
-          // submitted and started
-          assert(r.next())
+          // Consuming batch 1 freed 2 slots, so addNextTaskIfNeeded must refill BOTH
+          // (submitting file3 and file4) while file2 is still blocked.
           assert(file3Started.await(10, java.util.concurrent.TimeUnit.SECONDS))
           assert(file4Started.await(10, java.util.concurrent.TimeUnit.SECONDS))
           assert(tasksStarted.get() >= 5)
+
+          // Unblock file2 and drain remaining batches.
+          file2Blocker.countDown()
           while (r.next()) {
             withResource(r.get()) { _ => }
           }
           assert(tasksStarted.get() == 6)
         }
       } finally {
+        file1Finished.countDown()
         file2Blocker.countDown()
       }
     } finally {
