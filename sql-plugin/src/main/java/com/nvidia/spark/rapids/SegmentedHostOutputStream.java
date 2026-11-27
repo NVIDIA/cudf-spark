@@ -91,6 +91,44 @@ public final class SegmentedHostOutputStream extends OutputStream {
     }
   }
 
+  /** Return a view that forwards writes and ignores close() so codecs can flush before handoff. */
+  public OutputStream nonClosingView() {
+    requireOpen();
+    return new OutputStream() {
+      private boolean closed;
+
+      private void requireViewOpen() throws IOException {
+        if (closed) {
+          throw new IOException("Stream is closed");
+        }
+      }
+
+      @Override
+      public void write(int value) throws IOException {
+        requireViewOpen();
+        SegmentedHostOutputStream.this.write(value);
+      }
+
+      @Override
+      public void write(byte[] bytes, int offset, int length) throws IOException {
+        requireViewOpen();
+        SegmentedHostOutputStream.this.write(bytes, offset, length);
+      }
+
+      @Override
+      public void flush() throws IOException {
+        if (!closed) {
+          SegmentedHostOutputStream.this.flush();
+        }
+      }
+
+      @Override
+      public void close() {
+        closed = true;
+      }
+    };
+  }
+
   public interface Sink {
     void writeRecord(OwnedBuffer record) throws IOException;
   }

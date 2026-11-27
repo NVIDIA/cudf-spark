@@ -34,7 +34,6 @@ import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 import com.nvidia.spark.rapids.shuffle.{CatalogShuffleRequestHandler, RapidsShuffleServer, RapidsShuffleTransport}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
-import org.apache.commons.io.output.CloseShieldOutputStream
 
 import org.apache.spark.{InterruptibleIterator, MapOutputTracker, ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.executor.ShuffleWriteMetrics
@@ -821,7 +820,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                   // Closing the codec must finish the record before its segments change owners.
                   val encoded = blockManager.serializerManager.wrapStream(
                     ShuffleBlockId(shuffleId, mapId, reducePartitionId),
-                    new CloseShieldOutputStream(buffer))
+                    buffer.nonClosingView())
                   withResource(serializerInstance.serializeStream(encoded)) { serializer =>
                     serializer.writeKey(key.asInstanceOf[Any])
                     serializer.writeValue(value.asInstanceOf[Any])

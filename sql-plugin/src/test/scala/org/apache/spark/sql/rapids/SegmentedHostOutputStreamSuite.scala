@@ -28,7 +28,6 @@ import com.nvidia.spark.rapids.{RapidsConf, SegmentedHostOutputStream}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.SegmentedHostOutputStream.OwnedBuffer
 import org.apache.commons.io.IOUtils
-import org.apache.commons.io.output.CloseShieldOutputStream
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
@@ -132,8 +131,10 @@ class SegmentedHostOutputStreamSuite extends AnyFunSuite {
       new Random(19).nextBytes(bytes)
       val serialized = new ByteArrayOutputStream()
       withResource(new SegmentedHostOutputStream(segmentSize)) { buffer =>
-        val encoded = manager.wrapStream(block, new CloseShieldOutputStream(buffer))
+        val view = buffer.nonClosingView()
+        val encoded = manager.wrapStream(block, view)
         withResource(encoded)(_.write(bytes))
+        intercept[IOException](view.write(0))
         withResource(buffer.takeBuffer())(_.writeTo(serialized))
       }
       withResource(manager.wrapStream(block, new ByteArrayInputStream(serialized.toByteArray))) {
