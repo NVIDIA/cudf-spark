@@ -18,7 +18,7 @@ package org.apache.iceberg.spark.source
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, NoopMetric, RapidsConf, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet.{
@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.iceberg.parquet.{
   SingleFile,
   ThreadConf
 }
+import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitTotals}
 import org.apache.iceberg.{FileFormat, MetadataColumns}
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -36,7 +37,8 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     @transient rapidsConf: RapidsConf,
-    queryUsesInputFile: Boolean) extends PartitionReaderFactory {
+    queryUsesInputFile: Boolean,
+    splitTotals: Option[SplitTotals]) extends PartitionReaderFactory {
 
   private val allCloudSchemes = rapidsConf.getCloudSchemes.toSet
   private val isParquetPerFileReadEnabled = rapidsConf.isParquetPerFileReadEnabled
@@ -57,7 +59,13 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     partition match {
       case gpuPartition: GpuSparkInputPartition =>
         val threadConf = calcThreadConf(gpuPartition)
-        new GpuIcebergPartitionReader(gpuPartition, threadConf, metrics)
+        val reader = new GpuIcebergPartitionReader(gpuPartition, threadConf, metrics)
+        splitTotals.fold[PartitionReader[ColumnarBatch]](reader) { totals =>
+          // Records this split's decoded and data bytes.
+          ScanSplitHeuristic.observeReader(reader,
+            GpuSparkScanAccess.dataBytes(gpuPartition.taskGroup.tasks()),
+            metrics.getOrElse(GpuMetric.GPU_OUTPUT_BATCH_BYTES, NoopMetric), totals)
+        }
       case _ =>
         throw new IllegalArgumentException(s"Unsupported partition type: ${partition.getClass}")
     }
@@ -66,8 +74,7 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   override def supportColumnarReads(partition: InputPartition) = true
 
   private def calcThreadConf(partition: GpuSparkInputPartition): ThreadConf = {
-    val scans = GpuSparkScanAccess
-      .taskGroup(partition.cpuPartition)
+    val scans = partition.taskGroup
       .tasks
       .asScala
       .map(_.asFileScanTask())

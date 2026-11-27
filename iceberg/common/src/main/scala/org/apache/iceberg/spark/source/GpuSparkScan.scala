@@ -22,10 +22,13 @@ import scala.util.{Failure, Success, Try}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
+import com.nvidia.spark.rapids.perf.{ExecutionEndCallbacks, PlanKey, ScanContext, ScanHistoryKey,
+  ScanSplitHeuristic, SplitTotals}
 import org.apache.iceberg.ScanTaskGroup
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{Batch, Scan, Statistics, SupportsReportStatistics}
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream
@@ -49,6 +52,44 @@ abstract class GpuSparkScan(val cpuScan: Scan,
   override def toBatch: Batch = {
     new GpuSparkBatch(GpuSparkScanAccess.toBatch(cpuScan), this)
   }
+
+  /** History key at this planning (runtime filters can change it); None when history is off. */
+  def historyKey(): Option[PlanKey] = ScanSplitHeuristic.historyKey {
+    // Only batch query scans hold runtime filters as expressions.
+    val runtimeFilters =
+      if (GpuSparkScanAccess.isBatchQueryScan(cpuScan)) {
+        Option(GpuSparkScanAccess.runtimeFilterExpressions(cpuScan))
+          .map(_.asScala.toSeq).getOrElse(Seq.empty)
+      } else {
+        Seq.empty
+      }
+    IcebergPlanKey.of(GpuSparkScanAccess.table(cpuScan).name(), readSchema(),
+      GpuSparkScanAccess.filterExpressions(cpuScan).asScala.toSeq, runtimeFilters)
+  }
+
+  /** Bytes of the splits read; None when history is off. */
+  @transient lazy val splitTotals: Option[SplitTotals] =
+    if (ScanSplitHeuristic.instance.isEnabled) {
+      Some(SplitTotals.create(SparkContext.getOrCreate()))
+    } else {
+      None
+    }
+
+  /** Only the newest planning is recorded. */
+  @transient @volatile private var latestPlanning = 0
+
+  /** Queues this planning for recording when its query ends. */
+  def registerPlanning(planned: Int, listedBytes: => Long, key: Option[PlanKey]): Unit =
+    for (totals <- splitTotals; scanKey <- key; sized <- ScanHistoryKey.of(scanKey, listedBytes)) {
+      val planning = synchronized {
+        latestPlanning += 1
+        latestPlanning
+      }
+      ScanSplitHeuristic.instance.register(
+        ExecutionEndCallbacks.currentExecutionId(SparkContext.getOrCreate()),
+        ScanContext.forObservation(sized, planned, () => totals.drain())
+          .copy(isCurrent = () => planning == latestPlanning))
+    }
 
   override def toMicroBatchStream(checkpointLocation: String): MicroBatchStream =
     throw new UnsupportedOperationException(

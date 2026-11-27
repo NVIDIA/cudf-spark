@@ -108,8 +108,7 @@ class GpuIcebergPartitionReader(
   }
 
   private def collectFiles() = {
-    val tasks: Seq[FileScanTask] = GpuSparkScanAccess
-      .taskGroup(task.cpuPartition)
+    val tasks: Seq[FileScanTask] = task.taskGroup
       .tasks()
       .asScala
       .map(t => t.asFileScanTask())

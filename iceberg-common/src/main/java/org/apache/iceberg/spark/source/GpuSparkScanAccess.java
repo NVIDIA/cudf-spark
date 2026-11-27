@@ -16,9 +16,11 @@
 
 package org.apache.iceberg.spark.source;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -30,6 +32,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.spark.SparkReadConf;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.TableScanUtil;
 import org.apache.spark.sql.connector.read.Batch;
 import org.apache.spark.sql.connector.read.InputPartition;
 import org.apache.spark.sql.connector.read.Scan;
@@ -126,6 +129,104 @@ public final class GpuSparkScanAccess {
 
   public static Batch toBatch(Scan scan) {
     return sparkScan(scan).toBatch();
+  }
+
+  /** The scan's planned tasks before grouping; empty for scans that do not plan tasks. */
+  public static List<? extends ScanTask> tasks(Scan scan) {
+    return scan instanceof SparkPartitioningAwareScan
+        ? ((SparkPartitioningAwareScan<?>) scan).tasks()
+        : Collections.emptyList();
+  }
+
+  /** Data bytes of {@code tasks}, excluding delete files (counted per piece by Iceberg). */
+  public static long dataBytes(Iterable<? extends ScanTask> tasks) {
+    long bytes = 0L;
+    for (ScanTask task : tasks) {
+      bytes += task.isFileScanTask() ? task.asFileScanTask().length() : task.sizeBytes();
+    }
+    return bytes;
+  }
+
+  /** Whether any of {@code tasks} is read with delete files. */
+  public static boolean hasDeletes(Iterable<? extends ScanTask> tasks) {
+    for (ScanTask task : tasks) {
+      if (task.isFileScanTask() && !task.asFileScanTask().deletes().isEmpty()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The split size Iceberg groups this scan by, after its adaptive adjustment. */
+  public static long splitSize(Scan scan) {
+    return sparkScan(scan).adjustSplitSize(tasks(scan), readConf(scan).splitSize());
+  }
+
+  /** Whether the split size is set as a read option. */
+  public static boolean hasExplicitSplitSize(Scan scan) {
+    return readConf(scan).splitSizeOption() != null;
+  }
+
+  /** Iceberg's input partitions for the scan's tasks regrouped by {@code splitBytes}. */
+  public static InputPartition[] planInputPartitions(Scan scan, Batch batch, long splitBytes) {
+    SparkReadConf conf = readConf(scan);
+    List<ScanTaskGroup<ScanTask>> groups = TableScanUtil.planTaskGroups(
+        new ArrayList<ScanTask>(tasks(scan)),
+        splitBytes,
+        conf.splitLookback(),
+        conf.splitOpenFileCost());
+    return withTaskGroups(batch, groups).planInputPartitions();
+  }
+
+  /**
+   * A copy of {@code batch} over {@code groups}. The constructor differs across Iceberg versions,
+   * so each argument is taken from the batch's field of the same type.
+   */
+  private static Batch withTaskGroups(Batch batch, List<? extends ScanTaskGroup<?>> groups) {
+    Class<?> batchClass = batch.getClass();
+    Constructor<?>[] constructors = batchClass.getDeclaredConstructors();
+    if (constructors.length != 1) {
+      throw new IllegalStateException("Expected one constructor on " + batchClass.getName());
+    }
+    Class<?>[] types = constructors[0].getParameterTypes();
+    Object[] args = new Object[types.length];
+    for (int i = 0; i < types.length; i++) {
+      if (types[i] == List.class) {
+        args[i] = groups;
+      } else {
+        Field field = fieldOfType(batchClass, types[i]);
+        try {
+          field.setAccessible(true);
+          args[i] = field.get(batch);
+        } catch (IllegalAccessException e) {
+          throw new IllegalStateException("Unable to read " + field.getName(), e);
+        }
+      }
+    }
+    try {
+      constructors[0].setAccessible(true);
+      return (Batch) constructors[0].newInstance(args);
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException("Unable to rebuild " + batchClass.getName(), e);
+    }
+  }
+
+  private static Field fieldOfType(Class<?> target, Class<?> type) {
+    Field found = null;
+    for (Field f : target.getDeclaredFields()) {
+      if (f.getType() == type) {
+        if (found != null) {
+          throw new IllegalStateException(
+              "More than one field of type " + type.getName() + " on " + target.getName());
+        }
+        found = f;
+      }
+    }
+    if (found == null) {
+      throw new IllegalStateException(
+          "No field of type " + type.getName() + " on " + target.getName());
+    }
+    return found;
   }
 
   @SuppressWarnings("unchecked")
