@@ -164,6 +164,99 @@ def test_auto_compact_basic(spark_tmp_path, auto_compact_conf, enable_deletion_v
 
 @delta_lake
 @allow_non_gpu(*delta_meta_allow)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
+@pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
+@pytest.mark.parametrize("session_time_zone", ["UTC", "America/Los_Angeles"], ids=idfn)
+def test_auto_compact_mixed_timestamp_partition_forms(
+        spark_tmp_path, normalize_partition_values_on_read, session_time_zone):
+    """
+    Logically equal timestamp partition values written in different textual forms are
+    compacted into one bin only when `spark.databricks.delta.normalizePartitionValuesOnRead`
+    is true, while a logically different value stays in its own bin. Auto compaction is
+    enabled only for the last insert, which the test captures, so in both settings exactly one
+    compaction runs inside the capture window and its GPU execution is asserted. Compares CPU
+    and GPU file counts, data and OPTIMIZE metrics. The local form is written in the session
+    time zone, which is the main semantic risk of normalization.
+    """
+    data_path = spark_tmp_path + "/AUTO_COMPACT_TS_PARTITIONS"
+    cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
+    auto_compact_key = "spark.databricks.delta.autoCompact.enabled"
+    conf = copy_and_update(_conf, {
+        auto_compact_key: "true",
+        "spark.sql.session.timeZone": session_time_zone,
+        "spark.databricks.delta.normalizePartitionValuesOnRead":
+            str(normalize_partition_values_on_read).lower()})
+    # Delta still records partition stats while auto compaction is off.
+    setup_conf = copy_and_update(conf, {auto_compact_key: "false"})
+    # 12:00 UTC written as a local string and as a UTC string, then a different instant (13:00
+    # UTC) that must never join the 12:00 bin, then the local 12:00 form again.
+    local_12, local_13 = ("2000-01-01 12:00:00", "2000-01-01 13:00:00") \
+        if session_time_zone == "UTC" else ("2000-01-01 04:00:00", "2000-01-01 05:00:00")
+    inserts = [(False, local_12), (True, "2000-01-01T12:00:00.000Z"), (False, local_13),
+               (False, local_12)]
+
+    def insert(spark, path, start, end):
+        for i in range(start, end):
+            insert_timestamp_partition_row(spark, path, i, *inserts[i])
+
+    for path in [cpu_path, gpu_path]:
+        with_cpu_session(lambda spark: create_timestamp_partitioned_table(spark, path), conf)
+    # Auto compaction is off for the setup inserts. Delta's partition stats are keyed by the raw
+    # partition string, so a compaction on an earlier insert would run outside the capture
+    # window and depend on the insert order.
+    last = len(inserts) - 1
+    with_cpu_session(lambda spark: insert(spark, cpu_path, 0, last), setup_conf)
+    with_gpu_session(lambda spark: insert(spark, gpu_path, 0, last), setup_conf)
+    with_cpu_session(lambda spark: insert(spark, cpu_path, last, last + 1), conf)
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: insert(spark, gpu_path, last, last + 1), conf)
+        captured_plans = plan_callback.getResultsWithTimeout(10000)
+    finally:
+        plan_callback.endCapture()
+
+    def summarize(spark, path):
+        raw_partitions = get_raw_timestamp_partition_values(spark, path)
+        history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`")
+        optimize = history.where("operation = 'OPTIMIZE'").selectExpr(
+            "operationMetrics['numAddedFiles']", "operationMetrics['numRemovedFiles']").collect()
+        table = spark.read.format("delta").load(path)
+        files_per_ts = [r[1] for r in table.select("ts", input_file_name().alias("f"))
+                        .groupBy("ts").agg(count_distinct("f")).orderBy("ts").collect()]
+        return (len(table.inputFiles()), len(raw_partitions), files_per_ts,
+                sorted(tuple(r) for r in optimize),
+                sorted((r[0], r[1]) for r in table.selectExpr(
+                    "id", "CAST(ts AS LONG)").collect()))
+
+    cpu = with_cpu_session(lambda spark: summarize(spark, cpu_path), conf)
+    gpu = with_cpu_session(lambda spark: summarize(spark, gpu_path), conf)
+    assert cpu == gpu, f"CPU and GPU differ: {cpu} vs {gpu}"
+    num_files, num_raw_partitions, files_per_ts, optimize_ops, rows = cpu
+    # Epoch seconds of 2000-01-01 12:00:00 UTC for ids 0, 1 and 3, and 13:00:00 UTC for id 2.
+    utc_12, utc_13 = 946728000, 946731600
+    assert rows == [(0, utc_12), (1, utc_12), (2, utc_13), (3, utc_12)], \
+        f"Unexpected (id, ts) rows: {rows}"
+    for class_name in delta_write:
+        assert any(plan_callback.contains(plan, class_name) for plan in captured_plans), \
+            f"Expected a {class_name} plan for the GPU insert"
+    assert num_raw_partitions == 3, \
+        "Inputs must use three distinct raw partition strings across the log history"
+    # The 12:00 forms are one file only when normalized; 13:00 always keeps its own file.
+    # Exactly one OPTIMIZE ran, in the captured insert, in both settings.
+    if normalize_partition_values_on_read:
+        expected = ([("1", "3")], [1, 1], 2)
+    else:
+        expected = ([("1", "2")], [2, 1], 3)
+    assert (optimize_ops, files_per_ts, num_files) == expected, \
+        f"Expected (OPTIMIZE metrics, files per partition, files) {expected}, " \
+        f"got {(optimize_ops, files_per_ts, num_files)}"
+    assert_inline_auto_compaction_used_gpu(captured_plans)
+
+
+@delta_lake
+@allow_non_gpu(*delta_meta_allow)
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Apache Spark 3.5.3+")

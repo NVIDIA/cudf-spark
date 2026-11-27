@@ -155,31 +155,20 @@ def _write_mixed_timestamp_partition_files(
         raise ValueError("Mixed timestamp partition coverage requires deletion vectors disabled "
                          "and supplies its own timestamp partition column")
 
-    spark.sql(f"""
-        CREATE TABLE delta.`{path}` (id LONG, ts TIMESTAMP)
-        USING DELTA
-        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')
-        PARTITIONED BY (ts)
-    """)
-
-    utc_partition_conf = "spark.databricks.delta.write.utcTimestampPartitionValues"
-    previous_value = spark.conf.get(utc_partition_conf, None)
-    try:
-        spark.conf.set(utc_partition_conf, "false")
-        spark.sql(f"INSERT INTO delta.`{path}` VALUES (0, '2000-01-01 12:00:00')")
-        spark.sql(f"INSERT INTO delta.`{path}` VALUES (1, '2000-01-01 12:00:00')")
-
-        spark.conf.set(utc_partition_conf, "true")
-        spark.sql(f"INSERT INTO delta.`{path}` VALUES (2, '2000-01-01T12:00:00.000Z')")
-        spark.sql(f"INSERT INTO delta.`{path}` VALUES (3, '2000-01-01T12:00:00.000Z')")
-    finally:
-        if previous_value is None:
-            spark.conf.unset(utc_partition_conf)
-        else:
-            spark.conf.set(utc_partition_conf, previous_value)
+    create_timestamp_partitioned_table(spark, path)
+    for row_id, utc, literal in [(0, False, '2000-01-01 12:00:00'),
+                                 (1, False, '2000-01-01 12:00:00'),
+                                 (2, True, '2000-01-01T12:00:00.000Z'),
+                                 (3, True, '2000-01-01T12:00:00.000Z')]:
+        insert_timestamp_partition_row(spark, path, row_id, utc, literal)
 
     input_files = spark.read.format("delta").load(path).inputFiles()
     assert len(input_files) == 4, f"Expected 4 input files, but got {input_files}"
+    # Without two raw forms in the log the tests below could not tell grouping by raw strings
+    # from grouping by normalized values, e.g. if a runtime ignored the UTC-partition conf.
+    raw_partitions = get_raw_timestamp_partition_values(spark, path)
+    assert len(raw_partitions) == 2, \
+        f"Expected two raw timestamp partition strings, but got {raw_partitions}"
 
 
 def _write_many_small_row_tracking_files(
@@ -600,8 +589,9 @@ def test_delta_optimize_partitioned_table(spark_tmp_path, enable_deletion_vector
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
-                    reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
+@pytest.mark.skipif(not (is_oss_delta_lake_43() or is_databricks173_or_later()),
+                    reason="Normalized timestamp partition grouping is in Delta Lake 4.3 "
+                           "and Databricks 17.3+")
 @pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
 def test_delta_optimize_normalized_timestamp_partitions(
         spark_tmp_path, normalize_partition_values_on_read):
@@ -619,7 +609,10 @@ def test_delta_optimize_normalized_timestamp_partitions(
         write_func=_write_mixed_timestamp_partition_files,
         check_delta_log=False)
 
-    expected_file_count = 1 if normalize_partition_values_on_read else 2
+    # Databricks always normalizes partition values when selecting files (observed on 17.3 and
+    # 18.3), so both parameter values expect one file there. The writer asserts that two raw
+    # forms reached the log, which is what makes that 1-file result meaningful.
+    expected_file_count = 1 if normalize_partition_values_on_read or is_databricks_runtime() else 2
 
     def assert_compacted_file_count(spark, path):
         input_files = spark.read.format("delta").load(path).inputFiles()

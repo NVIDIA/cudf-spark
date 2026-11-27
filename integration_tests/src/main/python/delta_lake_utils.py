@@ -879,3 +879,42 @@ def assert_rapids_gpu_delete_ran(do_test, conf):
         return result
     finally:
         callback.endCapture()
+
+
+_UTC_TIMESTAMP_PARTITION_CONF = "spark.databricks.delta.write.utcTimestampPartitionValues"
+
+
+def create_timestamp_partitioned_table(spark, path):
+    """Creates an empty `(id LONG, ts TIMESTAMP)` Delta table partitioned by `ts`."""
+    spark.sql(f"""
+        CREATE TABLE delta.`{path}` (id LONG, ts TIMESTAMP)
+        USING DELTA
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')
+        PARTITIONED BY (ts)
+    """)
+
+
+def insert_timestamp_partition_row(spark, path, row_id, write_utc_partition_values, ts_literal):
+    """
+    Inserts one row, writing the partition value either as a UTC ISO string
+    (`write_utc_partition_values` true) or as a session-time-zone local string (false), so
+    logically equal timestamps get different raw partition strings in the Delta log.
+    """
+    previous_value = spark.conf.get(_UTC_TIMESTAMP_PARTITION_CONF, None)
+    try:
+        spark.conf.set(_UTC_TIMESTAMP_PARTITION_CONF, str(write_utc_partition_values).lower())
+        spark.sql(f"INSERT INTO delta.`{path}` VALUES ({row_id}, '{ts_literal}')")
+    finally:
+        if previous_value is None:
+            spark.conf.unset(_UTC_TIMESTAMP_PARTITION_CONF)
+        else:
+            spark.conf.set(_UTC_TIMESTAMP_PARTITION_CONF, previous_value)
+
+
+def get_raw_timestamp_partition_values(spark, path):
+    """
+    Returns the distinct raw `ts` partition strings of every AddFile in the whole Delta log
+    history, including files that were later removed.
+    """
+    return {r[0] for r in spark.read.json(path + "/_delta_log/*.json")
+            .where("add IS NOT NULL").selectExpr("add.partitionValues.ts").collect()}
