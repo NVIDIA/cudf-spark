@@ -56,6 +56,16 @@ class CleanupOrphansTest(unittest.TestCase):
                           ("POST", "permanent-delete"), ("GET", "get"), ("GET", "get")])
         self.assertTrue(all(c.args[2] == resource for c in db.call_args_list[2:]))
 
+    def test_internal_error_on_owned_terminal_attempt_is_terminated_once_before_purge(self):
+        info = cluster(state="INTERNAL_ERROR")
+        db = Mock(side_effect=[{"clusters": [info]}, info, {}, info, cluster(state="TERMINATED"), {}, None])
+        self.assertEqual(s.sweep(db, self.gh, "aws2", "ci"), (1, 1))
+        cid = {"cluster_id": info["cluster_id"]}
+        self.assertEqual(db.call_args_list[1:], [
+            call("GET", "get", cid), call("POST", "delete", cid), call("GET", "get", cid),
+            call("GET", "get", cid), call("POST", "permanent-delete", cid), call("GET", "get", cid),
+        ])
+
     def test_never_touch_active_or_foreign_clusters(self):
         db = Mock(return_value={"clusters": [cluster(), cluster(profile="azure3"), {},
                                              cluster(creator_user_name="someone-else")]})

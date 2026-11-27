@@ -146,7 +146,9 @@ def remove(db, profile, creator, cid, owner):
                 if receipt != {}:
                     raise SweepError("Workspace did not confirm the permanent-delete request")
                 purging = True
-        elif state not in {"PENDING", "RUNNING", "RESTARTING", "RESIZING", "TERMINATING", "ERROR"} or purging:
+        elif purging or state not in {
+            "PENDING", "RUNNING", "RESTARTING", "RESIZING", "TERMINATING", "ERROR", "INTERNAL_ERROR"
+        }:
             raise SweepError("Unexpected cluster state; withholding further deletion")
         elif not terminating and state != "TERMINATING":
             if db("POST", "delete", data) is None:
