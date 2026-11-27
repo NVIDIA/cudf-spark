@@ -16,13 +16,13 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.{DeltaTableUtils, RowTracking, Snapshot}
+import com.databricks.sql.transaction.tahoe.{RowTracking, Snapshot}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.{UpdateCommandEdgeMeta, UpdateCommandMeta}
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.internal.SQLConf
 
@@ -49,18 +49,10 @@ object UpdateCommandMetaShim {
     val persistentDvEnabled = PersistentDeletionVectorMetaShim.tagForGpu(
       meta, sqlConf, snapshot, DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS, target.schema)
     if (persistentDvEnabled && RowTracking.isEnabled(snapshot.protocol, snapshot.metadata) &&
-        hasDataPredicate(condition, snapshot.metadata.partitionColumns, spark)) {
+        PersistentDeletionVectorMetaShim.hasDataPredicate(
+          condition, snapshot.metadata.partitionColumns, spark)) {
       meta.willNotWorkOnGpu(
         "Persistent deletion vector UPDATE with row tracking is not supported on GPU")
     }
-  }
-
-  private def hasDataPredicate(
-      condition: Option[Expression],
-      partitionColumns: Seq[String],
-      spark: SparkSession): Boolean = {
-    val (_, dataPredicates) = DeltaTableUtils.splitMetadataAndDataPredicates(
-      condition.getOrElse(Literal.TrueLiteral), partitionColumns, spark)
-    dataPredicates.nonEmpty
   }
 }

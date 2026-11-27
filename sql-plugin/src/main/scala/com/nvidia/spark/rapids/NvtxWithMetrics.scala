@@ -39,19 +39,17 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
   def this(name: String, color: NvtxColor, metrics: GpuMetric*) =
     this(name, color, metrics.toSeq)
 
-  val needTracks = metrics.map(_.tryActivateTimer(excludeMetric))
-  private val start = System.nanoTime()
+  private val metricRange = new MetricRange(metrics, excludeMetric)
+
+  def needTracks: Seq[Boolean] = metricRange.needTracks
+
+  protected def closeNvtxRange(): Unit = super.close()
 
   override def close(): Unit = {
     try {
-      val time = System.nanoTime() - start
-      metrics.toSeq.zip(needTracks).foreach { pair =>
-        if (pair._2) {
-          pair._1.deactivateTimer(time, excludeMetric)
-        }
-      }
+      metricRange.close()
     } finally {
-      super.close()
+      closeNvtxRange()
     }
   }
 }
@@ -62,19 +60,27 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
  */
 object NvtxIdWithMetrics {
 
-  def apply[V](nvtxId: NvtxId, metrics: GpuMetric*)(block: => V): V = {
-    val needTracks = metrics.map(_.tryActivateTimer(Seq.empty))
-    val start = System.nanoTime()
-
+  def apply[V](nvtxId: NvtxId, metric: GpuMetric)(block: => V): V = {
+    val activated = metric.tryActivateTimer(Seq.empty)
+    val start = if (activated) System.nanoTime() else 0L
     try {
-      nvtxId.apply(block)
-    } finally {
-      val time = System.nanoTime() - start
-      metrics.toSeq.zip(needTracks).foreach { pair =>
-        if (pair._2) {
-          pair._1.deactivateTimer(time, Seq.empty)
-        }
+      // Mirrors NvtxId.apply; keep the push/pop ordering in sync.
+      try {
+        nvtxId.push()
+        block
+      } finally {
+        nvtxId.pop()
       }
+    } finally {
+      if (activated) {
+        metric.deactivateTimer(System.nanoTime() - start, Seq.empty)
+      }
+    }
+  }
+
+  def apply[V](nvtxId: NvtxId, metrics: GpuMetric*)(block: => V): V = {
+    GpuMetric.ns(metrics, Seq.empty) {
+      nvtxId.apply(block)
     }
   }
 }
@@ -85,14 +91,70 @@ class MetricRange(val metrics: Seq[GpuMetric], val excludeMetric: Seq[GpuMetric]
   // add a convenient constructor
   def this(metrics: GpuMetric*) = this(metrics.toSeq)
 
-  val needTracks = metrics.map(_.tryActivateTimer(excludeMetric))
-  private val start = System.nanoTime()
+  private val metricCount = metrics.length
+  private val singleMetric = if (metricCount == 1) metrics.head else null
+  private val singleActive = singleMetric != null && singleMetric.tryActivateTimer(excludeMetric)
+  // Retain only timers activated by this range, at their original positions for needTracks.
+  // Closing must not depend on the caller preserving the input sequence during the body.
+  private val activatedMetrics: Array[GpuMetric] = {
+    var activated: Array[GpuMetric] = null
+    if (metricCount > 1) {
+      val iterator = metrics.iterator
+      var index = 0
+      while (iterator.hasNext) {
+        val metric = iterator.next()
+        if (metric.tryActivateTimer(excludeMetric)) {
+          if (activated == null) {
+            activated = new Array[GpuMetric](metricCount)
+          }
+          activated(index) = metric
+        }
+        index += 1
+      }
+    }
+    activated
+  }
+  private val hasActiveTimer = singleActive || activatedMetrics != null
+  private val start = if (hasActiveTimer) System.nanoTime() else 0L
+
+  // Preserve the existing accessor without allocating a Boolean collection on the timing path.
+  def needTracks: Seq[Boolean] = {
+    if (metricCount == 1) {
+      Seq(singleActive)
+    } else if (activatedMetrics == null) {
+      Seq.fill(metricCount)(false)
+    } else {
+      activatedMetrics.map(_ != null).toSeq
+    }
+  }
 
   override def close(): Unit = {
-    val time = System.nanoTime() - start
-    metrics.toSeq.zip(needTracks).foreach { pair =>
-      if (pair._2) {
-        pair._1.deactivateTimer(time, excludeMetric)
+    if (hasActiveTimer) {
+      val time = System.nanoTime() - start
+      if (singleActive) {
+        singleMetric.deactivateTimer(time, excludeMetric)
+      } else {
+        var firstFailure: Throwable = null
+        var index = 0
+        while (index < activatedMetrics.length) {
+          val metric = activatedMetrics(index)
+          if (metric != null) {
+            try {
+              metric.deactivateTimer(time, excludeMetric)
+            } catch {
+              case t: Throwable =>
+                if (firstFailure == null) {
+                  firstFailure = t
+                } else if (firstFailure ne t) {
+                  firstFailure.addSuppressed(t)
+                }
+            }
+          }
+          index += 1
+        }
+        if (firstFailure != null) {
+          throw firstFailure
+        }
       }
     }
   }

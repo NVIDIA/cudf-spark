@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.Arrays
+
 import scala.collection.immutable.TreeMap
 
 import ai.rapids.cudf.Table
@@ -300,20 +302,27 @@ object GpuMetric extends Logging {
     case (k, v) => (k, wrap(v))
   }
 
+  def ns[T](metric: GpuMetric)(f: => T): T = metric.ns(f)
+
   def ns[T](metrics: GpuMetric*)(f: => T): T = {
     ns(metrics, Seq.empty)(f)
   }
 
   def ns[T](metrics: Seq[GpuMetric], excludeMetrics: Seq[GpuMetric])(f: => T): T = {
-    val initedMetrics = metrics.map(m => (m, m.tryActivateTimer(excludeMetrics)))
-    val start = System.nanoTime()
-    try {
-      f
-    } finally {
-      val taken = System.nanoTime() - start
-      initedMetrics.foreach { case (m, isTrack) =>
-        if (isTrack) m.deactivateTimer(taken, excludeMetrics)
-      }
+    metrics.lengthCompare(2) match {
+      case n if n < 0 =>
+        if (metrics.isEmpty) f else metrics.head.ns(excludeMetrics)(f)
+      case 0 if metrics.head eq NoopMetric =>
+        metrics(1).ns(excludeMetrics)(f)
+      case 0 if metrics(1) eq NoopMetric =>
+        metrics.head.ns(excludeMetrics)(f)
+      case _ =>
+        val range = new MetricRange(metrics, excludeMetrics)
+        try {
+          f
+        } finally {
+          range.close()
+        }
     }
   }
 
@@ -473,10 +482,13 @@ sealed abstract class GpuMetric extends Serializable {
   private var isTimerActive = false
 
   // For timing GpuMetrics, we additionally create a companion GpuMetric to track elapsed time
-  // excluding semaphore wait time
+  // excluding semaphore wait time. Configure it before timer activation and keep it unchanged
+  // until deactivation (range close). Companions of excluded metrics must also remain unchanged
+  // during that interval: semaphore-wait and child-companion baselines are captured at activation.
   var companionGpuMetric: Option[GpuMetric] = None
   private var semWaitTimeWhenActivated = 0L
-  private var excludeMetricsWhenActivated: Seq[Long] = Seq.empty
+  private var excludeMetricsWhenActivated = Array.emptyLongArray
+  private var excludeMetricCount = 0
   // Snapshot of each excludeMetric's companion value at activation. Needed so
   // the companion `.add` at deactivation can subtract descendants' COMPANION
   // deltas (their `op time (excl. SemWait)`) rather than their RAW deltas
@@ -485,15 +497,49 @@ sealed abstract class GpuMetric extends Serializable {
   // twice from this wrap's companion -- once via this wrap's `semWaitDelta`
   // and again embedded in the descendant's raw delta -- making the companion
   // go negative on nested wraps.
-  private var excludeCompanionMetricsWhenActivated: Seq[Long] = Seq.empty
+  private var excludeCompanionMetricsWhenActivated = Array.emptyLongArray
+  private var excludeCompanionMetricCount = 0
 
+  private def growSnapshotArray(snapshot: Array[Long]): Array[Long] = {
+    // Start with room for four descendants, then double without overflowing the capacity.
+    val capacity = math.max(4L, math.min(Int.MaxValue.toLong, snapshot.length.toLong * 2)).toInt
+    Arrays.copyOf(snapshot, capacity)
+  }
+
+  /**
+   * After successful activation, keep the size of `excludeMetrics` and the metric instance at
+   * each position unchanged until deactivation. Snapshots are matched by position.
+   */
   def tryActivateTimer(excludeMetrics: Seq[GpuMetric]): Boolean = {
     if (!isTimerActive) {
       isTimerActive = true
-      semWaitTimeWhenActivated = GpuTaskMetrics.get.getSemWaitTime()
-      excludeMetricsWhenActivated = excludeMetrics.map(_.value)
-      excludeCompanionMetricsWhenActivated =
-        excludeMetrics.map(_.companionGpuMetric.map(_.value).getOrElse(0L))
+      val withCompanion = companionGpuMetric.isDefined
+      if (withCompanion) {
+        semWaitTimeWhenActivated = GpuTaskMetrics.getCurrentSemWaitTime
+      }
+      // Reuse primitive snapshots owned by this task's metric. Never retain descendant references.
+      var index = 0
+      val descendants = excludeMetrics.iterator
+      while (descendants.hasNext) {
+        val metric = descendants.next()
+        if (index == excludeMetricsWhenActivated.length) {
+          excludeMetricsWhenActivated = growSnapshotArray(excludeMetricsWhenActivated)
+        }
+        excludeMetricsWhenActivated(index) = metric.value
+        if (withCompanion) {
+          if (index == excludeCompanionMetricsWhenActivated.length) {
+            excludeCompanionMetricsWhenActivated =
+              growSnapshotArray(excludeCompanionMetricsWhenActivated)
+          }
+          excludeCompanionMetricsWhenActivated(index) = metric.companionGpuMetric match {
+            case Some(companion) => companion.value
+            case None => 0L
+          }
+        }
+        index += 1
+      }
+      excludeMetricCount = index
+      excludeCompanionMetricCount = if (withCompanion) index else 0
       true
     } else {
       false
@@ -504,50 +550,55 @@ sealed abstract class GpuMetric extends Serializable {
     if (isTimerActive) {
       isTimerActive = false
 
-      val totalExcludeTime = if (excludeMetrics.length == excludeMetricsWhenActivated.length) {
-        excludeMetrics.zip(excludeMetricsWhenActivated)
-          .map { case (metric, startValue) => metric.value - startValue }
-          .sum
-      } else {
-        throw new IllegalStateException(
-          s"the excludeMetrics size ${excludeMetrics.length} does not match " +
-            s"excludeMetricsWhenActivated size ${excludeMetricsWhenActivated.length}")
+      var totalExcludeTime = 0L
+      var totalCompanionExcludeTime = 0L
+      val withCompanion = companionGpuMetric.isDefined
+      var index = 0
+      val descendants = excludeMetrics.iterator
+      while (descendants.hasNext) {
+        val metric = descendants.next()
+        if (index < excludeMetricCount) {
+          totalExcludeTime += metric.value - excludeMetricsWhenActivated(index)
+        }
+        if (withCompanion && index < excludeCompanionMetricCount) {
+          metric.companionGpuMetric match {
+            case Some(companion) =>
+              totalCompanionExcludeTime +=
+                companion.value - excludeCompanionMetricsWhenActivated(index)
+            case None =>
+          }
+        }
+        index += 1
       }
-
-      // Sum of descendants' companion deltas. Used for the companion update so
-      // that SemWait fired inside a descendant's wrap is subtracted once (via
-      // the descendant's companion delta) rather than twice.
-      //
-      // Invariant: when THIS metric has a companion (the `foreach` below runs),
-      // every excludeMetric also has a companion. excludeMetrics are descendant
-      // OP_TIME_NEW metrics, created from the same `allMetrics` map as this one,
-      // so the companion ("excl. SemWait") variant exists for all of them or
-      // none of them at a given metrics level. The `getOrElse(0L)` is therefore
-      // a defensive fallback that does not fire in that branch; it only returns
-      // 0 when this metric itself has no companion, in which case the companion
-      // update below is skipped entirely.
-      val totalCompanionExcludeTime = excludeMetrics
-        .zip(excludeCompanionMetricsWhenActivated)
-        .map { case (metric, startValue) =>
-          metric.companionGpuMetric.map(_.value - startValue).getOrElse(0L)
-        }.sum
-
-      // SemWait that fired anywhere inside this wrap, task-global delta over the
-      // wrap. Subtracted from the companion so it reflects "excl. SemWait".
-      val semWaitDelta = GpuTaskMetrics.get.getSemWaitTime() - semWaitTimeWhenActivated
-
-      companionGpuMetric.foreach(c =>
-        c.add(duration - semWaitDelta - totalCompanionExcludeTime))
+      if (index != excludeMetricCount) {
+        throw new IllegalStateException(
+          s"the excludeMetrics size $index does not match " +
+            s"excludeMetricsWhenActivated size $excludeMetricCount")
+      }
+      companionGpuMetric.foreach { companion =>
+        // Use companion deltas so descendant semaphore wait is not subtracted twice.
+        val semWaitDelta = GpuTaskMetrics.getCurrentSemWaitTime - semWaitTimeWhenActivated
+        companion.add(duration - semWaitDelta - totalCompanionExcludeTime)
+      }
       semWaitTimeWhenActivated = 0L
-      excludeMetricsWhenActivated = Seq.empty
-      excludeCompanionMetricsWhenActivated = Seq.empty
+      excludeMetricCount = 0
+      excludeCompanionMetricCount = 0
 
       add(duration - totalExcludeTime)
     }
   }
 
   final def ns[T](f: => T): T = {
-    ns(Seq.empty)(f)
+    if (tryActivateTimer(Seq.empty)) {
+      val start = System.nanoTime()
+      try {
+        f
+      } finally {
+        deactivateTimer(System.nanoTime() - start, Seq.empty)
+      }
+    } else {
+      f
+    }
   }
 
   final def ns[T](excludeMetrics: Seq[GpuMetric])(f: => T): T = {

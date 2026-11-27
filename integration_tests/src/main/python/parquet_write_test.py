@@ -688,7 +688,7 @@ def test_non_empty_ctas(spark_tmp_path, spark_tmp_table_factory, allow_non_empty
             spark.sql("CREATE TABLE {} LOCATION '{}/ctas' AS SELECT * FROM {}".format(
                 ctas_with_existing_name, data_path, src_name))
         except pyspark.sql.utils.AnalysisException as e:
-            description = e._desc if (is_spark_400_or_later() or is_databricks_version_or_later(14, 3)) else e.desc
+            description = e._desc if (is_spark_400_or_later() or is_databricks173_or_later()) else e.desc
             if allow_non_empty or description.find('non-empty directory') == -1:
                 raise e
     with_gpu_session(test_it, conf)

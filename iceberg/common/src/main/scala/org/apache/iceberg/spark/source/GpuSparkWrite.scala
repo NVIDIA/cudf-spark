@@ -114,7 +114,8 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // the GPU path uses Spark's Parquet infrastructure which requires field IDs in the
     // StructType metadata. Without them, Iceberg's ParquetMetrics cannot extract file-level
     // statistics, causing StrictMetricsEvaluator to fail during overwrite validation.
-    val dsSchema = GpuTypeToSparkType.toSparkType(writeSchema)
+    val dsSchema =
+      GpuSparkWrite.dataWriterSparkTypeFor(writeSchema)
     val useFanout = GpuSparkWriteAccess.useFanoutWriter(cpu)
     val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
 
@@ -168,6 +169,11 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
 }
 
 object GpuSparkWrite {
+  /** Build the Spark schema embedded in GPU Parquet footers after Spark has resolved the input. */
+  private[source] def dataWriterSparkTypeFor(writeSchema: Schema): StructType = {
+    GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.newDefaultAccessor())
+  }
+
   def supports(cpuClass: Class[_ <: Write]): Boolean = {
     GpuSparkWriteAccess.supports(cpuClass)
   }
@@ -289,7 +295,11 @@ object GpuSparkWrite {
     val table: Table = GpuSparkWriteAccess.table(cpuWrite)
     val partitionSpec = table.spec()
 
-    IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
+    // Keep eligibility conservative at table scope: Spark resolves omitted inputs using table
+    // defaults before writing, and the write schema can lose that default metadata. This also
+    // rejects unsupported write defaults for explicit inputs. Footer conversion preserves only
+    // defaults in the actual write schema; initial defaults do not gate writes.
+    IcebergFormatVersionSupport.tagForWriteSchema(table, table.schema(), meta)
     IcebergEncryptionSupport.tagForWrite(table, meta)
 
     val dsSchema = GpuSparkWriteAccess.dsSchema(cpuWrite)
