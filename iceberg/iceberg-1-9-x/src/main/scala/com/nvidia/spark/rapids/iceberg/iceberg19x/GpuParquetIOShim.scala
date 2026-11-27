@@ -16,24 +16,23 @@
 
 package com.nvidia.spark.rapids.iceberg.iceberg19x
 
-import com.nvidia.spark.rapids.{GpuMetric, NoopMetric}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.parquet.ParquetFooterUtils
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 
-/** Reads 1.9.x footers through PerfIO, while retaining native streams for dictionaries. */
+/** Caches 1.9.x footers read through PerfIO, retaining native streams for dictionaries. */
 object GpuParquetIOShim {
   def openReader(
       inputFile: IcebergInputFile,
       filePath: Path,
       options: ParquetReadOptions,
       metrics: Map[String, GpuMetric]): ParquetFileReader = {
-    metrics.getOrElse(GpuMetric.FILECACHE_FOOTER_MISSES, NoopMetric) += 1
-    val footer = withResource(
-        ParquetFooterUtils.readFooterBufferFromInputFile(inputFile, filePath)) { buffer =>
+    val footer = withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
+        ParquetFooterUtils.readFooterBufferFromInputFile(inputFile, filePath))) { buffer =>
       val bytes = new Array[Byte](Math.toIntExact(buffer.getLength))
       buffer.getBytes(bytes, 0, 0, bytes.length)
       bytes

@@ -213,8 +213,8 @@ public interface IcebergShimUtils {
      * {@code ParquetFileReader.open(InputFile, ParquetReadOptions)} without footer caching
      * and bumps the footer-miss counter on every call so dashboards see non-zero activity
      * instead of silently interpreting "all zeros" as "everything was cached". This default
-     * is used by 1.6.x. 1.9.x overrides it to prefetch the footer through PerfIO.
-     * 1.10.x and later override this to route through
+     * is used by 1.6.x. 1.9.x overrides it to cache footer bytes read through PerfIO.
+     * 1.10.x and later also route through
      * {@code FileCache} via the 4-arg
      * {@code (InputFile, ParquetMetadata, ParquetReadOptions, SeekableInputStream)}
      * constructor.

@@ -105,8 +105,8 @@ object GpuParquetIO {
 
   /**
    * Open a shaded `ParquetFileReader`. Footer caching is version-dependent and resolved via
-   * `IcebergShimUtils.openParquetReader`: 1.9.x prefetches footer bytes via PerfIO,
-   * 1.10.x and later also cache them via `FileCache`, and 1.6.x uses the native reader.
+   * `IcebergShimUtils.openParquetReader`: 1.9.x and later cache footer bytes read through
+   * PerfIO via `FileCache`, and 1.6.x uses the native reader.
    */
   def openReader(
       inputFile: IcebergInputFile,

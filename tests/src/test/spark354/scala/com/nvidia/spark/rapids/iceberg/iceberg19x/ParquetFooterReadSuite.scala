@@ -27,8 +27,9 @@ import java.util.UUID
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{PerfIO, PerfIOConf}
+import com.nvidia.spark.rapids.{GpuMetric, LocalGpuMetric}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream
 import org.apache.hadoop.fs.Path
@@ -43,20 +44,29 @@ import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileWriter.MAG
 import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.mockito.Mockito.mock
 import org.scalatest.BeforeAndAfterAll
+import org.scalatest.concurrent.Eventually
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.time.{Seconds, Span}
 
-import org.apache.spark.SparkConf
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.getBuilder
 
-class ParquetFooterReadSuite extends AnyFunSuite with Matchers with BeforeAndAfterAll {
+class ParquetFooterReadSuite
+    extends AnyFunSuite with Matchers with BeforeAndAfterAll with Eventually {
   override protected def beforeAll(): Unit = {
     super.beforeAll()
-    PerfIO.initS3Client(PerfIOConf(new SparkConf(false)))
+    // File cache is initialized when the plugin starts, not by changing a running SQLConf.
+    TrampolineUtil.cleanupAnyExistingSession()
+    getBuilder().master("local[1]").appName("Iceberg footer reads")
+      .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
+      .config("spark.rapids.filecache.enabled", "true")
+      .getOrCreate()
   }
 
   override protected def afterAll(): Unit = {
     try {
-      PerfIO.shutdownS3Client()
+      TrampolineUtil.cleanupAnyExistingSession()
     } finally {
       super.afterAll()
     }
@@ -77,6 +87,7 @@ class ParquetFooterReadSuite extends AnyFunSuite with Matchers with BeforeAndAft
     var bodyReads = 0
     var tailReads = 0
     var failBodyRead = false
+    var failTailRead = false
     private val name = s"s3://test-bucket/${UUID.randomUUID()}.parquet"
 
     override def path(): String = name
@@ -102,6 +113,7 @@ class ParquetFooterReadSuite extends AnyFunSuite with Matchers with BeforeAndAft
 
     override def readTail(length: Long, output: HostMemoryBuffer): Unit = {
       tailReads += 1
+      if (failTailRead) throw new IOException("tail read failed")
       output.setBytes(0, data, data.length - length, length)
     }
 
@@ -234,15 +246,64 @@ class ParquetFooterReadSuite extends AnyFunSuite with Matchers with BeforeAndAft
     input.closes shouldBe 1
   }
 
-  test("tail read failure does not open a native stream") {
-    val input = new MemoryFile(parquetBytes) {
-      override def readTail(length: Long, output: HostMemoryBuffer): Unit =
-        throw new IOException("tail read failed")
+  private def awaitCachedFooter(input: IcebergInputFile): Unit = {
+    eventually(timeout(Span(30, Seconds))) {
+      withResource(FileCache.get.getFooter(input)) { _.isDefined shouldBe true }
     }
+  }
+
+  test("warm footer reads hit the cache without reading the source again") {
+    val input = new MemoryFile(parquetBytes)
+    val hits = new LocalGpuMetric
+    val misses = new LocalGpuMetric
+    val hitBytes = new LocalGpuMetric
+    val missBytes = new LocalGpuMetric
+    val metrics: Map[String, GpuMetric] = Map(
+      GpuMetric.FILECACHE_FOOTER_HITS -> hits,
+      GpuMetric.FILECACHE_FOOTER_MISSES -> misses,
+      GpuMetric.FILECACHE_FOOTER_HITS_SIZE -> hitBytes,
+      GpuMetric.FILECACHE_FOOTER_MISSES_SIZE -> missBytes)
+    val options = ParquetReadOptions.builder().build()
+    val records = withResource(GpuParquetIO.openReader(
+        input, new Path(input.path()), options, metrics)) { _.getRecordCount }
+    records should be > 0L
+    misses.value shouldBe 1L
+    hits.value shouldBe 0L
+    missBytes.value shouldBe framedFooter(parquetBytes).length.toLong
+    val reads = input.tailReads
+    reads should be > 0
+    input.bodyReads shouldBe 0
+    awaitCachedFooter(input)
+
+    withResource(GpuParquetIO.openReader(input, new Path(input.path()), options, metrics)) {
+      _.getRecordCount shouldBe records
+    }
+    hits.value shouldBe 1L
+    misses.value shouldBe 1L
+    hitBytes.value shouldBe missBytes.value
+    input.tailReads shouldBe reads
+    input.bodyReads shouldBe 0
+    input.opens shouldBe 0
+  }
+
+  test("failed tail reads release the cache token and can be retried") {
+    val input = new MemoryFile(parquetBytes)
+    input.failTailRead = true
+    val misses = new LocalGpuMetric
+    val metrics: Map[String, GpuMetric] = Map(GpuMetric.FILECACHE_FOOTER_MISSES -> misses)
+    val options = ParquetReadOptions.builder().build()
     intercept[IOException] {
-      GpuParquetIO.openReader(input, new Path(input.path()),
-        ParquetReadOptions.builder().build(), Map.empty)
+      GpuParquetIO.openReader(input, new Path(input.path()), options, metrics)
     }.getMessage shouldBe "tail read failed"
+    input.opens shouldBe 0
+    withResource(FileCache.get.getFooter(input)) { _.isDefined shouldBe false }
+
+    input.failTailRead = false
+    withResource(GpuParquetIO.openReader(input, new Path(input.path()), options, metrics)) {
+      _.getRecordCount should be > 0L
+    }
+    misses.value shouldBe 2L
+    awaitCachedFooter(input)
     input.opens shouldBe 0
   }
 }
