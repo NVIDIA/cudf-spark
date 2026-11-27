@@ -278,7 +278,26 @@ ci_scala213() {
         env -u SPARK_HOME SPARK_CONF=spark.rapids.filecache.enabled=true \
             $MVN -f scala2.13/ -B $MVN_URM_MIRROR -Dbuildver=$version test -rf tests $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
             -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
+        if [[ "$version" == "401" ]]; then
+            # Run Delta 4.3.0 shim tests on Spark 4.0.1 (preserves is_managed_location)
+            env -u SPARK_HOME \
+                $MVN -f scala2.13/ -B $MVN_URM_MIRROR -pl tests -Dbuildver=401 -Pdelta43-tests \
+                -Ddelta.test.version=4.3.0 test $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
+                -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false \
+                -DwildcardSuites=org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite
+        fi
     done
+
+    # Build Spark 4.1.1 test dependencies against Delta 4.3.0 and run Delta 4.3.1 shim tests
+    # (verifies Delta 4.3.1+ is_managed_location filtering against the 4.3.0-built plugin)
+    env -u SPARK_HOME \
+        $MVN -f scala2.13/ -B $MVN_URM_MIRROR -pl tests -am -Dbuildver=411 -Pdelta43-tests \
+        -DskipTests install $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
+    env -u SPARK_HOME \
+        $MVN -f scala2.13/ -B $MVN_URM_MIRROR -pl tests -Dbuildver=411 -Pdelta43-tests \
+        -Ddelta.test.version=4.3.1 test $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
+        -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false \
+        -DwildcardSuites=org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite
 
     # Download a Scala 2.13 version of Spark (use Spark 4.0.1 for Spark 4 shuffle testing)
     # don't leak the new version here, it's only for use within this function

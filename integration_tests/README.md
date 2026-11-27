@@ -771,8 +771,9 @@ API safety boundary. They need a running catalog server, so they are disabled by
 skipped unless both `--delta_lake` and `--unity_catalog` are passed and `DELTA_UC_URI` names a
 reachable server.
 
-The suites only apply to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0 or 4.3.0,
-Unity Catalog 0.6.0, and Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4. The 4.2 implementation validates
+The suites only apply to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0 or supported
+4.3 releases (4.3.0, 4.3.1, 4.3.2.2), Unity Catalog 0.6.0, and Spark 4.0.1, 4.0.5, 4.1.1, or
+4.1.4. The 4.2 implementation validates
 the expected 0.6.0 `UCSingleCatalog` staging shape and falls back if that shape is not recognized.
 The 4.3 suite verifies that the CPU Delta catalog retains REST staging and commit control,
 including catalog identity, managed location, credentials, and metadata-changing operations.
@@ -796,8 +797,8 @@ bucket on local disk, and exports everything the tests need. To run the whole su
   ./integration_tests/run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
 ```
 
-The default is Delta 4.2.0. Pass `--delta-version 4.3.0` and select
-`delta_lake_catalog_rest_test.py` to run the REST safety suite.
+The default is Delta 4.2.0. Pass `--delta-version 4.3.0` (or another supported 4.3 release:
+4.3.1 or 4.3.2.2) and select `delta_lake_catalog_rest_test.py` to run the REST safety suite.
 
 To keep one server alive across repeated test runs, start it without a command. It stays in the
 foreground and prints an env file to source from a second terminal:

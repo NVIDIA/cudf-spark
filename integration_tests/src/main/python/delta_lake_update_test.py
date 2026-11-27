@@ -35,7 +35,7 @@ delta_update_enabled_conf = copy_and_update(delta_writes_enabled_conf,
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="UPDATE record-count validation was added in OSS Delta 4.3")
 def test_delta_update_num_records_validation(spark_tmp_path):
     conf = copy_and_update(delta_update_enabled_conf, {
