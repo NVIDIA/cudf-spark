@@ -1023,12 +1023,10 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .createWithDefault(true)
 
   val ENABLE_ICEBERG_V3 = conf("spark.rapids.sql.format.iceberg.v3.enabled")
-    .doc("Internal temporary configuration to allow Iceberg table format versions greater " +
-      "than 2 to use GPU paths while v3 support is under development. This configuration " +
-      "will be removed after most Iceberg v3 features are supported.")
+    .doc("When set to false, disables GPU acceleration for Iceberg table format version 3.")
     .internal()
     .booleanConf
-    .createWithDefault(false)
+    .createWithDefault(true)
 
   val VALIDATE_ICEBERG_DELETION_VECTOR_CRC =
     conf("spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled")

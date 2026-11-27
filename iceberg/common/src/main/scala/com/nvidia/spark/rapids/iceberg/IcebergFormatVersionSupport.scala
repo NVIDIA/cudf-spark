@@ -28,8 +28,7 @@ import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
-  /** Maximum table format version supported without enabling v3 support. */
-  val MaxSupportedFormatVersion = 2
+  private val FormatV3 = 3
   private val SupportedDefaultTypeIds = EnumSet.of(
     Type.TypeID.BOOLEAN, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.FLOAT,
     Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
@@ -55,7 +54,7 @@ object IcebergFormatVersionSupport {
       unsupported: => Option[(String, String)]): Unit = {
     val formatVersion = ShimUtils.formatVersion(table)
     tagForFormatVersion(formatVersion, meta)
-    if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
+    if (formatVersion == FormatV3 && meta.conf.isIcebergV3Enabled) {
       unsupported.foreach { case (path, typeName) =>
         meta.willNotWorkOnGpu(
           s"Iceberg $description for field '$path' with type $typeName is not supported on GPU")
@@ -72,9 +71,7 @@ object IcebergFormatVersionSupport {
   }
 
   private def tagForFormatVersion(formatVersion: Int, meta: RapidsMeta[_, _, _]): Unit = {
-    if (formatVersion > MaxSupportedFormatVersion && !meta.conf.isIcebergV3Enabled) {
-      val reason = s"Iceberg table format version $formatVersion is not supported. " +
-        s"To enable set ${RapidsConf.ENABLE_ICEBERG_V3} to true"
+    unsupportedFormatVersion(formatVersion, meta.conf).foreach { reason =>
       meta.willNotWorkOnGpu(reason)
 
       // A scan is tagged before its enclosing SparkPlan nodes. Keep MergeRowsExec on CPU with a
@@ -84,6 +81,14 @@ object IcebergFormatVersionSupport {
       tagMergeRowsAncestor(meta.parent, reason)
     }
   }
+
+  private[iceberg] def unsupportedFormatVersion(version: Int, conf: RapidsConf): Option[String] =
+    version match {
+      case FormatV3 if !conf.isIcebergV3Enabled =>
+        Some(s"Iceberg table format version 3 is disabled by ${RapidsConf.ENABLE_ICEBERG_V3}")
+      case v if v > FormatV3 => Some(s"Iceberg table format version $v is not supported")
+      case _ => None
+    }
 
   private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
     unsupportedDefault(schema, field => ShimUtils.hasInitialDefault(field))

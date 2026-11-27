@@ -895,7 +895,7 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
     with_cpu_session(setup_table)
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
-        "BatchScanExec")
+        "BatchScanExec", conf={"spark.rapids.sql.format.iceberg.v3.enabled": "false"})
 
 
 @iceberg_fast_test

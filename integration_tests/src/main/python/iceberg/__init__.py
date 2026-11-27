@@ -55,7 +55,7 @@ iceberg_format_versions = [
     pytest.param("2", id="v2"),
     pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
 iceberg_read_format_versions = [pytest.param("1", id="v1"), *iceberg_format_versions]
-iceberg_read_enabled_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+iceberg_read_enabled_conf = {"spark.rapids.sql.format.iceberg.read.enabled": "true"}
 iceberg_variant_read_conf = {
     "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     "spark.sql.adaptive.enabled": "false",
@@ -302,7 +302,6 @@ iceberg_write_enabled_conf = {
     "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
     "spark.rapids.sql.format.iceberg.enabled": "true",
     "spark.rapids.sql.format.iceberg.write.enabled": "true",
-    "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     # WriteDeltaExec is disabled by default as it's experimental, but we need it enabled
     # for merge-on-read (MOR) DML operations (UPDATE/DELETE/MERGE with write.*.mode='merge-on-read')
     "spark.rapids.sql.exec.WriteDeltaExec": "true",

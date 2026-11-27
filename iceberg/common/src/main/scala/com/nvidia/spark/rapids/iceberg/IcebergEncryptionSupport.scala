@@ -24,7 +24,7 @@ import org.apache.iceberg.spark.source.GpuSparkScanAccess
 
 import org.apache.spark.sql.connector.read.Scan
 
-/** Encryption must stay on CPU, including when experimental Iceberg v3 support is enabled. */
+/** Iceberg scans and writes that require encryption must stay on CPU. */
 object IcebergEncryptionSupport {
   private val UnsupportedReason = "Iceberg encryption is not supported on GPU"
   private val InspectionFailureReason = "Unable to determine Iceberg encryption support"
