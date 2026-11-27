@@ -250,7 +250,7 @@ class SourceResolverTest(unittest.TestCase):
         for target, expected in expected_paths.items():
             self.assertEqual(set(selections[target]) & baselined_paths, expected, target)
 
-    def test_delta_patch_profiles_use_expected_module(self):
+    def test_spark_4_profiles_use_expected_delta_modules(self):
         namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
         pom = ROOT / 'scala2.13' / 'pom.xml'
         root = ET.parse(str(pom)).getroot()
@@ -259,27 +259,48 @@ class SourceResolverTest(unittest.TestCase):
             for profile in root.findall('m:profiles/m:profile', namespace)
         }
         expected = {
-            '405': ('cudf-spark-delta-40x', 'delta-lake/delta-40x'),
-            '412': ('cudf-spark-delta-stub', 'delta-lake/delta-stub'),
-            '413': ('cudf-spark-delta-stub', 'delta-lake/delta-stub'),
-            '414': ('cudf-spark-delta-stub', 'delta-lake/delta-stub'),
+            '400': (['cudf-spark-delta-40x'], ['delta-lake/delta-40x']),
+            '401': (
+                ['cudf-spark-delta-40x',
+                 'cudf-spark-delta-42x',
+                 'cudf-spark-delta-43x'],
+                ['delta-lake/delta-40x',
+                 'delta-lake/delta-42x',
+                 'delta-lake/delta-43x']),
+            '402': (['cudf-spark-delta-40x'], ['delta-lake/delta-40x']),
+            '403': (['cudf-spark-delta-40x'], ['delta-lake/delta-40x']),
+            '404': (['cudf-spark-delta-40x'], ['delta-lake/delta-40x']),
+            '405': (['cudf-spark-delta-40x'], ['delta-lake/delta-40x']),
+            '411': (
+                ['cudf-spark-delta-41x',
+                 'cudf-spark-delta-42x',
+                 'cudf-spark-delta-43x'],
+                ['delta-lake/delta-41x',
+                 'delta-lake/delta-42x',
+                 'delta-lake/delta-43x']),
+            '412': (['cudf-spark-delta-stub'], ['delta-lake/delta-stub']),
+            '413': (['cudf-spark-delta-stub'], ['delta-lake/delta-stub']),
+            '414': (['cudf-spark-delta-stub'], ['delta-lake/delta-stub']),
+            '420': (['cudf-spark-delta-stub'], ['delta-lake/delta-stub']),
+            '421': (['cudf-spark-delta-stub'], ['delta-lake/delta-stub']),
         }
-        for target, (artifact_id, module) in expected.items():
+        for target, (artifact_ids, delta_modules) in expected.items():
             profile = profiles['release' + target]
-            self.assertEqual(
+            actual_artifact_ids = [
                 profile.findtext(
-                    'm:properties/m:rapids.delta.artifactId1', namespaces=namespace),
-                artifact_id,
+                    'm:properties/m:rapids.delta.artifactId%d' % index,
+                    namespaces=namespace)
+                for index in range(1, 4)
+            ]
+            self.assertEqual(
+                [artifact_id for artifact_id in actual_artifact_ids if artifact_id],
+                artifact_ids,
                 target)
-            self.assertIsNone(
-                profile.find('m:properties/m:rapids.delta.artifactId2', namespace), target)
-            self.assertIsNone(
-                profile.find('m:properties/m:rapids.delta.artifactId3', namespace), target)
-            delta_modules = [
+            actual_delta_modules = [
                 module.text for module in profile.findall('m:modules/m:module', namespace)
                 if module.text.startswith('delta-lake/delta-')
             ]
-            self.assertEqual(delta_modules, [module], target)
+            self.assertEqual(actual_delta_modules, delta_modules, target)
 
     def test_spark_421_maintenance_fixes_carry_to_future_lines(self):
         root_graph = load_source_graph(str(ROOT / 'pom.xml'))
@@ -349,6 +370,9 @@ class SourceResolverTest(unittest.TestCase):
              'spark405', ('421', '500'), ('420', '421', '500')),
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/GpuFileFormatWriter405Suite.scala',
              'spark405', ('421', '500'), ('420', '421', '500')),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/delta/DeltaProbeImplSuite.scala',
+             'spark401', ('401', '402', '405', '411'),
+             ('401', '402', '405', '411', '412', '413', '414')),
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/shims/'
              'Spark40GpuDataSourceCustomMetricsSuite.scala', 'spark400',
              ('400', '400db173', '401', '402', '403', '404',

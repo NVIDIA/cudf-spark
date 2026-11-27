@@ -126,7 +126,7 @@ object GpuSparkScan {
     }
 
     Try {
-      IcebergFormatVersionSupport.tagForFormatVersion(
+      IcebergFormatVersionSupport.tagForScan(
         GpuSparkScanAccess.table(meta.wrapped), meta)
     } match {
       case Failure(e) => meta.willNotWorkOnGpu(s"error examining Iceberg table version: $e")

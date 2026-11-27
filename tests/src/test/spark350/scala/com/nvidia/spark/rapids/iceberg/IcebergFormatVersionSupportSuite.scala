@@ -29,7 +29,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 /** Focused schema tests for IcebergFormatVersionSupport. */
 class IcebergFormatVersionSupportSuite extends AnyFunSuite {
-  import IcebergDefaultTestUtils.fieldWithDefaults
+  import IcebergDefaultTestUtils.{fieldWithDefaults, fieldWithWriteDefault}
 
   test("Unsupported Iceberg defaults are identified by subtype and nested path") {
     val timestampNtzField = fieldWithDefaults(
@@ -92,5 +92,30 @@ class IcebergFormatVersionSupportSuite extends AnyFunSuite {
       .contains("uuid_value" -> Types.UUIDType.get().toString))
     assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(fixedField))
       .contains("fixed_value" -> fixedType.toString))
+  }
+
+  test("write default validation accepts supported primitives") {
+    val field = fieldWithWriteDefault(1, "value", Types.IntegerType.get(), Int.box(9))
+
+    assert(IcebergFormatVersionSupport.unsupportedWriteDefault(new Schema(field)).isEmpty)
+  }
+
+  test("write default validation reports unsupported nested fields") {
+    val field = fieldWithWriteDefault(2, "created_at", Types.TimestampType.withoutZone(),
+      Long.box(0L))
+    val schema = new Schema(Types.NestedField.optional(
+      1, "payload", Types.StructType.of(field)))
+
+    assert(IcebergFormatVersionSupport.unsupportedWriteDefault(schema)
+      .contains("payload.created_at" -> "timestamp"))
+  }
+
+  test("fixed write-only defaults are rejected for writes and accepted for reads") {
+    val field = fieldWithWriteDefault(1, "payload", Types.FixedType.ofLength(2),
+      ByteBuffer.wrap(Array[Byte](1, 2)))
+    val schema = new Schema(field)
+    assert(IcebergFormatVersionSupport.unsupportedDefault(schema).isEmpty)
+    assert(IcebergFormatVersionSupport.unsupportedWriteDefault(schema)
+      .contains("payload" -> "fixed[2]"))
   }
 }

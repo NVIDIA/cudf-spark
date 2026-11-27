@@ -19,6 +19,7 @@ package org.apache.iceberg.spark
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
+import com.nvidia.spark.rapids.iceberg.IcebergDefaultAccessor
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
@@ -42,6 +43,13 @@ object GpuTypeToSparkType {
 
   def toSparkType(schema: Schema): StructType = {
     TypeUtil.visit(schema, new GpuTypeToSparkType).asInstanceOf[StructType]
+  }
+
+  def toSparkType(
+      schema: Schema,
+      defaultAccessor: IcebergDefaultAccessor): StructType = {
+    TypeUtil.visit(schema, new GpuTypeToSparkType(Some(defaultAccessor)))
+      .asInstanceOf[StructType]
   }
 
   def toSparkType(icebergStruct: Types.StructType): StructType = {
@@ -81,7 +89,10 @@ object GpuTypeToSparkType {
  * and naturally handles list/map elements that are themselves structs without a
  * special-case recursion through `Types.StructType`.
  */
-class GpuTypeToSparkType extends TypeToSparkType {
+class GpuTypeToSparkType(
+    defaultAccessor: Option[IcebergDefaultAccessor]) extends TypeToSparkType {
+  def this() = this(None)
+
   private val nestedIdsStack = mutable.ArrayBuffer.empty[Option[String]]
 
   private def pushNested(nested: Option[String]): Unit = nestedIdsStack += nested
@@ -151,7 +162,10 @@ class GpuTypeToSparkType extends TypeToSparkType {
           if (field.doc() != null) {
             sparkField = sparkField.withComment(field.doc())
           }
-          sparkField
+          defaultAccessor match {
+            case Some(accessor) => accessor.withDefaults(field, sparkField)
+            case None => sparkField
+          }
       }
 
     // A struct attaches each child's id to its inner StructField, so it contributes nothing

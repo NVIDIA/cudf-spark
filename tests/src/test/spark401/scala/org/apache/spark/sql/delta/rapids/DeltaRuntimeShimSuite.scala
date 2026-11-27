@@ -23,7 +23,7 @@ import java.lang.reflect.{InvocationTargetException, Modifier}
 
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuOverrides, RapidsConf, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
@@ -32,11 +32,15 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
-import org.apache.spark.sql.delta.{DeltaAnalysisException, DeltaLog, DeltaOptions, NumRecordsStats}
+import org.apache.spark.sql.delta.{DeltaAnalysisException, DeltaLog, DeltaOptions,
+  DeltaParquetFileFormat, NumRecordsStats}
+import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
+import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
@@ -61,7 +65,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
 
   test("Delta 4.2 runtime shim selection covers supported Spark versions") {
     Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
-      val shimClassName = DeltaRuntimeShim.getDelta42ShimClassName("4.2.0", sparkVersion)
+      val shimClassName = DeltaRuntimeShim.getDelta42PlusShimClassName("4.2.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta42x")))
     }
   }
@@ -72,21 +76,19 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("4.2.0", "4.0.5"),
       ("4.2.0", "4.1.0"),
       ("4.2.0", "4.1.2"),
+      ("4.2.0", "4.1.3"),
       ("4.2.0", "4.1.4"),
       ("4.2.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
-      val error = intercept[IllegalStateException] {
-        DeltaRuntimeShim.getDelta42ShimClassName(deltaVersion, sparkVersion)
-      }
-      assert(error.getMessage.contains(deltaVersion))
-      assert(error.getMessage.contains(sparkVersion))
+      assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, sparkVersion).isEmpty)
     }
+    assert(DeltaRuntimeShim.getShimClassName("4.2.1").isEmpty)
   }
 
   test("Delta 4.3 runtime shim selection covers supported Spark versions") {
     Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
-      val shimClassName = DeltaRuntimeShim.getDelta43ShimClassName("4.3.0", sparkVersion)
+      val shimClassName = DeltaRuntimeShim.getDelta42PlusShimClassName("4.3.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta43x")))
     }
   }
@@ -97,25 +99,74 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("4.3.0", "4.0.5"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
+      ("4.3.0", "4.1.3"),
       ("4.3.0", "4.1.4"),
       ("4.3.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
-      val error = intercept[IllegalStateException] {
-        DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, sparkVersion)
-      }
-      assert(error.getMessage.contains(deltaVersion))
-      assert(error.getMessage.contains(sparkVersion))
+      assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, sparkVersion).isEmpty)
+    }
+    assert(DeltaRuntimeShim.getShimClassName("4.3.1").isEmpty)
+    Seq("4.4.0", "4.4.1", "5.0.0").foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, "4.0.1").isEmpty,
+        deltaVersion)
+      assert(DeltaRuntimeShim.getShimClassName(deltaVersion).isEmpty, deltaVersion)
     }
   }
 
-  test("existing Delta versions use the pre-4.2 runtime shim selection") {
-    Seq("2.1.0", "3.3.3", "4.0.0", "4.1.0").foreach { deltaVersion =>
-      assert(DeltaRuntimeShim.getDelta42ShimClassName(deltaVersion, "4.0.1").isEmpty)
-      assert(DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, "4.0.1").isEmpty)
+  test("pre-4.2 runtime shim selection covers supported Spark lines") {
+    Seq(
+      ("4.0.0", "4.0.0", "delta40x"),
+      ("4.0.1", "4.0.5", "delta40x"),
+      ("4.1.0", "4.1.0", "delta41x"),
+      ("4.1.0", "4.1.1", "delta41x")
+    ).foreach { case (deltaVersion, sparkVersion, expectedShim) =>
+      val shimClassName =
+        DeltaRuntimeShim.getPreDelta42ShimClassName(deltaVersion, sparkVersion)
+      assert(shimClassName.exists(_.contains(expectedShim)))
     }
-    assert(DeltaRuntimeShim.getDelta42ShimClassName("4.3.0", "4.0.1").isEmpty)
-    assert(DeltaRuntimeShim.getDelta43ShimClassName("4.2.0", "4.0.1").isEmpty)
+  }
+
+  test("pre-4.2 runtime shim selection rejects unsupported Spark lines") {
+    Seq(
+      ("4.1.0", "4.0.1"),
+      ("4.0.1", "4.1.1"),
+      ("4.1.0", "4.1.2"),
+      ("4.1.0", "4.1.3"),
+      ("4.1.0", "4.1.4"),
+      ("4.1.0", "4.2.0"),
+      ("3.3.3", "4.0.1"),
+      ("2.4.0", "4.1.1")
+    ).foreach { case (deltaVersion, sparkVersion) =>
+      assert(DeltaRuntimeShim.getPreDelta42ShimClassName(
+        deltaVersion, sparkVersion).isEmpty)
+    }
+  }
+
+  test("Delta 3.3 runtime shim selection requires Delta 3.3") {
+    Seq("3.3.0", "3.3.3").foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getDelta33ShimClassName(deltaVersion).exists(_.contains("delta33x")))
+    }
+    Seq("3.2.1", "3.1.0", "4.0.0").foreach { deltaVersion =>
+      assert(DeltaRuntimeShim.getDelta33ShimClassName(deltaVersion).isEmpty)
+    }
+  }
+
+  test("claimed DeltaParquetFileFormat scan runs on GPU") {
+    withGpuSparkSession { spark =>
+      withTempPath { tablePath =>
+        val path = tablePath.getCanonicalPath
+        spark.range(0, 5).toDF("id").write.parquet(path)
+        val parquetScan = spark.read.parquet(path).queryExecution.sparkPlan.collectFirst {
+          case s: FileSourceScanExec => s
+        }.getOrElse(fail("Expected FileSourceScanExec"))
+        val deltaFormat = DeltaParquetFileFormat(Protocol(), Metadata())
+        val deltaScan = parquetScan.copy(
+          relation = parquetScan.relation.copy(fileFormat = deltaFormat)(spark))
+        val planned = GpuOverrides(spark).apply(deltaScan)
+        assert(planned.isInstanceOf[GpuFileSourceScanExec])
+      }
+    }
   }
 
   test("GPU write factory has no default implementation") {
