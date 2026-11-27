@@ -1,0 +1,97 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Test cache preparation on pull requests and seed Maven and Spark dependencies on target branches.
+name: Cache preparation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cache.yml'
+      - '.github/workflows/mvn-verify-check.yml'
+      - '.github/actions/maven-cache/**'
+      - '.github/actions/spark-archive-cache/**'
+      - '**/pom.xml'
+      - 'build/get_buildvers.py'
+      - 'dist/build/package-parallel-worlds.py'
+      - 'integration_tests/run_unity_catalog_server.sh'
+      - 'scripts/get_iceberg_versions.py'
+  push:
+    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
+    paths:
+      - '**/pom.xml'
+      - 'build/get_buildvers.py'
+      - 'dist/build/package-parallel-worlds.py'
+      - 'integration_tests/run_unity_catalog_server.sh'
+      - 'scripts/get_iceberg_versions.py'
+      - '.github/actions/maven-cache/*.sh'
+      - '.github/actions/maven-cache/dependency-key.py'
+      - '.github/actions/maven-cache/action.yml'
+      - '.github/workflows/mvn-verify-check.yml'
+      - '.github/workflows/cache.yml'
+      - '.github/actions/maven-cache/settings.xml'
+      - '.github/actions/spark-archive-cache/**'
+  schedule:
+    # JNI and private SNAPSHOTs can advance without a change in this repository.
+    - cron: '43 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-preparation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test cache preparation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -B -m unittest discover -s .github/actions/maven-cache
+          python3 -B -m unittest discover -s .github/actions/spark-archive-cache
+
+  prepare:
+    name: Prepare Scala ${{ matrix.scala }} caches
+    needs: test
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scala: ['2.12', '2.13']
+    steps:
+      - name: Check manual refresh target
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [[ ! $GITHUB_REF_NAME =~ ^(main|release/[0-9]{2}\.[0-9]{2})$ ]]; then
+            echo "::error::Select main or a release/YY.MM branch for cache warming."
+            exit 1
+          fi
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        id: checkout
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Configure Maven Central mirror
+        run: install -Dm 600 .github/actions/maven-cache/settings.xml "$HOME/.m2/settings.xml"
+      - uses: ./.github/actions/maven-cache
+        with:
+          scala: ${{ matrix.scala }}
+          premerge: 'true'
+      - name: Warm Apache Spark distribution
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: ./.github/actions/spark-archive-cache
+        with:
+          scala: ${{ matrix.scala }}
+          save: 'true'

@@ -29,8 +29,7 @@ import org.apache.spark.storage.BlockManagerId
 
 class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
   test("driverless platform admission excludes Databricks without excluding Apache Spark") {
-    Seq(DatabricksShimVersion(3, 5, 0, "14.3"),
-      DatabricksShimVersion(4, 0, 0, "17.3"),
+    Seq(DatabricksShimVersion(4, 0, 0, "17.3"),
       DatabricksShimVersion(4, 1, 0, "18.3")).foreach { version =>
       assert(DriverlessBroadcastPolicy.platformRejection(version).exists(_.contains("Databricks")))
     }

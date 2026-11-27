@@ -198,6 +198,13 @@ trait GpuExpression extends Expression {
     throw new IllegalStateException(s"Cannot convert ${this.getClass.getSimpleName} to AST")
 
   /**
+   * Whether `convertToAst` can convert this node for its current types and execution modes,
+   * excluding its children, without changing its results or errors. Callers decide separately
+   * whether the node should use AST.
+   */
+  def selfConvertsToAst: Boolean = false
+
+  /**
    * Whether this node supports AST JIT for its current semantics and types, excluding its
    * children. Returning true requires `convertToAst` to work for the same execution modes and
    * input/output types.
@@ -205,10 +212,16 @@ trait GpuExpression extends Expression {
   def selfSupportsAstJit: Boolean = false
 
   /**
-   * Whether this node is an operation, rather than an AST-compatible leaf. Literals and references
-   * leave this false so they do not trigger compilation without useful work to JIT.
+   * Whether this node is an operation, rather than an AST-compatible leaf. Operations count toward
+   * the AST JIT group limits. Literals and references leave this false.
    */
   def selfIsAstJitOperator: Boolean = false
+
+  /**
+   * Whether this operation alone makes AST JIT worth compiling. An operation that only adapts its
+   * input, such as a widening cast, still counts toward the group limits.
+   */
+  def selfTriggersAstJit: Boolean = selfIsAstJitOperator
 
   /** Whether this node and its complete expression subtree support AST JIT. */
   final def supportsAstJit: Boolean = selfSupportsAstJit && children.forall {
@@ -218,8 +231,8 @@ trait GpuExpression extends Expression {
   }
 
   /** Whether this expression subtree contains an operation that makes AST JIT useful. */
-  final def containsAstJitOperator: Boolean = selfIsAstJitOperator || children.exists {
-    case child: GpuExpression => child.containsAstJitOperator
+  final def containsAstJitTrigger: Boolean = selfTriggersAstJit || children.exists {
+    case child: GpuExpression => child.containsAstJitTrigger
     case _ => false
   }
 
@@ -357,6 +370,8 @@ trait CudfUnaryExpression extends GpuUnaryExpression {
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = input.getBase.unaryOp(unaryOp)
 
+  override def selfConvertsToAst: Boolean = CudfUnaryExpression.opToAstMap.contains(unaryOp)
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val astOp = CudfUnaryExpression.opToAstMap.getOrElse(unaryOp,
       throw new IllegalStateException(s"${this.getClass.getSimpleName} is not supported by AST"))
@@ -476,6 +491,9 @@ trait CudfBinaryExpression extends GpuBinaryExpression {
       doColumnar(expandedLhs, rhs)
     }
   }
+
+  override def selfConvertsToAst: Boolean =
+    astOperator.isDefined && left.dataType == right.dataType
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val astOp = astOperator.getOrElse(

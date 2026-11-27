@@ -423,6 +423,17 @@ object GpuTaskMetrics extends Logging {
     }
   }
 
+  /** Read the current task's semaphore wait without creating fallback metrics. */
+  def getCurrentSemWaitTime: Long = {
+    val tc = TaskContext.get()
+    if (tc == null) {
+      0L
+    } else {
+      val metrics = taskLevelMetrics.get(tc.taskAttemptId())
+      if (metrics == null) 0L else metrics.getSemWaitTime()
+    }
+  }
+
   def get: GpuTaskMetrics = {
     val tc = TaskContext.get()
     val metrics = if (tc != null) {

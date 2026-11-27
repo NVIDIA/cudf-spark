@@ -16,7 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -176,7 +176,7 @@ class GpuWindowGroupLimitExecMeta(limitExec: WindowGroupLimitExec,
    * Uses reflection to access WindowExec's window expressions because different Spark
    * versions use different method names:
    * - Apache Spark versions (3.5.0, 4.0.0, etc.) use `windowExpression`
-   * - Databricks versions (3.4.1db, 3.5.0db143, etc.) use `projectList`
+   * - Databricks runtimes use `projectList`
    *
    * This shim covers both Apache Spark and Databricks versions, so reflection is
    * necessary to handle both cases. This follows the same pattern as

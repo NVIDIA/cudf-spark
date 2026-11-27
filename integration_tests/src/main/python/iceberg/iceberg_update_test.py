@@ -25,7 +25,8 @@ from iceberg import (
     iceberg_nested_write_gens_list, iceberg_unsupported_mark,
     update_partition_transforms_distributed, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
     supports_iceberg_row_lineage_inheritance, ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
-    row_lineage_df, rapids_reader_types)
+    row_lineage_df, rapids_reader_types, setup_iceberg_write_default_tables,
+    assert_iceberg_write_defaults)
 from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -129,6 +130,29 @@ def do_update_test(spark_tmp_table_factory, update_sql_func, data_gen_func=None,
     gpu_data = with_cpu_session(
         lambda spark: read_func(spark, gpu_table_name).collect(), conf=conf)
     assert_equal_with_local_sort(cpu_data, gpu_data)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("update_mode,expected_writer", [
+    pytest.param("copy-on-write", "GpuReplaceDataExec", id="cow"),
+    pytest.param("merge-on-read", "GpuWriteDeltaExec", id="mor")])
+@allow_non_gpu("LocalTableScanExec")
+def test_iceberg_update_write_defaults(spark_tmp_table_factory, update_mode, expected_writer):
+    cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
+        spark_tmp_table_factory, {"write.update.mode": update_mode})
+    conf = copy_and_update(iceberg_update_v3_enabled_conf, {
+        "spark.sql.adaptive.enabled": "false", "spark.sql.shuffle.partitions": "2"})
+    assert_iceberg_write_defaults(
+        cpu_table, gpu_table,
+        lambda spark, table: spark.sql(f"UPDATE {table} SET p = p + 1 WHERE id = 1").collect(),
+        [(1, 1, "legacy"), (2, 1, "legacy")], conf, expected_writer=expected_writer)
+    assert_iceberg_write_defaults(
+        cpu_table, gpu_table,
+        lambda spark, table: spark.sql(
+            f"UPDATE {table} SET optional_added = DEFAULT WHERE id = 1").collect(),
+        [(1, 1, "current" if catalog_has_default else None), (2, 1, "legacy")],
+        conf, expected_writer=expected_writer)
 
 
 @iceberg_fast_test

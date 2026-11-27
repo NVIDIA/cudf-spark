@@ -62,8 +62,32 @@ private[rapids] object GpuProjectAstPlanner {
     LegacySignature(expression.getClass, expression.dataType, expression.children.map(_.dataType))
 
   def tagLegacySupport(expression: Expression, supported: Boolean): Unit = {
-    if (supported) expression.setTagValue(legacySupport, signature(expression))
-    else expression.unsetTagValue(legacySupport)
+    if (supported && convertsToAst(expression)) {
+      expression.setTagValue(legacySupport, signature(expression))
+    } else {
+      expression.unsetTagValue(legacySupport)
+    }
+  }
+
+  /** Tags a meta's conversion with the eligibility the meta computed for its CPU expression. */
+  def tagConvertedLegacySupport(
+      vetted: Expression,
+      converted: Expression,
+      supported: Boolean): Unit = {
+    // A meta can rewrite its node into another operator, such as instr(s, x) > 0 into
+    // contains(s, x). Its judgment covers only an operator over the types it checked.
+    tagLegacySupport(converted, supported && hasSameTypes(vetted, converted))
+  }
+
+  private def hasSameTypes(vetted: Expression, converted: Expression): Boolean =
+    vetted.dataType == converted.dataType &&
+      vetted.children.map(_.dataType) == converted.children.map(_.dataType)
+
+  // Eligibility applies only if the node itself has an AST form, which a rewritten operator can
+  // lack even when its types match.
+  private def convertsToAst(expression: Expression): Boolean = expression match {
+    case gpu: GpuExpression => gpu.selfConvertsToAst
+    case _ => false
   }
 
   private def selfSupportsLegacy(expression: Expression): Boolean =
@@ -233,7 +257,7 @@ private[rapids] object GpuProjectAstPlanner {
           Some(AstJit)
         } else if (enableAst && canUseLegacy(gpu) && !isSimpleArithmetic(gpu)) {
           Some(AstInterpreted)
-        } else if (enableAstJit && gpu.selfSupportsAstJit && gpu.selfIsAstJitOperator &&
+        } else if (enableAstJit && gpu.selfSupportsAstJit && gpu.selfTriggersAstJit &&
             GpuBatchUtils.isFixedWidth(gpu.dataType) && canHostRegion(gpu, AstJit)) {
           Some(AstJit)
         } else if (canHostLegacyRegion(gpu) && !leavesSimpleArithmetic(gpu, _ => false)) {
@@ -247,7 +271,17 @@ private[rapids] object GpuProjectAstPlanner {
     private def backendWithin(expression: Expression, owner: Backend): Option[Backend] = {
       val child = stripAlias(expression)
       if (owner == AstInterpreted && joinsLegacyRegion(child)) Some(AstInterpreted)
+      else if (owner == AstJit && joinsJitRegion(child)) Some(AstJit)
       else backendOf(child)
+    }
+
+    // An operation that is not worth compiling alone, such as a widening cast, still joins an
+    // enclosing JIT region instead of becoming a tier output.
+    private def joinsJitRegion(node: Expression): Boolean = node match {
+      case gpu: GpuExpression if gpu.deterministic && !isLeaf(gpu) =>
+        gpu.selfSupportsAstJit && !gpu.selfTriggersAstJit &&
+          GpuBatchUtils.isFixedWidth(gpu.dataType) && canHostRegion(gpu, AstJit)
+      case _ => false
     }
 
     private def canHostLegacyRegion(gpu: GpuExpression): Boolean =

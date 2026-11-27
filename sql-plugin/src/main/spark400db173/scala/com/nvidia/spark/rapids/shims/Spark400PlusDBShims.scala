@@ -28,6 +28,8 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Expression, KnownNotContainsNull}
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.adaptive.TableCacheQueryStageExec
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
@@ -55,13 +57,16 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
       GpuOverrides.expr[VariantGet](
         "Extracts a field from a Variant value by path",
         ExprChecks.binaryProject(
-          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
-          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
+          (TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128)
+            .withPsNote(TypeEnum.DECIMAL, "Only nonnegative scales are supported"),
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128,
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
-        .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
-          "Spark try_variant_get cast semantics can return different values")
+        .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
+          "types and may differ from Spark casts. For those targets, object field ids that are " +
+          "unsorted or outside the metadata dictionary, which the Variant spec forbids, can " +
+          "return NULL where Spark returns a value or raises an error")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
@@ -86,5 +91,12 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
 
   override def getPartitionFiles(partition: FilePartition): Seq[PartitionedFile] = {
     partition.filesWithAbsolutePaths.toSeq
+  }
+
+  override def getTableCacheNonQueryStagePlan(plan: SparkPlan): Option[SparkPlan] = {
+    plan match {
+      case tcqs: TableCacheQueryStageExec => Some(tcqs.plan)
+      case _ => None
+    }
   }
 }

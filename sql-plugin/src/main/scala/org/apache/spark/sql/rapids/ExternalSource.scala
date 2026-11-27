@@ -32,6 +32,7 @@ import org.apache.spark.sql.connector.write.Write
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan}
 import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExec, AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, OverwriteByExpressionExec, OverwriteByExpressionExecV1, OverwritePartitionsDynamicExec}
 import org.apache.spark.sql.sources.CreatableRelationProvider
 import org.apache.spark.util.Utils
@@ -90,10 +91,14 @@ trait ExternalSourceBase extends Logging {
     override val isEnabled: Boolean = true
     override def recognizes(writeClass: Class[_ <: Write]): Boolean =
       writeClass.getName == noopWriteClassName
-    override def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit = {}
+    override def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit = {
+      // NoopWrite requires no extra GPU compatibility checks.
+    }
     override def tagForGpu(
         cpuExec: OverwriteByExpressionExec,
-        meta: OverwriteByExpressionExecMeta): Unit = {}
+        meta: OverwriteByExpressionExecMeta): Unit = {
+      // NoopWrite requires no extra GPU compatibility checks.
+    }
     // NoopWrite does not modify table state, so there is no cache to refresh.
     override def convertToGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): GpuExec =
       GpuNoopAppendDataExec(meta.childPlans.head.convertIfNeeded())
@@ -155,7 +160,7 @@ trait ExternalSourceBase extends Logging {
     }
   }
 
-  private lazy val deltaProvider = DeltaProvider()
+  protected lazy val deltaProvider: DeltaProvider = DeltaProvider()
 
   private lazy val creatableRelations = deltaProvider.getCreatableRelationRules
 
@@ -180,6 +185,23 @@ trait ExternalSourceBase extends Logging {
       true
     } else {
       false
+    }
+  }
+
+  /**
+   * Falls back a scan whose format is a ParquetFileFormat subclass that no external source
+   * claims, e.g. DeltaParquetFileFormat without a supported Delta Lake runtime. Such a format
+   * can depend on features like column mapping or deletion vectors that a plain GPU Parquet
+   * scan would silently ignore.
+   */
+  def tagUnclaimedParquetSubclass(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
+    val cls = meta.wrapped.relation.fileFormat.getClass
+    if (classOf[ParquetFileFormat].isAssignableFrom(cls) &&
+        cls != classOf[ParquetFileFormat] &&
+        !isSupportedFormat(cls)) {
+      meta.willNotWorkOnGpu(s"unsupported file format: ${cls.getCanonicalName} is a " +
+        "ParquetFileFormat subclass that no external source claims, e.g. there is no " +
+        "supported Delta Lake runtime")
     }
   }
 

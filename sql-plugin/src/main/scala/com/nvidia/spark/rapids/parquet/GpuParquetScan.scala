@@ -44,6 +44,7 @@ import com.nvidia.spark.rapids.jni.{DateTimeRebase, ParquetFooter, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims,
   ParquetMissingStructShims, ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
@@ -119,11 +120,11 @@ case class GpuParquetScan(
     dataFilters: Seq[Expression],
     rapidsConf: RapidsConf,
     queryUsesInputFile: Boolean = false)
-  extends FileScan with GpuScan with Logging {
+  extends FileScan with GpuScan with HistorySizedFileScan with Logging {
 
   override def isSplitable(path: Path): Boolean = true
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val broadcastedConf = sparkSession.sparkContext.broadcast(
       new SerializableConfiguration(hadoopConf))
 
@@ -471,11 +472,15 @@ case class ParquetFileInfoWithBlockMeta(filePath: Path, blocks: collection.Seq[B
     hasInt96Timestamps: Boolean,
     // Row number of the first row in each block considering all rows in blocks.
     // If non-empty, its size should be the same as blocks.size
-    blocksFirstRowIndices: Seq[Long] = Seq.empty) {
+    blocksFirstRowIndices: Seq[Long] = Seq.empty,
+    // The row groups `blocks` stands for, when it merges them into one block
+    mergedRowGroups: Option[Int] = None) {
   if (blocksFirstRowIndices.nonEmpty) {
     require(blocks.length == blocksFirstRowIndices.length, s"Blocks length ${blocks.length} not " +
       s"matching first row length ${blocksFirstRowIndices.length}")
   }
+
+  def numRowGroups: Int = mergedRowGroups.getOrElse(blocks.size)
 }
 
 private[rapids] case class BlockMetaWithPartFile(
@@ -868,9 +873,10 @@ protected case class GpuParquetFileFilterHandler(
                     Seq.empty
                   }
                   val schema = new MessageType("root")
+                  // One offset per selected row group; the synthetic block merges them.
                   return ParquetFileInfoWithBlockMeta(filePath, blocks, file.partitionValues,
                     schema, readDataSchema, DateTimeRebaseLegacy, DateTimeRebaseLegacy,
-                    hasInt96Timestamps = false)
+                    hasInt96Timestamps = false, mergedRowGroups = Some(offsets.length))
                 }
 
                 (tableFooter.serializeThriftFile(), tableFooter.getRowIndexOffsets)
@@ -949,7 +955,7 @@ protected case class GpuParquetFileFilterHandler(
           checkSchemaCompat(clippedSchema, readDataSchema,
             (t: Type, d: DataType) => throwTypeIncompatibleError(t, d, file.filePath.toString()),
             isCaseSensitive, readUseFieldId)
-          val clipped = GpuParquetUtils.clipBlocksToSchema(clippedSchema, blocks, isCaseSensitive)
+          val clipped = GpuParquetUtils.clipBlocksToSchema(clippedSchema, blocks)
           (clipped, clippedSchema)
         }
       val hasDateTimeInReadSchema = DataTypeUtils.hasDateOrTimestampType(readDataSchema)
@@ -1490,7 +1496,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       files: Array[PartitionedFile],
       conf: Configuration,
       poolConf: ThreadPoolConf): Array[BlockMetaWithPartFile] = {
-    if (numFilesFilterParallel > 0) {
+    val metas = if (numFilesFilterParallel > 0) {
       val tc = TaskContext.get()
       val threadPool = MultiFileReaderThreadPool.getOrCreateThreadPool(poolConf)
       files.grouped(numFilesFilterParallel).map { fileGroup =>
@@ -1513,6 +1519,8 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
           hadoopConf, filters, readDataSchema)
       }
     }
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += metas.map(_.meta.numRowGroups).sum)
+    metas
   }
 
   /**
@@ -1623,9 +1631,11 @@ case class GpuParquetMultiFilePartitionReaderFactory(
           filterHandler.readThriftFooter(fileIO, filePath, fileConf)
         }
       }
+      // GPUDirect Storage is not supported here yet, so every mode reads through host memory.
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, execMetrics),
+          config.maxH2DPackSize, config.minH2DPackSize, execMetrics,
+          RapidsConf.GpuDirectStorageMode.OFF),
         readFooter,
         maxReadBatchSizeRows = maxReadBatchSizeRows,
         maxReadBatchSizeBytes = maxReadBatchSizeBytes,
@@ -1766,12 +1776,13 @@ case class GpuParquetPartitionReaderFactory(
       _ += (System.nanoTime() - startTime)
     }
     closeOnExcept(footer) { _ =>
-      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics)
+      val rangeReader = HybridScanFileByteSource.createRangeReader(filePath, metrics)
+      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics, rangeReader)
       val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
       new HybridScanPerFileParquetPartitionReader(
         HybridScanSplit(byteSource, file.start, file.length), footer, options,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, metrics))
+          config.maxH2DPackSize, config.minH2DPackSize, metrics, config.gdsMode))
     }
   }
 
@@ -1784,6 +1795,7 @@ case class GpuParquetPartitionReaderFactory(
     metrics.get(FILTER_TIME).foreach {
       _ += (System.nanoTime() - startTime)
     }
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += singleFileInfo.numRowGroups)
     new ParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath, singleFileInfo.blocks,
       singleFileInfo.schema, isCaseSensitive, readDataSchema, partitionSchema, debugDumpPrefix,
       debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetSizeBytes,
@@ -2575,10 +2587,18 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       useFieldId: Boolean): ParquetOptions = {
     val includeColumns = toCudfColumnNames(readDataSchema, clippedSchema,
       isSchemaCaseSensitive, useFieldId)
-    ParquetOptions.builder()
-        .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
-        .includeColumn(includeColumns : _*)
-        .build()
+    val builder = ParquetOptions.builder()
+      .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
+    // cuDF's name selector cannot distinguish a flat "a.b" from the struct field a.b.
+    // Missing requested columns can still appear in includeColumns after footer clipping.
+    // The in-memory footer is already clipped in read-schema order, so read all its
+    // columns when either a selector or a physical root name contains a dot.
+    val hasDottedName = includeColumns.exists(_.contains(".")) ||
+      clippedSchema.getFields.asScala.exists(_.getName.contains("."))
+    if (!hasDottedName) {
+      builder.includeColumn(includeColumns: _*)
+    }
+    builder.build()
   }
 
   /** conversions used by multithreaded reader and coalescing reader */
@@ -3375,10 +3395,12 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       val hostBuffers = new ArrayBuffer[SingleHMBAndMeta]
       var filterTime = 0L
       var bufferStartTime = 0L
+      var rowGroupsFetched = 0
       val result = try {
         val filterStartTime = System.nanoTime()
         val fileBlockMeta = filterFunc(file)
         filterTime = System.nanoTime() - filterStartTime
+        rowGroupsFetched = fileBlockMeta.numRowGroups
         bufferStartTime = System.nanoTime()
         if (fileBlockMeta.blocks.isEmpty) {
           val bytesRead = fileSystemBytesRead() - startingBytesRead
@@ -3438,6 +3460,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       }
       val bufferTime = System.nanoTime() - bufferStartTime
       result.setExecutionTime(filterTime, bufferTime)
+      result.setRowGroupsFetched(rowGroupsFetched)
       result
     }
   }

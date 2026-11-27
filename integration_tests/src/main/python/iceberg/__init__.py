@@ -23,8 +23,10 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
-from asserts import assert_equal_with_local_sort
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_rest_catalog, spark_jvm
+from iceberg.defaults import assert_iceberg_default_file_parity, assert_iceberg_gpu_writer
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
 
@@ -115,7 +117,8 @@ def with_iceberg_format_versions(parameters):
     return result
 
 
-def with_iceberg_dml_session(func, format_version, mode, conf):
+def with_iceberg_dml_session(func, format_version, mode, conf,
+                             gpu_writers=("GpuWriteDeltaExec", "GpuAppendDataExec")):
     """Require GPU deletion-vector writes for v3 MOR operations."""
     if format_version != "3" or mode != "merge-on-read":
         return with_gpu_session(func, conf=conf)
@@ -127,10 +130,8 @@ def with_iceberg_dml_session(func, format_version, mode, conf):
         # Spark rewrites insert-only MERGE to append even on a MOR table.
         assert not any(callback.didFallBack(plan, "WriteDeltaExec") for plan in plans), \
             "Unexpected v3 MOR CPU delta write:\n" + "\n".join(str(plan) for plan in plans)
-        assert any(callback.contains(plan, "GpuWriteDeltaExec") or
-                   callback.contains(plan, "GpuAppendDataExec") for plan in plans), \
-            "Expected GPU delta write or GPU append for insert-only MERGE:\n" + \
-            "\n".join(str(plan) for plan in plans)
+        assert any(callback.contains(plan, writer) for plan in plans for writer in gpu_writers), \
+            f"Expected {' or '.join(gpu_writers)}:\n" + "\n".join(str(plan) for plan in plans)
         return result
     finally:
         callback.endCapture()
@@ -379,15 +380,20 @@ def _add_eq_deletes(spark: SparkSession, eq_delete_cols: List[str], row_count: i
             f"{eq_delete_col} can't be used as eq delete column"
 
 
-    spark_warehouse_dir = spark.conf.get("spark.sql.catalog.spark_catalog.warehouse")
-
-    temp_dir = tempfile.mkdtemp(dir=spark_tmp_path)
     deletes = (spark.table(table_name)
                .select(eq_delete_cols + ["_partition"])
                .distinct()
                .orderBy(eq_delete_cols)
                .limit(row_count)
                .repartition(1))
+
+    _add_eq_deletes_from_df(spark, deletes, table_name, spark_tmp_path)
+
+
+def _add_eq_deletes_from_df(spark: SparkSession, deletes: DataFrame, table_name: str,
+                            spark_tmp_path):
+    spark_warehouse_dir = spark.conf.get("spark.sql.catalog.spark_catalog.warehouse")
+    temp_dir = tempfile.mkdtemp(dir=spark_tmp_path)
     deletes.write.parquet(temp_dir, mode='overwrite')
     parquet_files = [f for f in os.listdir(temp_dir) if f.endswith(".parquet")]
     assert len(parquet_files) == 1, "Only one delete parquet file should be created"
@@ -418,6 +424,97 @@ _ROW_LINEAGE_WRITE_CONF = {
     **iceberg_write_enabled_conf,
     "spark.rapids.sql.format.iceberg.v3.enabled": "true"
 }
+
+
+def setup_iceberg_write_default_tables(spark_tmp_table_factory, table_properties=None):
+    """Create identical CPU/GPU tables and report whether the catalog exposes the SQL default."""
+    base = get_full_table_name(spark_tmp_table_factory)
+    cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
+    props = iceberg_table_properties_sql("3", table_properties)
+
+    def setup(spark):
+        iceberg = spark_jvm().org.apache.iceberg
+        for name in (cpu_table, gpu_table):
+            spark.sql(f"CREATE TABLE {name} (id BIGINT, p INT) USING ICEBERG "
+                      f"PARTITIONED BY (p) {props}")
+            spark.sql(f"INSERT INTO {name} VALUES (1, 0), (2, 1)")
+            table = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, name)
+            table.updateSchema().addColumn(
+                "optional_added", iceberg.types.Types.StringType.get(),
+                iceberg.expressions.Literal.of("legacy")).commit()
+            table.updateSchema().updateColumnDefault(
+                "optional_added", iceberg.expressions.Literal.of("current")).commit()
+            spark.sql(f"REFRESH TABLE {name}")
+        return "CURRENT_DEFAULT" in spark.table(cpu_table).schema["optional_added"].metadata
+
+    return cpu_table, gpu_table, with_cpu_session(setup)
+
+
+def check_default_rows(expected):
+    def check(cpu_rows, gpu_rows):
+        for rows in (cpu_rows, gpu_rows):
+            assert sorted([tuple(row) for row in rows], key=repr) == sorted(expected, key=repr)
+        return cpu_rows, gpu_rows
+    return check
+
+
+def assert_iceberg_write_defaults(
+        cpu_table, gpu_table, write, expected, conf, expected_writer=None):
+    """Compare logical rows, physical Parquet values, and persisted field defaults."""
+    def write_and_read(spark):
+        table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
+        if expected_writer is None:
+            write(spark, table)
+        else:
+            assert_iceberg_gpu_writer(spark, lambda: write(spark, table), expected_writer)
+        return spark.table(table).orderBy("id")
+
+    assert_gpu_and_cpu_are_equal_collect(write_and_read, conf=conf)
+
+    def check_files(spark):
+        for name in (cpu_table, gpu_table):
+            assert spark.table(name).orderBy("id").collect() == expected
+        assert_iceberg_default_file_parity(spark, cpu_table, gpu_table)
+
+    with_cpu_session(check_files, conf=conf)
+
+
+def setup_iceberg_fixed_default_table(
+        spark, name, *, initial_only, table_properties=None, initial_rows=1):
+    """Add fixed[2] after the first write, with only one of the two Iceberg defaults set."""
+    props = iceberg_table_properties_sql("3", table_properties)
+    spark.sql(f"CREATE TABLE {name} (id BIGINT) USING ICEBERG {props}")
+    spark.range(1, initial_rows + 1, numPartitions=1).writeTo(name).append()
+    jvm = spark_jvm()
+    iceberg = jvm.org.apache.iceberg
+    table = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, name)
+    fixed = iceberg.types.Types.FixedType.ofLength(2)
+    value = iceberg.expressions.Literal.of(jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2]))).to(fixed)
+    update = table.updateSchema()
+    if initial_only:
+        update.addColumn("payload", fixed, value).commit()
+    else:
+        update.addColumn("payload", fixed).commit()
+    table.updateSchema().updateColumnDefault("payload", None if initial_only else value).commit()
+    spark.sql(f"REFRESH TABLE {name}")
+
+
+def assert_iceberg_write_only_default_fallback(
+        spark_tmp_table_factory, sql, fallback_exec, table_properties=None):
+    base = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        for suffix in ("cpu", "gpu"):
+            setup_iceberg_fixed_default_table(
+                spark, f"{base}_{suffix}", initial_only=False, table_properties=table_properties)
+
+    with_cpu_session(setup)
+    assert_gpu_fallback_write_sql(
+        lambda spark, table: spark.sql(sql.format(table=table)).collect(),
+        lambda spark, table: spark.table(table), base, [fallback_exec],
+        conf=copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"}))
+    with_cpu_session(lambda spark: assert_iceberg_default_file_parity(
+        spark, f"{base}_cpu", f"{base}_gpu"))
 
 
 def assert_gpu_and_cpu_lineage_writes_are_equal(

@@ -14,8 +14,12 @@
 
 import json
 import os
+from contextlib import contextmanager
+from datetime import datetime as _datetime  # data_gen star-import rebinds datetime
+import pytz
 import pyspark.sql.functions as f
 import pytest
+import re
 
 from asserts import *
 from data_gen import *
@@ -72,6 +76,22 @@ def get_last_operation_metrics(path):
                             .history(1)\
                             .selectExpr("operationMetrics")\
                             .head()[0])
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+def test_delta_write_statistics_quoted_column_names(spark_tmp_path):
+    data_path = spark_tmp_path + "/QUOTED_COLUMN_STATISTICS"
+
+    def write(spark, path):
+        (spark.range(4).selectExpr(
+            "id AS `key.id`", "named_struct('child.name', id + 1) AS `struct.value`",
+            "id + 2 AS `tick``name`").coalesce(1).write.format("delta").save(path))
+
+    assert_gpu_and_cpu_writes_are_equal_collect(write, read_delta_path, data_path,
+                                               conf=_delta_confs)
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
 
 def _create_table(spark, path, schema, partitioned_by=None, enable_deletion_vectors=False):
     q = f"CREATE TABLE delta.`{path}` ({schema}) USING DELTA"
@@ -323,11 +343,19 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="Materialized partition columns were added in OSS Delta 4.3")
-@pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
+@pytest.mark.parametrize("write_mode,source", [
+    ("append", "properties"), ("ctas", "properties"), ("rtas", "properties"),
+    ("ctas", "options"), ("rtas", "options"),
+    ("ctas", "mixed_case_options"), ("rtas", "mixed_case_options")])
 def test_delta_43_materialized_partition_columns_fallback(
-        spark_tmp_table_factory, write_mode):
+        spark_tmp_table_factory, write_mode, source):
+    """The feature is requested through TBLPROPERTIES, or through a `delta.*` write option, which
+    Delta persists as a table property when the write creates the table."""
     base_table = spark_tmp_table_factory.get()
     property_sql = "'delta.enableMaterializePartitionColumnsFeature' = 'true'"
+    # Delta accepts `delta.*` option keys in any case.
+    option_key = "DELTA.ENABLEMATERIALIZEPARTITIONCOLUMNSFEATURE" \
+        if source == "mixed_case_options" else "delta.enableMaterializePartitionColumnsFeature"
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
     if write_mode == "append":
         def create_tables(spark):
@@ -341,6 +369,11 @@ def test_delta_43_materialized_partition_columns_fallback(
         if write_mode == "append":
             spark.sql(
                 f"INSERT INTO {table} SELECT id, CAST(id % 2 AS INT) FROM range(4)")
+        elif source.endswith("options"):
+            writer = spark.sql("SELECT id, CAST(id % 2 AS INT) AS part FROM range(4)") \
+                .writeTo(table).using("delta").partitionedBy(f.col("part")) \
+                .option(option_key, "true")
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
         else:
             command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
             spark.sql(
@@ -399,10 +432,18 @@ def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
                     reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
-@pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
-def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode):
+@pytest.mark.parametrize("write_mode,source", [
+    ("append", "properties"), ("ctas", "properties"), ("rtas", "properties"),
+    ("ctas", "options"), ("rtas", "options"),
+    ("ctas", "mixed_case_options"), ("rtas", "mixed_case_options")])
+def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode, source):
+    """Variant shredding is requested through TBLPROPERTIES, or through a `delta.*` write option,
+    which Delta persists as a table property when the write creates the table."""
     base_table = spark_tmp_table_factory.get()
     property_sql = "'delta.enableVariantShredding' = 'true'"
+    # Delta accepts `delta.*` option keys in any case.
+    option_key = "DELTA.ENABLEVARIANTSHREDDING" if source == "mixed_case_options" \
+        else "delta.enableVariantShredding"
     query = "SELECT id, parse_json('{\"a\": 1}') AS v FROM range(4)"
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
     if write_mode == "append":
@@ -416,6 +457,10 @@ def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode
     def write_table(spark, table):
         if write_mode == "append":
             spark.sql(f"INSERT INTO {table} {query}")
+        elif source.endswith("options"):
+            writer = spark.sql(query).writeTo(table).using("delta") \
+                .option(option_key, "true")
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
         else:
             command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
             spark.sql(
@@ -458,115 +503,6 @@ def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion
             if native_staged_write else None)
     )
     assert_delta_history_equal(conf, cpu_table, gpu_table)
-
-
-@allow_non_gpu(*delta_meta_allow)
-@delta_lake
-@ignore_order(local=True)
-@pytest.mark.skipif(not is_databricks143(), reason="DBR 14.3 Delta create-table path")
-@pytest.mark.parametrize("write_api", ["sql_rtas", "save_as_table_overwrite"])
-@pytest.mark.parametrize("txn_idempotency", [False, True])
-@pytest.mark.parametrize("enable_deletion_vectors", [None, False, True])
-def test_delta_db143_managed_replace(
-        spark_tmp_table_factory, write_api, txn_idempotency, enable_deletion_vectors):
-    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
-        "spark.sql.sources.partitionOverwriteMode": "dynamic"
-    })
-    cpu_table = spark_tmp_table_factory.get() + '_cpu'
-    gpu_table = spark_tmp_table_factory.get() + '_gpu'
-    properties = ("" if enable_deletion_vectors is None else
-                  f" TBLPROPERTIES ('delta.enableDeletionVectors' = "
-                  f"'{str(enable_deletion_vectors).lower()}')")
-
-    def create_initial_tables(spark):
-        for table in [cpu_table, gpu_table]:
-            spark.sql(
-                f"CREATE TABLE {table} USING DELTA PARTITIONED BY (part){properties} AS "
-                "SELECT id, CAST(id % 2 AS INT) AS part, 'initial' AS value FROM range(4)")
-
-    def replace(spark, table, value="replaced"):
-        query = (
-            f"SELECT id, CAST(id % 2 AS INT) AS part, '{value}' AS value "
-            "FROM range(2, 6) WHERE id % 2 = 0")
-        if write_api == "save_as_table_overwrite":
-            writer = spark.sql(query).write.format("delta").mode("overwrite")
-            if enable_deletion_vectors is not None:
-                writer = get_writer_with_deletion_vector_property_set(
-                    writer, enable_deletion_vectors)
-            writer.partitionBy("part").saveAsTable(table)
-        else:
-            spark.sql(
-                f"CREATE OR REPLACE TABLE {table} USING DELTA PARTITIONED BY (part)"
-                f"{properties} AS {query}").collect()
-
-    def write_conf(version):
-        if not txn_idempotency:
-            return conf
-        return copy_and_update(conf, {
-            "spark.databricks.delta.write.txnAppId": cpu_table,
-            "spark.databricks.delta.write.txnVersion": str(version)
-        })
-
-    def write_tables(value, version):
-        current_conf = write_conf(version)
-        with_cpu_session(lambda spark: replace(spark, cpu_table, value), conf=current_conf)
-        assert_rapids_delta_write(
-            lambda spark: replace(spark, gpu_table, value), conf=current_conf,
-            expected_command="GpuAtomicReplaceTableAsSelectExec", require_non_empty=True)
-
-    with_cpu_session(create_initial_tables, conf=conf)
-    write_tables("replaced", 0)
-
-    def table_state(spark, table):
-        rows = spark.table(table).orderBy("id").collect()
-        detail = spark.sql(f"DESCRIBE DETAIL {table}").select(
-            "format", "partitionColumns", "properties").first()
-        return rows, (detail.format, detail.partitionColumns, sorted(detail.properties.items()))
-
-    def history_state(spark, table):
-        history = spark.sql(f"DESCRIBE HISTORY {table}").select(
-            "version", "operation", "operationParameters").orderBy("version").collect()
-        # Compare map contents explicitly, including properties, without dictionary assertions.
-        return [(row.version, row.operation, sorted(
-            (key, json.dumps(json.loads(value), sort_keys=True) if key == "properties" else value)
-            for key, value in row.operationParameters.items())) for row in history]
-
-    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
-    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
-    if write_api == "save_as_table_overwrite":
-        assert [row.id for row in cpu_state[0] if row.part == 1] == [1, 3]
-    assert_equal(cpu_state, gpu_state)
-    assert_delta_history_equal(conf, cpu_table, gpu_table)
-
-    cpu_history = with_cpu_session(lambda spark: history_state(spark, cpu_table), conf=conf)
-    gpu_history = with_cpu_session(lambda spark: history_state(spark, gpu_table), conf=conf)
-    assert_equal(cpu_history, gpu_history)
-
-    if txn_idempotency:
-        def replay_state(spark, table):
-            return table_state(spark, table), history_state(spark, table)
-
-        before = {
-            table: with_cpu_session(lambda spark: replay_state(spark, table), conf=conf)
-            for table in (cpu_table, gpu_table)
-        }
-        # Different data at the same application/version must not change rows or history.
-        with_cpu_session(lambda spark: replace(spark, cpu_table, "retry"), conf=write_conf(0))
-        with_gpu_session(lambda spark: replace(spark, gpu_table, "retry"), conf=write_conf(0))
-        for table in (cpu_table, gpu_table):
-            after = with_cpu_session(lambda spark: replay_state(spark, table), conf=conf)
-            assert_equal(before[table], after)
-
-        # A higher version must perform a real write and add exactly one commit.
-        write_tables("next", 1)
-        after_states = []
-        for table in (cpu_table, gpu_table):
-            after = with_cpu_session(lambda spark: replay_state(spark, table), conf=conf)
-            assert after[0][0] != before[table][0][0]
-            assert after[1][-1][0] == before[table][1][-1][0] + 1
-            after_states.append(after)
-        assert_equal(after_states[0], after_states[1])
-        assert_delta_history_equal(conf, cpu_table, gpu_table)
 
 
 @allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
@@ -1967,6 +1903,47 @@ def test_delta_write_legacy_timestamp(spark_tmp_path, ts_write):
         data_path,
         conf=all_confs)
 
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not (is_oss_delta_lake_40() or is_oss_delta_lake_41_to_43()),
+                    reason="OSS Delta 4.x atomic overwrite")
+@pytest.mark.parametrize("enable_deletion_vectors", [False, True])
+@pytest.mark.parametrize("use_cdf", [False, True])
+def test_delta_write_partial_overwrite_data_predicate(spark_tmp_path, enable_deletion_vectors,
+                                                     use_cdf):
+    data_path = spark_tmp_path + "/REPLACE_WHERE_DATA_PREDICATE"
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            (spark.range(8).selectExpr("id", "id % 2 AS p", "id * 10 AS value")
+             .coalesce(1).write.format("delta").partitionBy("p")
+             .option("delta.enableChangeDataFeed", str(use_cdf).lower())
+             .option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+             .save(data_path + "/" + suffix))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        (spark.range(4, 10).selectExpr("id", "id % 2 AS p", "id * 100 AS value")
+         .write.format("delta").mode("overwrite").option("replaceWhere", "id >= 4").save(path))
+
+    def read_result(spark, path):
+        current = read_delta_path(spark, path)
+        if use_cdf:
+            current = (current.withColumn("_change_type", f.lit("current"))
+                       .withColumn("_commit_version", f.lit(-1).cast("long")))
+            return current.unionByName(read_delta_path_with_cdf(spark, path))
+        return current
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.replaceWhere.dataColumns.enabled": "true",
+        "spark.databricks.delta.replaceWhere.dataColumnsWithCDF.enabled": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true"})
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_result, data_path, conf=conf)
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
@@ -2282,6 +2259,34 @@ def test_delta_write_identity_columns_sql(spark_tmp_path):
         spark.sql("CREATE TABLE delta.`{}` (x BIGINT, id BIGINT GENERATED ALWAYS AS IDENTITY) USING DELTA".format(path))
         spark.range(2048).selectExpr("id * id AS x").write.format("delta").mode("append").save(path)
     do_test_delta_write_identity_columns(data_path, create_data)
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks_runtime(),
+                    reason="Delta Lake identity columns for SQL are currently only supported on Databricks")
+def test_delta_write_identity_columns_column_mapping_sql(spark_tmp_path):
+    """
+    With column mapping the high water mark of an identity column is tracked by physical column
+    name; the second append starts from the high water mark of the first.
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    def create_data(spark, path):
+        spark.sql("CREATE TABLE delta.`{}` (x BIGINT, id BIGINT GENERATED ALWAYS AS IDENTITY "
+                  "(START WITH 10 INCREMENT BY 3)) USING DELTA "
+                  "TBLPROPERTIES ('delta.columnMapping.mode' = 'name')".format(path))
+        spark.range(2048).selectExpr("id * id AS x").write.format("delta").mode("append").save(path)
+    # Column mapping assigns random physical names, so the Delta logs differ between runs by
+    # design; compare only the table contents, including the second append.
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        create_data, lambda spark, path: spark.read.format("delta").load(path), data_path,
+        conf=delta_writes_enabled_conf)
+    def append_data(spark, path):
+        spark.range(2048).selectExpr("id + 10 as x").write.format("delta").mode("append").save(path)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        append_data, lambda spark, path: spark.read.format("delta").load(path), data_path,
+        conf=delta_writes_enabled_conf)
 
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
@@ -2678,7 +2683,7 @@ def test_delta_cdf_non_data_changing_write(spark_tmp_path, operation):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
+@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option fallback")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -2706,7 +2711,7 @@ def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
+@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 target alias fallback")
 def test_delta_target_alias_fallback(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
@@ -2775,6 +2780,509 @@ def test_delta_invalid_partition_overwrite_mode_non_partitioned(spark_tmp_path):
         conf=_delta_confs)
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
+
+# Delta stores a timestamp partition as a UTC instant, e.g. 2020-01-01T00:00:00.000000Z
+_dpo_timestamp_re = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$")
+_dpo_date_re = re.compile(r"^(\d{4})-(\d\d)-(\d\d)$")
+_dpo_decimal_re = re.compile(r"^-?\d+\.\d+$")
+_dpo_integer_re = re.compile(r"^(-?)(\d+)$")
+
+def _dpo_value_kind(value):
+    for kind, pattern in (("timestamp", _dpo_timestamp_re), ("date", _dpo_date_re),
+                          ("decimal", _dpo_decimal_re), ("integer", _dpo_integer_re)):
+        if pattern.match(value):
+            return kind
+    return "string"
+
+def _dpo_parse_instant(value):
+    """Parse a UTC instant with a fraction of any length. datetime.fromisoformat accepts only 3 or
+    6 fraction digits before Python 3.11."""
+    match = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$", value)
+    micros = int((match.group(2) or "0").ljust(6, "0")[:6])
+    return _datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(
+        microsecond=micros, tzinfo=pytz.utc)
+
+def _dpo_timestamp_session_local(instant, session_time_zone):
+    """Wall clock time of `instant` in the session time zone, with an explicit offset only when
+    the zone-less string would be ambiguous (the repeated hour at the end of DST)."""
+    tz = pytz.timezone(session_time_zone)
+    local = instant.astimezone(tz)
+    text = local.strftime("%Y-%m-%d %H:%M:%S") + (
+        ".%06d" % local.microsecond if local.microsecond else "")
+    try:
+        round_trips = tz.localize(local.replace(tzinfo=None), is_dst=None) == local
+    except (pytz.AmbiguousTimeError, pytz.NonExistentTimeError):
+        round_trips = False
+    if round_trips:
+        return text
+    offset = local.strftime("%z")
+    return "{}{}:{}".format(text, offset[:3], offset[3:])
+
+# Equivalent spellings of one partition value for each kind of partition column. "unchanged" keeps
+# the string Delta wrote; "mixed" (see _respell_dpo_partition_value) rotates through all of them.
+_dpo_spellings = {
+    "timestamp": {
+        # UTC with the zero fraction dropped
+        "utc_trimmed": lambda instant, tz: instant.strftime("%Y-%m-%dT%H:%M:%S") + (
+            "." + ("%06d" % instant.microsecond).rstrip("0") if instant.microsecond else "") + "Z",
+        # space separator and an explicit offset
+        "utc_offset": lambda instant, tz: instant.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00:00",
+        # no zone: wall clock time in the session time zone
+        "session_local": lambda instant, tz: _dpo_timestamp_session_local(instant, tz),
+        "unchanged": lambda instant, tz: instant.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    },
+    "date": {
+        "unpadded": lambda m: "{}-{}-{}".format(m.group(1), int(m.group(2)), int(m.group(3))),
+        "unchanged": lambda m: m.group(0),
+    },
+    "decimal": {
+        "trimmed": lambda v: v.rstrip("0").rstrip("."),  # 1.50 -> 1.5, 2.00 -> 2
+        "extra_scale": lambda v: v + "00",  # 1.50 -> 1.5000
+        "unchanged": lambda v: v,
+    },
+    "integer": {
+        "zero_padded": lambda m: m.group(1) + m.group(2).zfill(5),
+        "unchanged": lambda m: m.group(0),
+    },
+}
+
+def _respell_dpo_partition_value(value, rank, spellings, session_time_zone):
+    """
+    Return an equivalent but differently spelled Delta partition string. `spellings` maps a kind
+    of partition value to a spelling name; kinds it does not name are left unchanged. `rank` is the
+    index of `value` among the table's distinct values of its kind, so the result depends only on
+    the value and never on the order of the log.
+    """
+    kind = _dpo_value_kind(value)
+    names = _dpo_spellings.get(kind)
+    if names is None:
+        return value
+    name = spellings.get(kind, "unchanged")
+    if name == "mixed":
+        name = sorted(names)[rank % len(names)]
+    if kind == "timestamp":
+        instant = _dpo_parse_instant(value)
+        return names[name](instant, session_time_zone)
+    if kind == "decimal":
+        return names[name](value)
+    return names[name](re.match(_dpo_date_re if kind == "date" else _dpo_integer_re, value))
+
+def _rewrite_dpo_partition_values(spark, data_path, new_value, must_change=True):
+    """
+    Rewrite every non-null AddFile partition string in the CPU and GPU table logs with
+    `new_value(old_value, rank)`, where `rank` is the index of the value among the distinct values
+    of its kind in that table, so both tables get identical rewrites. Asserts that each table's
+    log really changed unless `must_change` is False. Returns the {old: new} map of the rewritten
+    strings, which is the same for both tables.
+    """
+    # Use the Hadoop FileSystem API so the rewrite also works when --tmp_path is HDFS or S3.
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    changed_per_table = []
+    renames_per_table = []
+    for side in ("CPU", "GPU"):
+        log_dir = jvm.org.apache.hadoop.fs.Path("{}/{}/_delta_log".format(data_path, side))
+        fs = log_dir.getFileSystem(hadoop_conf)
+        logs = {}
+        for status in sorted(fs.listStatus(log_dir), key=lambda st: st.getPath().getName()):
+            log_file = status.getPath()
+            name = log_file.getName()
+            # A checkpoint could serve the snapshot without the edited commit files.
+            assert "checkpoint" not in name, "table has a checkpoint: " + name
+            if name.endswith(".crc"):  # version checksums no longer match the edited log
+                fs.delete(log_file, False)
+            elif name.endswith(".json"):
+                logs[log_file] = [json.loads(line) for line in
+                                  spark.sparkContext.textFile(log_file.toString()).collect()
+                                  if line.strip()]
+        distinct = sorted({value for actions in logs.values() for action in actions
+                           for value in action.get("add", {}).get("partitionValues", {}).values()
+                           if value is not None})
+        rank = {}
+        for kind in {_dpo_value_kind(value) for value in distinct}:
+            for index, value in enumerate([v for v in distinct if _dpo_value_kind(v) == kind]):
+                rank[value] = index
+        renames = {value: new_value(value, rank[value]) for value in distinct}
+        renames_per_table.append(renames)
+        changed = 0
+        for log_file, actions in logs.items():
+            for action in actions:
+                partition_values = action.get("add", {}).get("partitionValues", {})
+                for key, value in partition_values.items():
+                    if value is not None:
+                        partition_values[key] = renames[value]
+                        changed += renames[value] != value
+            out = fs.create(log_file, True)
+            out.write(bytearray(("\n".join(json.dumps(a) for a in actions) + "\n").encode()))
+            out.close()
+        changed_per_table.append(changed)
+    if must_change:
+        assert all(count > 0 for count in changed_per_table), "log rewrite changed nothing"
+    assert renames_per_table[0] == renames_per_table[1]
+    # DeltaLog caches the snapshot built before the log was edited.
+    spark.sparkContext._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+    return renames_per_table[0]
+
+def _respell_dpo_partition_values(spark, data_path, session_time_zone, spellings):
+    return _rewrite_dpo_partition_values(
+        spark, data_path,
+        lambda value, rank: _respell_dpo_partition_value(value, rank, spellings, session_time_zone),
+        must_change=any(name != "unchanged" for name in spellings.values()))
+
+def _dpo_stored_string(literal):
+    """The string Delta writes into the log for a partition given as `literal`."""
+    return _respell_dpo_partition_value(literal, 0, {}, "UTC")
+
+def _latest_delta_version(data_path, side):
+    return with_cpu_session(lambda spark: spark.sql(
+        "DESCRIBE HISTORY delta.`{}/{}`".format(data_path, side)).agg({"version": "max"}
+        ).collect()[0][0])
+
+def _removed_partition_values(data_path, side):
+    """Sorted partition values of every RemoveFile in the table log."""
+    def collect(spark):
+        logs = read_delta_logs(spark, "{}/{}/_delta_log/*.json".format(data_path, side))
+        return sorted(
+            [str(sorted(a["remove"]["partitionValues"].values(), key=str))
+             for acts in logs.values() for a in acts if "remove" in a])
+    return with_cpu_session(collect)
+
+_dpo_ts_a = "2020-01-01T00:00:00Z"
+_dpo_ts_b = "2020-01-02T12:30:00.5Z"
+_dpo_ts_micros = "2020-03-04T05:06:07.123456Z"
+# Instants around DST changes in America/Los_Angeles: the last second before the spring change,
+# the first second after it, and the first of the two 01:30 on the fall change (the ambiguous
+# hour). The second 01:30 is left out: Delta logs a partition through its zone-less path string,
+# so it would be logged with the first one's string and not as its own partition.
+_dpo_ts_dst = ["2020-03-08T09:59:59Z", "2020-03-08T10:00:00Z", "2020-11-01T08:30:00Z"]
+
+# Each case: partition column type, the value kind it respells, the partitions already in the
+# table, the partitions the overwrite writes and how many existing partitions it must remove.
+# Every case keeps one existing partition outside the overwrite and one new partition inside it.
+# The "mixed" spelling rotates by the rank of a value among the table's distinct values, so the
+# partition that is not replaced sorts last to let every spelling land on a replaced partition.
+_dpo_cases = {
+    "timestamp": ("timestamp", "timestamp",
+                  [_dpo_ts_a, _dpo_ts_b, _dpo_ts_micros, "2020-06-01T00:00:00Z",
+                   "2020-12-01T00:00:00Z", None],
+                  [_dpo_ts_a, _dpo_ts_b, _dpo_ts_micros, "2020-06-01T00:00:00Z",
+                   "2021-01-01T00:00:00Z", None], 5),
+    "timestamp_dst": ("timestamp", "timestamp",
+                      _dpo_ts_dst + ["2020-06-01T00:00:00Z", None],
+                      _dpo_ts_dst + ["2021-01-01T00:00:00Z", None], 4),
+    "date": ("date", "date", ["2020-01-01", "2020-02-11", "2020-12-31", "2019-06-30", None],
+             ["2020-01-01", "2020-02-11", "2020-12-31", "2021-01-01", None], 4),
+    "decimal": ("decimal(10,2)", "decimal", ["1.50", "-2.00", "3.25", "-0.10", None],
+                ["1.50", "-2.00", "3.25", "9.99", None], 4),
+    "integer": ("int", "integer", ["1", "-2", "30", "7", None],
+                ["1", "-2", "30", "99", None], 4),
+    # Strings are not normalized: "007" and "7" are different partitions, so "007" survives.
+    "string": ("string", "string", ["007", "a", "b", "z", None],
+               ["7", "a", "b", "y", None], 3),
+}
+
+def _dpo_normalization_params():
+    params = []
+    # The UTC spellings involve no zone conversion, so one zone is enough for them.
+    for spelling, tz in (("utc_trimmed", "America/Los_Angeles"), ("utc_offset", "America/Los_Angeles"),
+                         ("session_local", "UTC"), ("session_local", "America/Los_Angeles"),
+                         ("mixed", "UTC"), ("mixed", "America/Los_Angeles")):
+        params.append(pytest.param("timestamp", spelling, tz,
+                                   id="timestamp-{}-{}".format(spelling, tz)))
+    params.append(pytest.param("timestamp_dst", "session_local", "America/Los_Angeles",
+                               id="timestamp_dst-session_local"))
+    for case, spellings in (("date", ("unpadded",)),
+                            ("decimal", ("trimmed", "extra_scale", "mixed")),
+                            ("integer", ("zero_padded",)), ("string", ("unchanged",))):
+        for spelling in spellings:
+            params.append(pytest.param(case, spelling, "America/Los_Angeles",
+                                       id="{}-{}".format(case, spelling)))
+    return params
+
+def _dpo_df(spark, rows, col_type, part_col):
+    return (spark.createDataFrame([(i, v) for i, v in enumerate(rows)], "id LONG, s STRING")
+            .selectExpr("id", "CAST(s AS {}) AS {}".format(col_type, part_col)))
+
+def _dpo_overwrite(spark, path, df, part_col, entry_point):
+    """Overwrite the table at `path` with `df` through one of the dynamic overwrite entry points."""
+    writer = df.write.mode("overwrite")
+    table = "delta.`{}`".format(path)
+    if entry_point == "writer_option":
+        writer.format("delta").partitionBy(part_col) \
+            .option("partitionOverwriteMode", "dynamic").save(path)
+    elif entry_point == "session_conf":  # spark.sql.sources.partitionOverwriteMode only
+        writer.format("delta").partitionBy(part_col).save(path)
+    elif entry_point == "insert_into":
+        writer.insertInto(table)
+    elif entry_point == "save_as_table":
+        writer.format("delta").partitionBy(part_col) \
+            .option("partitionOverwriteMode", "dynamic").saveAsTable(table)
+    else:
+        raise ValueError(entry_point)
+
+def _setup_dpo_tables(data_path, col_type, existing, confs, column_mapping=False):
+    props = "TBLPROPERTIES ('delta.columnMapping.mode' = 'name')" if column_mapping else ""
+    def setup(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.sql("CREATE TABLE delta.`{}` (id LONG, p {}) USING delta PARTITIONED BY (p) {}"
+                      .format(path, col_type, props))
+            _dpo_df(spark, existing, col_type, "p").coalesce(1).write.format("delta") \
+                .mode("append").save(path)
+    with_cpu_session(setup, conf=confs)
+
+def _dpo_normalization_test(spark_tmp_path, case_name, spellings, confs, expected_removes,
+                            entry_point="writer_option", rename_partition_column=False,
+                            matches_non_null=True):
+    """
+    Respell the stored partitions, overwrite the ones in `replacement` and check that exactly the
+    respelled strings of the replaced partitions are removed. `matches_non_null` is False when the
+    overwrite is expected to find only the null partition (raw string comparison).
+    """
+    col_type, _, existing, replacement, _ = _dpo_cases[case_name]
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    _setup_dpo_tables(data_path, col_type, existing, confs, rename_partition_column)
+    renames = with_cpu_session(lambda spark: _respell_dpo_partition_values(
+        spark, data_path, confs["spark.sql.session.timeZone"], spellings), conf=confs)
+    # Removed AddFiles carry the partition strings of the edited log, so a snapshot that ignored
+    # the edit would report different strings. A null partition is logged without a value.
+    expected = sorted(
+        str([renames[_dpo_stored_string(v)]]) if v is not None else str([])
+        for v in existing if v in replacement and (v is None or matches_non_null))
+    assert len(expected) == expected_removes
+    part_col = "p"
+    if rename_partition_column:
+        part_col = "p2"
+        def do_rename(spark):
+            for path in [data_path + "/CPU", data_path + "/GPU"]:
+                spark.sql("ALTER TABLE delta.`{}` RENAME COLUMN p TO p2".format(path))
+        with_cpu_session(do_rename, conf=confs)
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: _dpo_overwrite(
+            spark, path, _dpo_df(spark, replacement, col_type, part_col).coalesce(1),
+            part_col, entry_point),
+        read_delta_path,
+        data_path,
+        conf=confs)
+    # Compare the removed AddFiles' partition values, not only the final rows. Without column
+    # mapping the whole logs (including removed paths) must also be equivalent; with it the CPU
+    # and GPU tables get different random physical column names, so they cannot be.
+    if not rename_partition_column:
+        with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+    assert _removed_partition_values(data_path, "CPU") == expected
+    assert _removed_partition_values(data_path, "GPU") == expected
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+@pytest.mark.parametrize("case_name, spelling, tz", _dpo_normalization_params())
+def test_delta_dpo_partition_value_normalization(spark_tmp_path, case_name, spelling, tz):
+    confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": tz})
+    kind, expected_removes = _dpo_cases[case_name][1], _dpo_cases[case_name][4]
+    # Every partition the overwrite names must be found, whatever the spelling of its stored value.
+    _dpo_normalization_test(spark_tmp_path, case_name, {kind: spelling}, confs, expected_removes)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+@pytest.mark.parametrize("entry_point", ["session_conf", "insert_into", "save_as_table"])
+def test_delta_dpo_partition_value_normalization_entry_points(spark_tmp_path, entry_point):
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "America/Los_Angeles",
+        "spark.sql.sources.partitionOverwriteMode": "DYNAMIC"})
+    _dpo_normalization_test(spark_tmp_path, "timestamp", {"timestamp": "mixed"}, confs,
+                            _dpo_cases["timestamp"][4], entry_point=entry_point)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_partition_value_normalization_renamed_column(spark_tmp_path):
+    confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": "America/Los_Angeles"})
+    _dpo_normalization_test(spark_tmp_path, "timestamp", {"timestamp": "mixed"}, confs,
+                            _dpo_cases["timestamp"][4], rename_partition_column=True)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_partition_value_normalization_disabled(spark_tmp_path):
+    # With parsing disabled Delta compares raw strings. Every stored non-null string is respelled,
+    # so none of them equals the string the overwrite writes and only the null partition matches.
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.dynamicPartitionOverwrite.parsePartitionValues": "false"})
+    _dpo_normalization_test(spark_tmp_path, "timestamp", {"timestamp": "utc_offset"}, confs,
+                            expected_removes=1, matches_non_null=False)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_empty_replacement(spark_tmp_path):
+    confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": "UTC"})
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    existing = _dpo_cases["timestamp"][2]
+    _setup_dpo_tables(data_path, "timestamp", existing, confs)
+    # No new files means no partition is overwritten.
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: _dpo_overwrite(
+            spark, path, _dpo_df(spark, [], "timestamp", "p"), "p", "writer_option"),
+        read_delta_path,
+        data_path,
+        conf=confs)
+    assert _removed_partition_values(data_path, "CPU") == []
+    assert _removed_partition_values(data_path, "GPU") == []
+
+
+def _unparseable_dpo_test(spark_tmp_path, confs):
+    """
+    Create the CPU and GPU tables for the unparseable partition tests: partition A is stored as an
+    unparseable string and every other partition is respelled with an explicit UTC offset, so it
+    matches the overwrite only when parsed. Returns the data path and the rows to overwrite with.
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    existing = [_dpo_ts_a, _dpo_ts_b, _dpo_ts_micros, None]
+    replacement = [_dpo_ts_a, _dpo_ts_b, "2021-01-01T00:00:00Z", None]
+    _setup_dpo_tables(data_path, "timestamp", existing, confs)
+    poisoned = _dpo_stored_string(_dpo_ts_a)
+    with_cpu_session(lambda spark: _rewrite_dpo_partition_values(
+        spark, data_path, lambda value, rank: "not-a-timestamp" if value == poisoned else
+        _respell_dpo_partition_value(value, rank, {"timestamp": "utc_offset"}, "UTC")), conf=confs)
+    return data_path, replacement
+
+def _dpo_error_identity(error):
+    """What must match between CPU and GPU: the Python type and the error condition of a
+    SparkThrowable (PySpark converts those, so they have no java_exception), or the Java class
+    of a raw Py4JJavaError."""
+    get_condition = getattr(error, "getCondition", None)
+    java_exception = getattr(error, "java_exception", None)
+    return (type(error), get_condition() if get_condition else None,
+            java_exception.getClass().getName() if java_exception else None)
+
+def _unparseable_overwrite(spark, path, replacement):
+    _dpo_overwrite(spark, path, _dpo_df(spark, replacement, "timestamp", "p").coalesce(1),
+                   "p", "writer_option")
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_unparseable_partition_value_falls_back_to_strings(spark_tmp_path):
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.failOnPartitionValueParsingError": "false"})
+    data_path, replacement = _unparseable_dpo_test(spark_tmp_path, confs)
+    # A partition value that cannot be parsed does not fail the write: Delta records telemetry
+    # (not observable from Python) and compares the raw strings of every partition instead.
+    with_cpu_session(lambda spark: _unparseable_overwrite(spark, data_path + "/CPU", replacement),
+                     conf=confs)
+    # assert_rapids_delta_write fails if the Delta write falls back to the CPU.
+    assert_rapids_delta_write(
+        lambda spark: _unparseable_overwrite(spark, data_path + "/GPU", replacement), conf=confs)
+    def read_rows(side):
+        return with_cpu_session(
+            lambda spark: read_delta_path(spark, data_path + "/" + side).sort("id", "p").collect(),
+            conf=confs)
+    assert_equal(read_rows("CPU"), read_rows("GPU"))
+    # The fallback is for the whole table, not per value: partition B is the same instant as its
+    # replacement but is stored with an offset, so it survives and only the null partition (logged
+    # without a value) is removed. A per-value fallback would also remove B.
+    expected = [str([])]
+    assert _removed_partition_values(data_path, "CPU") == expected
+    assert _removed_partition_values(data_path, "GPU") == expected
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_unparseable_partition_value_fails_when_configured(spark_tmp_path):
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.failOnPartitionValueParsingError": "true"})
+    data_path, replacement = _unparseable_dpo_test(spark_tmp_path, confs)
+    versions = {side: _latest_delta_version(data_path, side) for side in ("CPU", "GPU")}
+    def failed_overwrite(side, run):
+        with pytest.raises(Exception) as error:
+            run(lambda spark: _unparseable_overwrite(spark, "{}/{}".format(data_path, side),
+                                                    replacement), conf=confs)
+        assert "not-a-timestamp" in str(error.value)
+        return _dpo_error_identity(error.value)
+
+    errors = {"CPU": failed_overwrite("CPU", with_cpu_session)}
+    # Capture the plans around the expected exception: assert_rapids_delta_write would skip its GPU
+    # checks when the write raises.
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        errors["GPU"] = failed_overwrite("GPU", with_gpu_session)
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "RapidsDeltaWrite") for plan in plans), \
+            "the failing Delta write did not run on the GPU"
+    finally:
+        callback.endCapture()
+    assert errors["CPU"] == errors["GPU"]
+    # The failed overwrite commits nothing.
+    for side in ("CPU", "GPU"):
+        assert _latest_delta_version(data_path, side) == versions[side]
+        assert _removed_partition_values(data_path, side) == []
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+@pytest.mark.parametrize("timestamp_spelling", ["session_local", "utc_trimmed"])
+def test_delta_dpo_sql_insert_overwrite_multiple_partition_columns(spark_tmp_path,
+                                                                    timestamp_spelling):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "America/Los_Angeles",
+        "spark.sql.sources.partitionOverwriteMode": "DYNAMIC"})
+    ts, micros = _dpo_ts_a, _dpo_ts_micros
+    rows = ("(1L, '2020-01-01', '{ts}'), (2L, '2020-01-01', '{b}'), (3L, '2020-02-11', '{ts}'),"
+            " (4L, NULL, '{ts}'), (5L, '2020-02-11', NULL), (6L, '2020-12-31', '{micros}')"
+            ).format(ts=ts, b=_dpo_ts_b, micros=micros)
+    select = ("SELECT id, CAST(d AS DATE) AS d, CAST(ts AS TIMESTAMP) AS ts FROM VALUES {} "
+              "AS t(id, d, ts)")
+
+    def setup(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.sql("CREATE TABLE delta.`{}` (id LONG, d DATE, ts TIMESTAMP) USING delta "
+                      "PARTITIONED BY (d, ts)".format(path))
+            spark.sql("INSERT INTO delta.`{}` ".format(path) + select.format(rows))
+    with_cpu_session(setup, conf=confs)
+    with_cpu_session(lambda spark: _respell_dpo_partition_values(
+        spark, data_path, confs["spark.sql.session.timeZone"],
+        {"timestamp": timestamp_spelling, "date": "unpadded"}), conf=confs)
+
+    # Five replacement partitions match existing ones (including both null-bearing partitions and
+    # the microsecond one) and one is new. The (2020-01-01, ts_b) partition is not replaced.
+    replacement = ("(10L, '2020-01-01', '{ts}'), (11L, '2020-02-11', '{ts}'),"
+                   " (12L, NULL, '{ts}'), (13L, '2020-02-11', NULL),"
+                   " (14L, '2021-01-01', '{ts}'), (15L, '2020-12-31', '{micros}')"
+                   ).format(ts=ts, micros=micros)
+    _assert_sql(data_path, confs, "INSERT OVERWRITE TABLE delta.`{path}` " + select.format(replacement))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+    assert len(_removed_partition_values(data_path, "CPU")) == 5
+
 # ID mapping is supported starting in Delta Lake 2.2, but currently cannot distinguish
 # Delta Lake 2.1 from 2.2 in tests. https://github.com/NVIDIA/spark-rapids/issues/9276
 column_mappings = ["name"]
@@ -2840,6 +3348,916 @@ def test_delta_compaction(spark_tmp_path, enable_deletion_vectors):
         lambda spark, path: spark.read.format("delta").load(path),
         data_path,
         conf=_delta_confs)
+
+
+# Local checkpoint scans and optimized zero-row plans remain on CPU; writes are accelerated.
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "EmptyRelationExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.parametrize("option_name,matching_condition", [
+    ("replaceOn", "target.id = source.id"),
+    ("replaceOn", "target.id <=> source.id"),
+    ("replaceUsing", None)])
+@pytest.mark.parametrize("partitioned", [False, True])
+@pytest.mark.parametrize("use_cdf", [False, True])
+@pytest.mark.parametrize("enable_deletion_vectors", [False, True])
+@pytest.mark.parametrize("empty_source", [False, True])
+def test_delta_selective_replace_save(spark_tmp_path, option_name, matching_condition, partitioned, use_cdf,
+                                     enable_deletion_vectors, empty_source):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE"
+
+    def rows(spark, start, end, multiplier):
+        return spark.range(start, end).selectExpr(
+            "CASE WHEN id = 4 THEN CAST(NULL AS BIGINT) ELSE id END AS id",
+            "CAST(id % 2 AS INT) AS p", f"id * {multiplier} AS value")
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            writer = (rows(spark, 0, 6, 10).coalesce(1).write.format("delta")
+                      .option("delta.enableChangeDataFeed", str(use_cdf).lower())
+                      .option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower()))
+            if partitioned:
+                writer = writer.partitionBy("p")
+            writer.save(data_path + "/" + suffix)
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        source = rows(spark, 2, 2 if empty_source else 7, 100)
+        # save resolves by name, including the replacement keys, despite reordered columns.
+        writer = (source.select("p", "value", "id").alias("source").write.format("delta")
+                  .mode("overwrite"))
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", matching_condition)
+        else:
+            writer = writer.option("replaceUsing", " id, id ")
+        writer.save(path)
+
+    def read_result(spark, path):
+        current = read_delta_path(spark, path)
+        if use_cdf:
+            current = (current.withColumn("_change_type", f.lit("current"))
+                       .withColumn("_commit_version", f.lit(-1).cast("long")))
+            return current.unionByName(read_delta_path_with_cdf(spark, path))
+        return current
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": "all",
+        # CDF for ON/USING must work independently of the replaceWhere CDF flag.
+        "spark.databricks.delta.replaceWhere.dataColumnsWithCDF.enabled": "false"})
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_result, data_path, conf=conf)
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 atomic replacement classification")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_overrides_session_dynamic_overwrite(spark_tmp_path, option_name):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_SESSION_DPO"
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            (spark.range(4).selectExpr("id", "id % 2 AS p").coalesce(1)
+             .write.format("delta").partitionBy("p").save(data_path + "/" + suffix))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        # The matched row moves partitions. DPO would retain its old copy, while
+        # selective replacement must delete it and preserve unrelated target rows.
+        writer = (spark.range(2, 3).selectExpr("id", "99L AS p").alias("source")
+                  .write.format("delta").mode("overwrite"))
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", "target.id = source.id")
+        else:
+            writer = writer.option("replaceUsing", "id")
+        writer.save(path)
+
+    conf = copy_and_update(_delta_confs, {"spark.sql.sources.partitionOverwriteMode": "dynamic"})
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_delta_path, data_path, conf=conf)
+
+    def verify(spark):
+        for suffix in ["CPU", "GPU"]:
+            rows = read_delta_path(spark, data_path + "/" + suffix).orderBy("id").collect()
+            assert [(row.id, row.p) for row in rows] == [(0, 0), (1, 1), (2, 99), (3, 1)]
+        assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path)
+
+    with_cpu_session(verify, conf=_delta_confs)
+
+
+# CPU broadcasts are restricted to table-state metadata by assert_rapids_delta_write.
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement DVs")
+@pytest.mark.parametrize("option_name,matching_condition", [
+    ("replaceOn", "target.id = source.id"),
+    ("replaceOn", "target.id <=> source.id"),
+    ("replaceOn", "target.id >= source.id AND target.id < source.id + 2"),
+    ("replaceUsing", None)])
+@pytest.mark.parametrize("use_cdf", [False, True])
+@pytest.mark.parametrize("use_metadata_row_index", [False, True])
+@pytest.mark.parametrize("aqe_enabled", [False, True])
+# Disabling broadcast also shuffles Delta's CPU table-state/touched-file metadata join.
+@pytest.mark.parametrize("broadcast_enabled", [
+    pytest.param(False, marks=pytest.mark.allow_non_gpu_conditional(True, "SortMergeJoinExec")),
+    True])
+def test_delta_selective_replace_existing_dvs(spark_tmp_path, option_name, matching_condition,
+                                              use_cdf, use_metadata_row_index, aqe_enabled,
+                                              broadcast_enabled):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_EXISTING_DVS"
+
+    def rows(spark, start, end, multiplier):
+        return spark.range(start, end).selectExpr(
+            "CASE WHEN id = 48 THEN CAST(NULL AS BIGINT) ELSE id END AS id",
+            "CAST(id % 2 AS INT) AS p", f"id * {multiplier} AS value")
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            path = data_path + "/" + suffix
+            (rows(spark, 0, 128, 10).coalesce(1).write.format("delta").partitionBy("p")
+             .option("delta.enableChangeDataFeed", str(use_cdf).lower())
+             .option("delta.enableDeletionVectors", "true").save(path))
+            # Give both partitions an existing DV before the GPU replacement scan.
+            spark.sql(f"DELETE FROM delta.`{path}` WHERE id IN (0, 1)").collect()
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        # The second replacement must merge existing DVs on the original files, and
+        # delete matching rows in the files inserted by the first replacement.
+        for start, end, multiplier in [(32, 64, 100), (48, 80, 1000)]:
+            writer = (rows(spark, start, end, multiplier).alias("source")
+                      .write.format("delta").mode("overwrite"))
+            if option_name == "replaceOn":
+                writer = writer.option("targetAlias", "target").option(
+                    "replaceOn", matching_condition)
+            else:
+                writer = writer.option("replaceUsing", "id")
+            writer.save(path)
+
+    def read_result(spark, path):
+        current = read_delta_path(spark, path)
+        if use_cdf:
+            current = (current.withColumn("_change_type", f.lit("current"))
+                       .withColumn("_commit_version", f.lit(-1).cast("long")))
+            return current.unionByName(read_delta_path_with_cdf(spark, path))
+        return current
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex":
+            str(use_metadata_row_index).lower(),
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": "all"})
+    if not broadcast_enabled:
+        conf.update({"spark.sql.autoBroadcastJoinThreshold": "-1",
+                     "spark.sql.adaptive.autoBroadcastJoinThreshold": "-1"})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    # The insertion source is a checkpointed Range, so a GPU file scan proves that the
+    # target scan used for DV matching ran on GPU rather than upstream metadata DELETE.
+    matching_join = ("GpuBroadcastNestedLoopJoinExec" if matching_condition is not None and
+                     "source.id + 2" in matching_condition else
+                     "GpuBroadcastHashJoinExec" if broadcast_enabled else "GpuShuffledHashJoinExec")
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+                             expected_classes=["GpuFileSourceScanExec", matching_join],
+                             check_metadata_broadcasts=True)
+    cpu_result = with_cpu_session(lambda spark: read_result(spark, data_path + "/CPU").collect())
+    gpu_result = with_cpu_session(lambda spark: read_result(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_result, key=lambda row: repr(row)),
+                 sorted(gpu_result, key=lambda row: repr(row)))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("source_format", ["delta", "parquet"])
+@pytest.mark.parametrize("materialize", ["auto", "all"])
+@pytest.mark.parametrize("aqe_enabled", [False, True])
+def test_delta_selective_replace_file_source_composite_keys(
+        spark_tmp_path, option_name, source_format, materialize, aqe_enabled):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_FILE_SOURCE"
+    source_path = data_path + "/SOURCE"
+    # Upstream's replaceUsing helper cannot match a quoted dotted key to its source
+    # attribute. Use its supported plain identifiers, and exercise quoted keys with ON.
+    key_name = "key.id" if option_name == "replaceOn" else "key_id"
+
+    def rows(spark, start, end, multiplier):
+        # Each key occurs in both partitions. Matching only one key column would delete
+        # unrelated rows; the dotted name also requires upstream identifier parsing.
+        return spark.range(start, end).selectExpr(
+            f"id % 8 AS `{key_name}`", "CAST((id DIV 8) % 2 AS INT) AS Bucket",
+            f"id * {multiplier} AS value")
+
+    def setup_tables(spark):
+        (rows(spark, 6, 12, 100).selectExpr("value", "Bucket", f"`{key_name}`")
+         .coalesce(1).write.format(source_format).save(source_path))
+        for suffix in ["CPU", "GPU"]:
+            path = data_path + "/" + suffix
+            (rows(spark, 0, 64, 10).coalesce(1).write.format("delta").partitionBy("Bucket")
+             .option("delta.enableChangeDataFeed", "true")
+             .option("delta.enableDeletionVectors", "true").save(path))
+            spark.sql(f"DELETE FROM delta.`{path}` WHERE value IN (0, 10)").collect()
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def materialized_source_ids(spark):
+        return {info.id() for info in spark.sparkContext._jsc.sc().getRDDStorageInfo()
+                if (info.name() or "").startswith("mergeMaterializedSource")}
+
+    def overwrite(spark, path):
+        before = materialized_source_ids(spark)
+        source = spark.read.format(source_format).load(source_path).alias("source")
+        writer = source.write.format("delta").mode("overwrite")
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", "target.`key.id` = source.`key.id` AND target.Bucket = source.BUCKET")
+        else:
+            writer = writer.option("replaceUsing", " key_id, Bucket ")
+        writer.save(path)
+        assert materialized_source_ids(spark) == before, "Replacement leaked its checkpoint RDD"
+
+    def read_result(spark, path):
+        current = (read_delta_path(spark, path).withColumn("_change_type", f.lit("current"))
+                   .withColumn("_commit_version", f.lit(-1).cast("long")))
+        return current.unionByName(read_delta_path_with_cdf(spark, path))
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.sql.caseSensitive": "false",
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": materialize})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+                             expected_classes=["GpuFileSourceScanExec", "GpuBroadcastHashJoinExec"],
+                             check_metadata_broadcasts=True)
+    cpu_result = with_cpu_session(lambda spark: read_result(spark, data_path + "/CPU").collect())
+    gpu_result = with_cpu_session(lambda spark: read_result(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_result, key=lambda row: repr(row)),
+                 sorted(gpu_result, key=lambda row: repr(row)))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 scoped DELETE validation")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_preserves_subquery_validation(spark_tmp_path, option_name):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_SUBQUERY_SCOPE"
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            path = data_path + "/" + suffix
+            spark.range(4).selectExpr("id", "id AS value").write.format("delta").save(path)
+            spark.sql(f"ALTER TABLE delta.`{path}` ADD CONSTRAINT positive CHECK (value >= 0)")
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        key = spark.sparkContext._jvm.org.apache.spark.sql.delta.sources.DeltaSQLConf \
+            .ALLOW_EXISTS_SUBQUERY_IN_DELETE().key()
+        original = spark.conf.get(key, None)
+
+        def write(multiplier):
+            writer = (spark.range(2, 6).selectExpr("id", f"id * {multiplier} AS value")
+                      .alias("source").write.format("delta").mode("overwrite"))
+            if option_name == "replaceOn":
+                writer = writer.option("targetAlias", "target").option(
+                    "replaceOn", "target.id = source.id")
+            else:
+                writer = writer.option("replaceUsing", "id")
+            writer.save(path)
+
+        write(10)
+        assert spark.conf.get(key, None) == original
+        with pytest.raises(Exception, match="DELTA_REPLACE_ON_OR_USING_TABLE_CONSTRAINT_VIOLATION"):
+            write(-10)
+        assert spark.conf.get(key, None) == original
+        # Both checks run in the same session after success and failure. The internal
+        # EXISTS allowance must not enable user DELETE or replaceWhere subqueries.
+        with pytest.raises(Exception, match="Subqueries are not supported"):
+            spark.sql(f"DELETE FROM delta.`{path}` AS target WHERE EXISTS "
+                      "(SELECT 1 FROM range(2) source WHERE source.id = target.id)").collect()
+        with pytest.raises(Exception, match="Subqueries are not supported"):
+            (spark.range(2, 6).selectExpr("id", "id AS value").write.format("delta")
+             .mode("overwrite").option("replaceWhere", "id IN (SELECT 1)").save(path))
+        assert spark.conf.get(key, None) == original
+
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_delta_path, data_path,
+                                               conf=_delta_confs)
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 materialized replacement")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("aqe_enabled", [False, True])
+def test_delta_selective_replace_materialized_shuffle_error_is_atomic(
+        spark_tmp_path, option_name, aqe_enabled):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_SHUFFLE_FAILURE"
+    source_path = spark_tmp_path + "/SHUFFLE_FAILURE_SOURCE"
+
+    def setup_table(spark):
+        (spark.range(16).coalesce(1).write.format("delta")
+         .option("delta.enableDeletionVectors", "false")
+         .option("delta.enableChangeDataFeed", "true").save(data_path))
+        spark.range(8, 20).coalesce(1).write.parquet(source_path)
+
+    with_cpu_session(setup_table, conf=_delta_confs)
+
+    def overwrite(spark):
+        def materialized_source_ids():
+            return {info.id() for info in spark.sparkContext._jsc.sc().getRDDStorageInfo()
+                    if (info.name() or "").startswith("mergeMaterializedSource")}
+
+        before = materialized_source_ids()
+        source = spark.read.parquet(source_path).alias("source")
+        writer = source.write.format("delta").mode("overwrite")
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", "target.id = source.id")
+        else:
+            writer = writer.option("replaceUsing", "id")
+        try:
+            writer.save(data_path)
+        finally:
+            assert materialized_source_ids() == before
+
+    # Upstream 4.3 loses input_file_name() across the matching shuffle, including on CPU.
+    # Preserve its error, checkpoint cleanup, and atomicity rather than accepting a
+    # partially committed replacement. Disable broadcasts to reproduce it on small data.
+    conf = copy_and_update(_delta_confs, {
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.adaptive.autoBroadcastJoinThreshold": "-1",
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": "all"})
+    assert_gpu_and_cpu_error(overwrite, conf, "DELTA_FILE_TO_OVERWRITE_NOT_FOUND")
+
+    def verify_unchanged(spark):
+        assert [row.id for row in read_delta_path(spark, data_path).orderBy("id").collect()] \
+            == list(range(16))
+        assert spark.sql(f"DESCRIBE HISTORY delta.`{data_path}`").count() == 1
+        assert read_delta_path_with_cdf(spark, data_path).count() == 16
+
+    with_cpu_session(verify_unchanged, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow, "RDDScanExec",
+               "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 command fallback")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_command_fallback(spark_tmp_path, spark_tmp_table_factory, option_name):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_COMMAND_FALLBACK"
+
+    tables = {suffix: spark_tmp_table_factory.get() for suffix in ["CPU", "GPU"]}
+
+    def setup(spark):
+        for suffix, table in tables.items():
+            (spark.range(8).write.format("delta").option("path", data_path + "/" + suffix)
+             .saveAsTable(table))
+    with_cpu_session(setup, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        (spark.range(2, 4).alias("source").write.format("delta").mode("overwrite")
+         .option("targetAlias", "target").option(option_name, condition)
+         .insertInto(tables[path.rsplit("/", 1)[1]]))
+
+    conf = copy_and_update(_delta_confs, {"spark.rapids.sql.format.delta.write.enabled": "false"})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    plans = []
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+                             required_gpu_classes=[], require_non_empty=True,
+                             captured_plans_out=plans)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    assert any(callback.didFallBack(plan, "ExecutedCommandExec") and
+               callback.contains(plan, "DeltaInsertReplaceOnOrUsingCommand") for plan in plans)
+    assert not any(callback.contains(plan, "GpuInsertReplaceOnOrUsingCommand") for plan in plans)
+    assert not any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans)
+    cpu_rows = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/CPU").collect())
+    gpu_rows = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_rows), sorted(gpu_rows))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+# Only the matching join is disabled; the prepared command and replacement writes stay on GPU.
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 internal DELETE fallback")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("enable_deletion_vectors", [False, True])
+def test_delta_selective_replace_matching_fallback(spark_tmp_path, spark_tmp_table_factory,
+                                                   option_name, enable_deletion_vectors):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_MATCHING_FALLBACK"
+
+    tables = {suffix: spark_tmp_table_factory.get() for suffix in ["CPU", "GPU"]}
+
+    def setup(spark):
+        for suffix, table in tables.items():
+            (spark.range(8).write.format("delta")
+             .option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+             .option("delta.enableChangeDataFeed", "true")
+             .option("path", data_path + "/" + suffix).saveAsTable(table))
+    with_cpu_session(setup, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        (spark.range(2, 4).alias("source").write.format("delta").mode("overwrite")
+         .option("targetAlias", "target").option(option_name, condition)
+         .insertInto(tables[path.rsplit("/", 1)[1]]))
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.rapids.sql.exec.BroadcastHashJoinExec": "false"})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    plans = []
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+                             expected_command="GpuInsertReplaceOnOrUsingCommand",
+                             expected_classes=["GpuFileSourceScanExec", "GpuRapidsDeltaWriteExec"],
+                             forbidden_cpu_fallback_classes=["RapidsDeltaWriteExec"],
+                             require_non_empty=True,
+                             captured_plans_out=plans)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    # Check LeftSemi/LeftAnti: the metadata broadcast is an inner join and cannot satisfy this.
+    assert any(callback.didFallBack(plan, "BroadcastHashJoinExec") and
+               ("LeftSemi" in str(plan) or "LeftAnti" in str(plan)) for plan in plans), \
+        "No CPU matching join was captured inside the replacement DELETE"
+    cpu_rows = with_cpu_session(lambda spark: read_delta_path_with_cdf(
+        spark, data_path + "/CPU").collect())
+    gpu_rows = with_cpu_session(lambda spark: read_delta_path_with_cdf(
+        spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_rows, key=repr), sorted(gpu_rows, key=repr))
+    cpu_current = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/CPU").collect())
+    gpu_current = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_current), sorted(gpu_current))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+def _selective_replace_matching_classes(option_name, condition, empty_source=False,
+                                       enable_deletion_vectors=False, aqe_enabled=False):
+    # Empty sources and false/null constants can eliminate target matching altogether.
+    if empty_source or condition in ("false", "CAST(NULL AS BOOLEAN)"):
+        return []
+    if option_name == "replaceOn" and "target." not in condition:
+        # Uncorrelated predicates become a scalar test. Non-DV DELETE is metadata-only;
+        # persistent DVs still read target rows, and AQE folds the existence join to a filter.
+        return (["GpuFileSourceScanExec"] + (["GpuFilterExec"] if aqe_enabled else [])
+                if enable_deletion_vectors else [])
+    classes = ["GpuFileSourceScanExec"]
+    if option_name == "replaceUsing" or "target.id = source.id" in condition:
+        return classes + ["GpuBroadcastHashJoinExec"]
+    if enable_deletion_vectors and aqe_enabled:
+        # AQE folds the existence side into a target filter; DV row matching uses a hash join.
+        return classes + ["GpuFilterExec", "GpuBroadcastHashJoinExec"]
+    classes.append("GpuBroadcastNestedLoopJoinExec")
+    if " IN (SELECT" in condition:
+        classes.append("GpuBroadcastHashJoinExec")
+    return classes
+
+
+# CPU hash broadcasts are allowed only for Delta's table-state metadata join, checked below.
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "CollectLimitExec",
+               "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.parametrize("option_name,matching_condition", [
+    ("replaceOn", "target.id = source.id"), ("replaceOn", "target.id = 1"),
+    ("replaceOn", "true"), ("replaceOn", "target.id IN (SELECT 1)"),
+    ("replaceUsing", None)])
+@pytest.mark.parametrize("api", ["saveAsTable", "insertInto"])
+@pytest.mark.parametrize("materialize", ["all", "none"])
+def test_delta_selective_replace_table_apis(spark_tmp_path, spark_tmp_table_factory,
+                                          option_name, matching_condition, api, materialize):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_TABLE"
+    tables = {suffix: spark_tmp_table_factory.get() for suffix in ["CPU", "GPU"]}
+
+    def setup_tables(spark):
+        for suffix, table in tables.items():
+            (spark.range(6).selectExpr("id", "id * 10 AS value").write.format("delta")
+             .option("path", data_path + "/" + suffix).saveAsTable(table))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        source = spark.createDataFrame(
+            spark.sparkContext.parallelize([(i, i * 100) for i in range(2, 7)], 2),
+            "id long, value long")
+        if api == "saveAsTable":
+            source = source.select("value", "id")  # by-name key resolution
+        else:
+            source = source.selectExpr("id", "value AS renamed_value")  # by-position values
+        writer = f.broadcast(source).alias("source").write.format("delta").mode("overwrite")
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", matching_condition)
+        else:
+            writer = writer.option("replaceUsing", "id")
+        table = tables[path.rsplit("/", 1)[1]]
+        if api == "saveAsTable":
+            writer.option("path", path).saveAsTable(table)
+        else:
+            writer.insertInto(table)
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": materialize})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    assert_rapids_delta_write(
+        lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+        expected_command="GpuInsertReplaceOnOrUsingCommand" if api == "insertInto" else None,
+        expected_classes=_selective_replace_matching_classes(option_name, matching_condition),
+        require_non_empty=True, check_metadata_broadcasts=True)
+    cpu_rows = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/CPU").collect())
+    gpu_rows = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_rows, key=lambda row: repr(row)),
+                 sorted(gpu_rows, key=lambda row: repr(row)))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.parametrize("options,error", [
+    ({"replaceUsing": ""}, "must not contain empty column names"),
+    ({"replaceUsing": "id,"}, "must not contain empty column names"),
+    ({"replaceUsing": "missing"}, "UNRESOLVED_INSERT_REPLACE_USING_COLUMN"),
+    ({"replaceUsing": "id, (SELECT id)"}, "PARSE_SYNTAX_ERROR"),
+    ({"replaceOn": "id = source.id"}, "DELTA_INSERT_REPLACE_ON_AMBIGUOUS_COLUMNS_IN_CONDITION"),
+    ({"replaceOn": "target.missing = source.id"},
+     "DELTA_INSERT_REPLACE_ON_UNRESOLVED_COLUMNS_IN_CONDITION"),
+    ({"replaceWhere": "id IN (SELECT 1)"}, "Subqueries are not supported"),
+    ({"replaceUsing": "id", "overwriteSchema": "true"}, "DELTA_INCOMPATIBLE_DATAFRAME_OPTIONS"),
+    ({"replaceUsing": "id", "dataChange": "false"}, "DELTA_INCOMPATIBLE_DATAFRAME_OPTIONS"),
+    ({"replaceUsing": "id", "partitionOverwriteMode": "static"},
+     "DELTA_DYNAMIC_PARTITION_OVERWRITE_INCOMPATIBLE_REPLACE_ON_OR_USING"),
+    ({"replaceUsing": "id", "replaceWhere": "id = 1"},
+     "DELTA_OVERWRITE_BY_FILTER_INCOMPATIBLE_REPLACE_ON_OR_USING"),
+    ({"replaceUsing": "id", "replaceOn": "target.id = source.id"},
+     "DELTA_INCOMPATIBLE_DATAFRAME_OPTIONS")])
+def test_delta_selective_replace_errors(spark_tmp_path, options, error):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_ERROR"
+    with_cpu_session(lambda spark: spark.range(4).write.format("delta").save(data_path),
+                     conf=_delta_confs)
+
+    def overwrite(spark):
+        (spark.range(2, 6).alias("source").write.format("delta").mode("overwrite")
+         .option("targetAlias", "target").options(**options).save(data_path))
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": "none"})
+    assert_gpu_and_cpu_error(overwrite, conf, error)
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_constraint_violation(spark_tmp_path, option_name):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_CONSTRAINT"
+
+    def setup_table(spark):
+        (spark.range(4).selectExpr("id", "id AS value").write.format("delta").save(data_path))
+        spark.sql(f"ALTER TABLE delta.`{data_path}` ADD CONSTRAINT positive CHECK (value >= 0)")
+
+    with_cpu_session(setup_table, conf=_delta_confs)
+
+    def overwrite(spark):
+        writer = (spark.range(2, 6).selectExpr("id", "-id AS value").alias("source")
+                  .write.format("delta").mode("overwrite"))
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", "target.id = source.id")
+        else:
+            writer = writer.option("replaceUsing", "id")
+        writer.save(data_path)
+
+    assert_gpu_and_cpu_error(overwrite, _delta_confs,
+                             "DELTA_REPLACE_ON_OR_USING_TABLE_CONSTRAINT_VIOLATION")
+    assert with_cpu_session(lambda spark: spark.read.format("delta").load(data_path).count()) == 4
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+def test_delta_selective_replace_using_misaligned_insert(spark_tmp_path, spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_MISALIGNED"
+
+    def setup_table(spark):
+        (spark.range(4).selectExpr("id", "id * 10 AS value").write.format("delta")
+         .option("path", data_path).saveAsTable(table))
+
+    with_cpu_session(setup_table, conf=_delta_confs)
+
+    def overwrite(spark):
+        (spark.range(2, 6).selectExpr("id * 100 AS value", "id").write.format("delta")
+         .mode("overwrite").option("replaceUsing", "id").insertInto(table))
+
+    assert_gpu_and_cpu_error(overwrite, _delta_confs,
+                             "INSERT_REPLACE_USING_DISALLOW_MISALIGNED_COLUMNS")
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 4
+
+
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 selective replacement")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_preserves_clustering(spark_tmp_path, option_name):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_CLUSTERING"
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            path = data_path + "/" + suffix
+            spark.sql(f"CREATE TABLE delta.`{path}` (id LONG, value LONG) "
+                      "USING DELTA CLUSTER BY (id)")
+            (spark.range(6).selectExpr("id", "id * 10 AS value").write.format("delta")
+             .mode("append").save(path))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        writer = (spark.range(2, 7).selectExpr("id", "id * 100 AS value").alias("source")
+                  .write.format("delta").mode("overwrite"))
+        if option_name == "replaceOn":
+            writer = writer.option("targetAlias", "target").option(
+                "replaceOn", "target.id = source.id")
+        else:
+            writer = writer.option("replaceUsing", "id")
+        writer.save(path)
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        overwrite, read_delta_path, data_path, conf=_delta_confs)
+
+    def check_metadata(spark):
+        for suffix in ["CPU", "GPU"]:
+            path = data_path + "/" + suffix
+            clustering = spark.sql(f"DESCRIBE DETAIL delta.`{path}`").select("clusteringColumns")
+            assert clustering.first()[0] == ["id"]
+        assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path)
+
+    with_cpu_session(check_metadata)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 target alias resolution")
+@pytest.mark.parametrize("data_columns_enabled", [False, True])
+def test_delta_selective_replace_where_alias(spark_tmp_path, data_columns_enabled):
+    data_path = spark_tmp_path + "/REPLACE_WHERE_ALIAS"
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            (spark.range(4).selectExpr("id", "id % 2 AS p").write.format("delta")
+             .partitionBy("p").save(data_path + "/" + suffix))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        (spark.range(7, 8).selectExpr("id", "id % 2 AS p").write.format("delta")
+         .mode("overwrite").option("replaceWhere", "target.p = 1")
+         .option("targetAlias", "target").save(path))
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.replaceWhere.dataColumns.enabled": str(data_columns_enabled).lower()})
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_delta_path, data_path, conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 writer feature gates")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("api", ["save", "v2_overwrite", "v2_append", "v2_dpo"])
+def test_delta_selective_replace_disabled_option(spark_tmp_path, option_name, api):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_DISABLED"
+    with_cpu_session(lambda spark: spark.range(4).selectExpr("id", "id % 2 AS p")
+                     .write.format("delta").partitionBy("p").save(data_path), conf=_delta_confs)
+
+    def overwrite(spark):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        source = spark.range(2, 6).selectExpr("id", "id % 2 AS p").alias("source")
+        if api == "save":
+            (source.write.format("delta").mode("overwrite").option("targetAlias", "target")
+             .option(option_name, condition).save(data_path))
+        else:
+            writer = source.writeTo(f"delta.`{data_path}`").option(option_name, condition)
+            if api == "v2_overwrite":
+                writer.overwrite(f.lit(True))
+            elif api == "v2_append":
+                writer.append()
+            else:
+                writer.overwritePartitions()
+
+    conf = copy_and_update(_delta_confs, {
+        f"spark.databricks.delta.{option_name}.dataframe.writer.enabled": "false"})
+    assert_gpu_and_cpu_error(overwrite, conf, "DELTA_OPERATION_NOT_ALLOWED")
+
+    def unchanged(spark):
+        assert [row.id for row in read_delta_path(spark, data_path).orderBy("id").collect()] \
+            == list(range(4))
+        assert spark.sql(f"DESCRIBE HISTORY delta.`{data_path}`").count() == 1
+    with_cpu_session(unchanged, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 write origin parity")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("api", ["v2_overwrite", "sql_overwrite"])
+def test_delta_selective_replace_plain_writer_rejected(
+        spark_tmp_path, spark_tmp_table_factory, option_name, api):
+    table = spark_tmp_table_factory.get()
+    path = spark_tmp_path + "/PLAIN_REPLACEMENT"
+    with_cpu_session(lambda spark: spark.range(4).write.format("delta")
+                     .option("path", path).saveAsTable(table), conf=_delta_confs)
+
+    def overwrite(spark):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        if api == "v2_overwrite":
+            (spark.range(2, 6).selectExpr("id AS id").writeTo(table).option(option_name, condition)
+             .overwrite(f.lit(True)))
+        else:
+            spark.sql(f"INSERT OVERWRITE {table} WITH ('{option_name}'='{condition}') "
+                      "SELECT id FROM range(2, 6)").collect()
+
+    error = ("DELTA_INSERT_REPLACE_ON_UNRESOLVED_COLUMNS_IN_CONDITION"
+             if option_name == "replaceOn" else "replaceUsing requires targetAlias")
+    assert_gpu_and_cpu_error(overwrite, _delta_confs, error)
+
+    def unchanged(spark):
+        assert [row.id for row in spark.table(table).orderBy("id").collect()] == list(range(4))
+        assert spark.sql(f"DESCRIBE HISTORY {table}").count() == 1
+    with_cpu_session(unchanged, conf=_delta_confs)
+
+
+# The plain writer accepts a constant replaceOn on a projected source. Its uncorrelated
+# EXISTS is a scalar query whose driver-side CollectLimit remains on CPU.
+@allow_non_gpu(*delta_meta_allow, "CollectLimitExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 replaceOn parity")
+def test_delta_selective_replace_v2_constant_on(spark_tmp_path):
+    data_path = spark_tmp_path + "/V2_CONSTANT_ON"
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            spark.range(4).write.format("delta").save(data_path + "/" + suffix)
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        (spark.range(2, 6).selectExpr("id AS id").writeTo(f"delta.`{path}`")
+         .option("replaceOn", "true").overwrite(f.lit(True)))
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_delta_path, data_path, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 append ignores replacement")
+@pytest.mark.parametrize("api", ["v2_append", "insert_into"])
+def test_delta_selective_replace_plain_append(spark_tmp_path, api):
+    data_path = spark_tmp_path + "/PLAIN_APPEND"
+    with_cpu_session(lambda spark: _create_cpu_gpu_tables(spark, data_path, "id bigint"),
+                     conf=_delta_confs)
+
+    def append(spark, path):
+        # Plain append does not resolve this malformed condition or materialize its source.
+        writer = spark.range(3).writeTo(f"delta.`{path}`") if api == "v2_append" else None
+        if writer is not None:
+            writer.option("replaceOn", "invalid predicate (").append()
+        else:
+            (spark.range(3).write.option("replaceOn", "invalid predicate (")
+             .insertInto(f"delta.`{path}`"))
+    assert_gpu_and_cpu_writes_are_equal_collect(append, read_delta_path, data_path, conf=_delta_confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 validation order")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_ignore_invalid_options(spark_tmp_path, option_name):
+    path = spark_tmp_path + "/IGNORE_REPLACEMENT"
+    with_cpu_session(lambda spark: spark.range(4).write.format("delta").save(path), conf=_delta_confs)
+
+    def ignore(spark):
+        (spark.range(2).write.format("delta").mode("ignore")
+         .option(option_name, "target.id = source.id" if option_name == "replaceOn" else "id")
+         .option("dataChange", "false").save(path))
+    with_cpu_session(ignore, conf=_delta_confs)
+    with_gpu_session(ignore, conf=_delta_confs)
+    assert with_cpu_session(lambda spark: read_delta_path(spark, path).count()) == 4
+    assert with_cpu_session(lambda spark: spark.sql(f"DESCRIBE HISTORY delta.`{path}`").count()) == 1
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 validation precedence")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("mode,error", [("errorifexists", "DELTA_PATH_EXISTS"),
+                                       ("overwrite", "schema mismatch")])
+def test_delta_selective_replace_validation_precedence(spark_tmp_path, option_name, mode, error):
+    path = spark_tmp_path + "/VALIDATION_PRECEDENCE"
+    with_cpu_session(lambda spark: spark.range(4).write.format("delta").save(path), conf=_delta_confs)
+
+    def overwrite(spark):
+        (spark.range(2).selectExpr("id", "id AS extra").write.format("delta").mode(mode)
+         .option(option_name, "target.id = source.id" if option_name == "replaceOn" else "id")
+         .option("dataChange", "false").save(path))
+    assert_gpu_and_cpu_error(overwrite, _delta_confs, error)
+    assert with_cpu_session(lambda spark: spark.sql(f"DESCRIBE HISTORY delta.`{path}`").count()) == 1
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 option validation")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_v2_rejected(spark_tmp_path, spark_tmp_table_factory, option_name):
+    table = spark_tmp_table_factory.get()
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_V2"
+    with_cpu_session(lambda spark: spark.range(4).write.format("delta")
+                     .option("path", data_path).saveAsTable(table), conf=_delta_confs)
+
+    def overwrite(spark):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        (spark.range(2, 6).alias("source").writeTo(table).using("delta")
+         .option("targetAlias", "target").option(option_name, condition).replace())
+
+    assert_gpu_and_cpu_error(overwrite, _delta_confs,
+                             "DELTA_DFV2_CREATE_REPLACE_INCOMPATIBLE_REPLACE_ON_OR_USING")
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 4
+
+
+# Only metadata hash broadcasts and the scalar-subquery CollectLimit stay on CPU.
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "EmptyRelationExec", "CollectLimitExec",
+               "BroadcastExchangeExec", "BroadcastHashJoinExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 replaceOn expression resolution")
+@pytest.mark.parametrize("condition", [
+    "target.id IN (SELECT 1)", "target.id = 1", "true", "false",
+    "CAST(NULL AS BOOLEAN)", "source.id = 3",
+    "target.id = source.id AND source.id IN (SELECT 3)",
+    pytest.param("target.id = (SELECT 1)", id="scalar_subquery"),
+    pytest.param("EXISTS (SELECT 1)", id="exists_subquery"),
+    pytest.param("target.id IN (SELECT id FROM range(1, 3))", id="range_subquery")])
+@pytest.mark.parametrize("aqe_enabled", [False, True])
+@pytest.mark.parametrize("enable_deletion_vectors", [False, True])
+@pytest.mark.parametrize("empty_source", [False, True])
+@pytest.mark.parametrize("materialize", ["none", "auto", "all"])
+def test_delta_selective_replace_on_expressions(spark_tmp_path, condition, aqe_enabled,
+                                               enable_deletion_vectors, empty_source, materialize):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_ON_EXPRESSIONS"
+
+    def setup_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            (spark.range(4).write.format("delta")
+             .option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+             .option("delta.enableChangeDataFeed", "true").save(data_path + "/" + suffix))
+
+    with_cpu_session(setup_tables, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        # Keep source cardinality opaque; broadcast its existence/key input to avoid
+        # upstream's non-DV file-identity failure when the target side is exchanged.
+        source = spark.createDataFrame(
+            spark.sparkContext.parallelize([(i,) for i in range(2, 2 if empty_source else 6)], 2),
+            "id long")
+        (f.broadcast(source).alias("source").write.format("delta")
+         .mode("overwrite").option("targetAlias", "target").option("replaceOn", condition)
+         .save(path))
+
+    def read_result(spark, path):
+        current = (read_delta_path(spark, path).withColumn("_change_type", f.lit("current"))
+                   .withColumn("_commit_version", f.lit(-1).cast("long")))
+        return current.unionByName(read_delta_path_with_cdf(spark, path))
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": materialize})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    assert_rapids_delta_write(
+        lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+        expected_classes=_selective_replace_matching_classes(
+            "replaceOn", condition, empty_source, enable_deletion_vectors, aqe_enabled),
+        require_non_empty=True, check_metadata_broadcasts=True)
+    cpu_rows = with_cpu_session(lambda spark: read_result(spark, data_path + "/CPU").collect())
+    gpu_rows = with_cpu_session(lambda spark: read_result(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_rows, key=lambda row: repr(row)),
+                 sorted(gpu_rows, key=lambda row: repr(row)))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -2951,3 +4369,987 @@ def test_delta_db173_dml_aqe_gpu_stub(
     metric = "numTargetRowsUpdated" if operation == "merge" else "numUpdatedRows"
     for path in (cpu_path, gpu_path):
         assert int(get_last_operation_metrics(path)[metric]) == changed_rows
+
+
+def _data_page_types(spark, table):
+    """Names of the Parquet data page classes (DataPageV1/DataPageV2) read from the page headers
+    of every data file in the table."""
+    jvm = spark.sparkContext._jvm
+    conf = spark.sparkContext._jsc.hadoopConfiguration()
+    files = spark.table(table).inputFiles()
+    assert files
+    page_types = set()
+    for file in files:
+        reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
+            conf, jvm.org.apache.hadoop.fs.Path(jvm.java.net.URI(file)))
+        try:
+            columns = reader.getFooter().getFileMetaData().getSchema().getColumns()
+            row_group = reader.readNextRowGroup()
+            while row_group is not None:
+                for column in columns:
+                    page_reader = row_group.getPageReader(column)
+                    page = page_reader.readPage()
+                    while page is not None:
+                        page_types.add(page.getClass().getSimpleName())
+                        page = page_reader.readPage()
+                row_group = reader.readNextRowGroup()
+        finally:
+            reader.close()
+    return page_types
+
+
+@contextmanager
+def _hadoop_writer_version(spark, enabled):
+    """Requests Parquet v2 through the live Hadoop configuration while `enabled`. Spark before 4.2
+    drops Delta's own write option, so this is what makes a CPU write really produce DataPageV2
+    there, whichever of the Delta settings asked for it."""
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    previous = hadoop_conf.get("parquet.writer.version")
+    if enabled:
+        hadoop_conf.set("parquet.writer.version", "v2")
+    try:
+        yield
+    finally:
+        if previous is None:
+            hadoop_conf.unset("parquet.writer.version")
+        else:
+            hadoop_conf.set("parquet.writer.version", previous)
+
+
+def _wrote_on_gpu(func, conf):
+    """Runs `func` in a GPU session and returns whether a GPU Delta write was executed."""
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(func, conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        # The CPU RapidsDeltaWriteExec matches a looser name, so a fallback would look like a
+        # GPU write.
+        return any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans)
+    finally:
+        callback.endCapture()
+
+
+_parquet_format_version_fallback = {
+    "append": "AppendDataExecV1",
+    "ctas": "AtomicCreateTableAsSelectExec",
+    "rtas": "AtomicReplaceTableAsSelectExec"
+}
+
+# CREATE OR REPLACE TABLE ... AS SELECT on an existing table also stages an overwrite.
+_parquet_format_version_allow = ["AppendDataExecV1", "AtomicCreateTableAsSelectExec",
+                                 "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1",
+                                 "ExecutedCommandExec", *delta_meta_allow]
+
+_parquet_format_version_query = "SELECT id, CAST(id AS STRING) AS s FROM range(64)"
+
+
+def _parquet_format_version_writer(base_table, write_mode, version, v2_pages=False):
+    """Returns a function writing the test data into a table. `version` is the value of
+    delta.parquet.format.version, or None to leave the property unset. With `v2_pages` the CPU
+    is also asked for DataPageV2 through the Hadoop configuration."""
+    property_sql = (f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}')"
+                    if version is not None else "")
+    if write_mode == "append":
+        def create_tables(spark):
+            for suffix in ("cpu", "gpu"):
+                spark.sql(f"CREATE TABLE {base_table}_{suffix} (id BIGINT, s STRING) "
+                          f"USING DELTA {property_sql}")
+        with_cpu_session(create_tables, conf=delta_writes_enabled_conf)
+
+    def write_table(spark, table):
+        with _hadoop_writer_version(spark, v2_pages):
+            if write_mode == "append":
+                spark.sql(f"INSERT INTO {table} {_parquet_format_version_query}")
+            else:
+                command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+                spark.sql(f"{command} {table} USING DELTA {property_sql} "
+                          f"AS {_parquet_format_version_query}")
+    return write_table
+
+
+def _page_types_and_rows(base_table, conf):
+    """Page types of the CPU and GPU written tables, after checking they hold the same rows."""
+    def read(spark, table):
+        return spark.table(table).orderBy("id").collect()
+    assert_equal(
+        with_cpu_session(lambda spark: read(spark, f"{base_table}_cpu"), conf=conf),
+        with_cpu_session(lambda spark: read(spark, f"{base_table}_gpu"), conf=conf))
+    return tuple(
+        with_cpu_session(lambda spark: _data_page_types(spark, f"{base_table}_{suffix}"),
+                         conf=conf) for suffix in ("cpu", "gpu"))
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
+@pytest.mark.parametrize("version", ["2.12.0", "2.99.1"])
+def test_delta_43_parquet_format_version_v2_fallback(spark_tmp_table_factory, write_mode, version):
+    """The GPU writer only emits DataPageV1, so a DataPageV2 request must run on the CPU and
+    produce DataPageV2 pages."""
+    base_table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    assert_gpu_fallback_write_sql(
+        _parquet_format_version_writer(base_table, write_mode, version, v2_pages=True),
+        lambda spark, table: spark.table(table).orderBy("id"), base_table,
+        [_parquet_format_version_fallback[write_mode]], conf=conf)
+    cpu_pages, gpu_pages = _page_types_and_rows(base_table, conf)
+    assert cpu_pages == gpu_pages == {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
+@pytest.mark.parametrize("version", ["1.0.0", None, "2.5.0"], ids=["v1", "absent", "resolves_to_v1"])
+def test_delta_43_parquet_format_version_v1_on_gpu(spark_tmp_table_factory, write_mode, version):
+    """Default and explicit v1 tables, and versions Delta 4.3 resolves down to v1, are still
+    written by the GPU, as DataPageV1."""
+    base_table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    write_table = _parquet_format_version_writer(base_table, write_mode, version)
+    assert_rapids_delta_write(
+        lambda spark: write_table(spark, f"{base_table}_gpu"), conf,
+        require_non_empty=True, forbidden_cpu_fallback_classes=[
+            _parquet_format_version_fallback[write_mode]])
+    with_cpu_session(lambda spark: write_table(spark, f"{base_table}_cpu"), conf=conf)
+    cpu_pages, gpu_pages = _page_types_and_rows(base_table, conf)
+    assert gpu_pages == {"DataPageV1"}
+    assert cpu_pages == {"DataPageV1"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_writer_version_conf_fallback(spark_tmp_table_factory):
+    """Without a table property Delta falls back to the parquet.writer.version session conf."""
+    base_table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"parquet.writer.version": "v2"})
+    write_table = _parquet_format_version_writer(base_table, "append", None, v2_pages=True)
+    assert_gpu_fallback_write_sql(
+        write_table, lambda spark, table: spark.table(table).orderBy("id"), base_table,
+        ["AppendDataExecV1"], conf=conf)
+    cpu_pages, gpu_pages = _page_types_and_rows(base_table, conf)
+    assert cpu_pages == gpu_pages == {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("spelling", [
+    ("TBLPROPERTIES ('delta.parquet.format.version' = '{v}')", {}),
+    ("TBLPROPERTIES ('Delta.Parquet.Format.Version' = '{v}')", {}),
+    ("", {"spark.databricks.delta.properties.defaults.parquet.format.version": "{v}"}),
+], ids=["canonical_key", "mixed_case_key", "session_default"])
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_new_table_spellings(
+        spark_tmp_table_factory, spelling, write_mode, version):
+    """A version set with a differently cased key, or only through Delta's table property
+    default, still applies to the table a CTAS or RTAS creates."""
+    properties, extra_conf = spelling
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {k: v.format(v=version) for k, v in extra_conf.items()})
+    command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            spark.sql(f"{command} {table} USING DELTA {properties.format(v=version)} "
+                      f"AS {_parquet_format_version_query}").collect()
+    assert _wrote_on_gpu(write, conf) == (version == "1.0.0")
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_new_path_default(spark_tmp_path, mode, version):
+    """Saving to a path with no table creates it with Delta's table property defaults, which may
+    be the only place the version is requested."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"spark.databricks.delta.properties.defaults.parquet.format.version":
+                            version})
+    # Delta caches the log of a path with no table, and its empty snapshot keeps the defaults
+    # of the session that first looked, which here had none.
+    with_cpu_session(lambda spark: spark._jvm.org.apache.spark.sql.delta.DeltaLog.forTable(
+        spark._jsparkSession, path) and None, conf=delta_writes_enabled_conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode(mode).save(path)
+    assert _wrote_on_gpu(write, conf) == (version == "1.0.0")
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"), conf=conf) \
+        == {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+@pytest.mark.parametrize("case", [
+    # (option key, option value, session default, expected to write on the GPU)
+    ("delta.parquet.format.version", "2.12.0", None, False),
+    ("DELTA.PARQUET.FORMAT.VERSION", "2.12.0", "1.0.0", False),
+    ("delta.parquet.format.version", "1.0.0", "2.12.0", True),
+    ("DELTA.PARQUET.FORMAT.VERSION", "1.0.0", None, True),
+], ids=["v2_option", "v2_upper_key_over_v1_default", "v1_option_over_v2_default",
+        "v1_upper_key"])
+def test_delta_43_parquet_format_version_new_path_option(spark_tmp_path, mode, case):
+    """A save to a new path persists its `delta.*` write options as table properties, so a
+    version requested that way applies even though the path has no snapshot to read it from."""
+    key, version, default, expect_gpu = case
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"spark.databricks.delta.properties.defaults.parquet.format.version":
+                            default} if default else {})
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode(mode) \
+                .option(key, version).save(path)
+    assert _wrote_on_gpu(write, conf) == expect_gpu
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"), conf=conf) \
+        == {"DataPageV1" if expect_gpu else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("case", [
+    # (explicit property key, explicit value, session default, expected to write on the GPU)
+    ("DELTA.PARQUET.FORMAT.VERSION", "2.12.0", "1.0.0", False),
+    ("Delta.Parquet.Format.Version", "1.0.0", "2.12.0", True),
+], ids=["v2_explicit_over_v1_default", "v1_explicit_over_v2_default"])
+def test_delta_43_parquet_format_version_explicit_property_beats_default(
+        spark_tmp_table_factory, write_mode, case):
+    """An explicit property replaces the session default whatever the case of its key."""
+    key, version, default, expect_gpu = case
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(
+        writer_confs, delta_writes_enabled_conf,
+        {"spark.databricks.delta.properties.defaults.parquet.format.version": default})
+    command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            spark.sql(f"{command} {table} USING DELTA TBLPROPERTIES ('{key}' = '{version}') "
+                      f"AS {_parquet_format_version_query}").collect()
+    assert _wrote_on_gpu(write, conf) == expect_gpu
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV1" if expect_gpu else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("api", ["sql_options", "dataframe_writer_v2"])
+@pytest.mark.parametrize("version", ["v1", "v2"], ids=["v1_gpu", "v2_cpu"])
+@pytest.mark.parametrize("option_key", ["parquet.writer.version", "PARQUET.WRITER.VERSION"])
+def test_delta_43_parquet_writer_version_option_ctas_rtas(
+        spark_tmp_table_factory, write_mode, api, version, option_key):
+    """A `parquet.writer.version` write option given to a CTAS or RTAS is part of the plan's
+    write options, and decides whether the write runs on the GPU. Delta matches the option
+    whatever its case, so a v2 option in any case must not be planned on the GPU, which would
+    fail at write time."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if write_mode == "rtas":
+        with_cpu_session(lambda spark: spark.sql(
+            f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "v2"):
+            if api == "sql_options":
+                command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+                spark.sql(f"{command} {table} USING DELTA "
+                          f"OPTIONS ('{option_key}' = '{version}') "
+                          f"AS {_parquet_format_version_query}").collect()
+            else:
+                writer = spark.sql(_parquet_format_version_query).writeTo(table) \
+                    .using("delta").option(option_key, version)
+                writer.create() if write_mode == "ctas" else writer.createOrReplace()
+    assert _wrote_on_gpu(write, conf) == (version == "v1")
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV1" if version == "v1" else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("version", ["v1", "v2"], ids=["v1", "v2"])
+@pytest.mark.parametrize("key", ["parquet.writer.version", "PARQUET.WRITER.VERSION"],
+                         ids=["exact_key", "mixed_case_key"])
+def test_delta_43_parquet_writer_version_property(
+        spark_tmp_table_factory, write_mode, version, key):
+    """Delta reads `parquet.writer.version` from the table properties by its exact key, and
+    ignores any other spelling, so the CPU writes DataPageV1 for it. The GPU must fall back for
+    a v2 value Delta honors and may write the rest, with exactly the pages the CPU writes."""
+    base_table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+    if write_mode == "rtas":
+        def create_tables(spark):
+            for suffix in ("cpu", "gpu"):
+                spark.sql(f"CREATE TABLE {base_table}_{suffix} (id BIGINT, s STRING) "
+                          "USING DELTA")
+        with_cpu_session(create_tables, conf=conf)
+
+    def write(spark, table):
+        spark.sql(f"{command} {table} USING DELTA TBLPROPERTIES ('{key}' = '{version}') "
+                  f"AS {_parquet_format_version_query}").collect()
+    cpu_table, gpu_table = f"{base_table}_cpu", f"{base_table}_gpu"
+    with_cpu_session(lambda spark: write(spark, cpu_table), conf=conf)
+    honored = key == "parquet.writer.version" and version == "v2"
+    assert _wrote_on_gpu(lambda spark: write(spark, gpu_table), conf) == (not honored)
+    cpu_pages, gpu_pages = _page_types_and_rows(base_table, conf)
+    assert cpu_pages == gpu_pages == {"DataPageV2" if honored else "DataPageV1"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_stored_writer_version_property_beats_format_version(
+        spark_tmp_table_factory):
+    """A `parquet.writer.version=v1` table property takes precedence over
+    `delta.parquet.format.version=2.12.0` on an existing table. Both the planner and the write
+    must resolve v1, so the append stays on the GPU, succeeds and writes DataPageV1, like the CPU."""
+    base_table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_tables(spark):
+        for suffix in ("cpu", "gpu"):
+            spark.sql(f"CREATE TABLE {base_table}_{suffix} (id BIGINT, s STRING) USING DELTA "
+                      "TBLPROPERTIES ('parquet.writer.version' = 'v1', "
+                      "'delta.parquet.format.version' = '2.12.0')")
+    with_cpu_session(create_tables, conf=conf)
+
+    def append(spark, table):
+        spark.sql(_parquet_format_version_query).write.format("delta").mode("append") \
+            .saveAsTable(table)
+    cpu_table, gpu_table = f"{base_table}_cpu", f"{base_table}_gpu"
+    with_cpu_session(lambda spark: append(spark, cpu_table), conf=conf)
+    assert _wrote_on_gpu(lambda spark: append(spark, gpu_table), conf)
+    cpu_pages, gpu_pages = _page_types_and_rows(base_table, conf)
+    assert cpu_pages == gpu_pages == {"DataPageV1"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_property_option_dataframe_writer_v2(
+        spark_tmp_table_factory, write_mode, version):
+    """DataFrameWriterV2 keeps `delta.parquet.format.version` in the write options, and Delta
+    persists it as a table property when the write creates the table."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if write_mode == "rtas":
+        with_cpu_session(lambda spark: spark.sql(
+            f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            writer = spark.sql(_parquet_format_version_query).writeTo(table) \
+                .using("delta").option("delta.parquet.format.version", version)
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
+    assert _wrote_on_gpu(write, conf) == (version == "1.0.0")
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("api", ["sql_insert", "dataframe_append"])
+def test_delta_43_parquet_format_version_existing_table_ignores_creation_default(
+        spark_tmp_path, api):
+    """Table property defaults apply when a table is created, not to a table that exists. A
+    propertyless table at version 0 is written on the GPU with DataPageV1 under a v2 default."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA").collect(), conf=conf)
+    v2_default_conf = copy_and_update(
+        conf, {"spark.databricks.delta.properties.defaults.parquet.format.version": "2.12.0"})
+
+    def write(spark):
+        if api == "sql_insert":
+            spark.sql(f"INSERT INTO delta.`{path}` {_parquet_format_version_query}").collect()
+        else:
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("append") \
+                .save(path)
+    assert _wrote_on_gpu(write, v2_default_conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"),
+                            conf=conf) == {"DataPageV1"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+@pytest.mark.parametrize("primed_default,default", [("1.0.0", "2.12.0"), ("2.12.0", "1.0.0")],
+                         ids=["v1_cached_v2_session", "v2_cached_v1_session"])
+def test_delta_43_parquet_format_version_new_path_default_cached_by_other_session(
+        spark_tmp_path, mode, primed_default, default):
+    """Delta caches the empty snapshot of a path with the defaults of the session that first
+    looked at it. A save creates the table with its own session's defaults, which are the ones
+    that decide, so a v1 cache must not hide a v2 default and a v2 cache must not force a
+    fallback."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    key = "spark.databricks.delta.properties.defaults.parquet.format.version"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {key: default})
+    with_cpu_session(lambda spark: spark._jvm.org.apache.spark.sql.delta.DeltaLog.forTable(
+        spark._jsparkSession, path) and None,
+        conf=copy_and_update(delta_writes_enabled_conf, {key: primed_default}))
+    expect_gpu = default == "1.0.0"
+
+    def write(spark):
+        with _hadoop_writer_version(spark, not expect_gpu):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode(mode).save(path)
+    assert _wrote_on_gpu(write, conf) == expect_gpu
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"), conf=conf) \
+        == {"DataPageV1" if expect_gpu else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("table_property,option", [("1.0.0", "2.12.0"), ("2.12.0", "1.0.0")],
+                         ids=["option_v2_over_property_v1", "option_v1_over_property_v2"])
+def test_delta_43_parquet_format_version_dataframe_writer_v2_option_beats_property(
+        spark_tmp_table_factory, write_mode, table_property, option):
+    """DataFrameWriterV2 given the version as both a table property and a write option creates
+    the table with the write option's value, and that is the value that decides where it runs."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if write_mode == "rtas":
+        with_cpu_session(lambda spark: spark.sql(
+            f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, option == "2.12.0"):
+            writer = spark.sql(_parquet_format_version_query).writeTo(table).using("delta") \
+                .tableProperty("delta.parquet.format.version", table_property) \
+                .option("delta.parquet.format.version", option)
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
+    assert _wrote_on_gpu(write, conf) == (option == "1.0.0")
+    # The persisted property shows which of the two Delta kept, whatever Spark version runs.
+    persisted = with_cpu_session(lambda spark: spark.sql(
+        f"SHOW TBLPROPERTIES {table} ('delta.parquet.format.version')").collect()[0][-1],
+        conf=conf)
+    assert persisted == option
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV1" if option == "1.0.0" else "DataPageV2"}
+
+
+_parquet_format_version_options = [
+    # (table property, write option, session conf, expected to write on the GPU)
+    ("1.0.0", None, "v2", True),    # the table property beats the session conf
+    ("1.0.0", "v2", None, False),   # a write option beats the table property
+    ("2.12.0", "v1", None, True),
+    ("2.12.0", None, None, False),
+    (None, "v2", None, False),
+]
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("case", _parquet_format_version_options, ids=[
+    "property_beats_conf", "option_beats_property", "option_v1_beats_property_v2",
+    "property_v2", "option_only"])
+@pytest.mark.parametrize("option_key", ["parquet.writer.version", "PARQUET.WRITER.VERSION"])
+def test_delta_43_parquet_format_version_precedence(spark_tmp_path, case, option_key):
+    """A write option beats the table property, which beats the session conf."""
+    version, option, session_conf, expect_gpu = case
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"parquet.writer.version": session_conf} if session_conf else {})
+    property_sql = (f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}')"
+                    if version else "")
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA {property_sql}"
+    ).collect(), conf=conf)
+
+    def write(spark):
+        writer = spark.sql(_parquet_format_version_query).write.format("delta").mode("append")
+        if option:
+            writer = writer.option(option_key, option)
+        writer.save(path)
+    assert _wrote_on_gpu(write, conf) == expect_gpu
+
+
+def _gpu_plans(func, conf, fails):
+    """Runs `func` in a GPU session, which must fail when `fails`. Returns the error text, or None
+    if it succeeded, and the captured plans."""
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        if fails:
+            with pytest.raises(Exception) as error:
+                with_gpu_session(func, conf=conf)
+            error_text = str(error.value)
+        else:
+            with_gpu_session(func, conf=conf)
+            error_text = None
+        return error_text, callback.getResultsWithTimeout(10000)
+    finally:
+        callback.endCapture()
+
+
+def _assert_cpu_write_plan(plans, cpu_exec):
+    """The captured plans hold the CPU write `cpu_exec` and no GPU Delta write."""
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    assert plans, "no plan was captured"
+    assert any(callback.contains(plan, cpu_exec) for plan in plans), \
+        f"the write did not fall back to {cpu_exec}: {[p.treeString() for p in plans]}"
+    assert not any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("source", ["property", "option"])
+@pytest.mark.parametrize("version", ["invalid", "v3", "0.9.0"])
+def test_delta_43_parquet_format_version_invalid(spark_tmp_path, source, version):
+    """An invalid version is never written by the GPU: it falls back to the CPU write, which
+    decides. Where the CPU rejects the value the GPU run fails with the CPU's own error."""
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    path = spark_tmp_path + "/DELTA_DATA"
+    if source == "property":
+        cpu_exec = "AtomicCreateTableAsSelectExec"
+
+        def write(spark):
+            spark.sql(f"CREATE TABLE delta.`{path}` USING DELTA "
+                      f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}') "
+                      f"AS {_parquet_format_version_query}").collect()
+    else:
+        # A DataFrameWriter save to a path runs as a SaveIntoDataSourceCommand.
+        cpu_exec = "ExecutedCommandExec"
+        with_cpu_session(lambda spark: spark.sql(
+            f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA").collect(),
+            conf=conf)
+
+        def write(spark):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("append") \
+                .option("parquet.writer.version", version).save(path)
+    try:
+        with_cpu_session(write, conf=conf)
+        cpu_error = None
+    except Exception as e:
+        cpu_error = str(e)
+    if source == "property":
+        assert cpu_error is not None, "Delta must reject an invalid table property"
+    # Spark before 4.2 drops the Delta write option, so there the CPU accepts the value.
+    gpu_error, plans = _gpu_plans(write, conf, fails=cpu_error is not None)
+    _assert_cpu_write_plan(plans, cpu_exec)
+    if cpu_error is not None:
+        assert version in gpu_error and version in cpu_error
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_mixed_table_and_checkpoint(spark_tmp_path):
+    """A table may mix page versions. The GPU reads both, and checkpoints written by Delta."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    insert = f"INSERT INTO delta.`{path}` {_parquet_format_version_query}"
+
+    def create_and_insert_v2(spark):
+        with _hadoop_writer_version(spark, True):
+            spark.sql(f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA "
+                      "TBLPROPERTIES ('delta.parquet.format.version' = '2.12.0', "
+                      "'delta.checkpointInterval' = '2')")
+            spark.sql(insert)
+            spark.sql(insert)
+
+    def switch_to_v1_and_insert(spark):
+        spark.sql(f"ALTER TABLE delta.`{path}` "
+                  "SET TBLPROPERTIES ('delta.parquet.format.version' = '1.0.0')")
+        spark.sql(insert)
+
+    with_cpu_session(create_and_insert_v2, conf=conf)
+    with_cpu_session(switch_to_v1_and_insert, conf=conf)
+
+    def list_log(spark):
+        # The test path may be on a Hadoop filesystem rather than the driver's local disk.
+        log = spark._jvm.org.apache.hadoop.fs.Path(path + "/_delta_log")
+        fs = log.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+        return [status.getPath().getName() for status in fs.listStatus(log)]
+    log_files = with_cpu_session(list_log, conf=conf)
+    assert any(name.endswith(".checkpoint.parquet") for name in log_files), log_files
+    assert with_cpu_session(
+        lambda spark: _data_page_types(spark, f"delta.`{path}`"),
+        conf=conf) == {"DataPageV1", "DataPageV2"}
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.format("delta").load(path).orderBy("id", "s"), conf=conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_metadata_changed_after_planning(spark_tmp_path):
+    """A write planned on the GPU from a v1 snapshot fails, instead of committing DataPageV1 files
+    to the table, when its transaction refreshes to metadata that asks for DataPageV2."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    # A long staleness limit keeps the cached snapshot used for planning, however the table
+    # changes underneath it.
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"spark.databricks.delta.stalenessLimit": "1h"})
+
+    def create(spark):
+        spark.sql(f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA").collect()
+        spark.sql(f"INSERT INTO delta.`{path}` {_parquet_format_version_query}").collect()
+    with_cpu_session(create, conf=conf)
+
+    def commit_v2_metadata(spark):
+        # A commit by another writer, which this JVM's cached DeltaLog does not know about.
+        hadoop_path = spark._jvm.org.apache.hadoop.fs.Path
+        log = hadoop_path(path + "/_delta_log")
+        fs = log.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+        first = spark.read.text(path + "/_delta_log/00000000000000000000.json").collect()
+        metadata = next(json.loads(row.value) for row in first if '"metaData"' in row.value)
+        metadata["metaData"].setdefault("configuration", {})[
+            "delta.parquet.format.version"] = "2.12.0"
+        versions = [int(status.getPath().getName()[:20]) for status in fs.listStatus(log)
+                    if status.getPath().getName().endswith(".json")]
+        out = fs.create(hadoop_path(f"{path}/_delta_log/{max(versions) + 1:020d}.json"))
+        try:
+            out.write(bytearray(json.dumps(metadata).encode("utf-8") + b"\n"))
+        finally:
+            out.close()
+    with_cpu_session(commit_v2_metadata, conf=conf)
+
+    def append(spark):
+        spark.sql(_parquet_format_version_query).write.format("delta").mode("append").save(path)
+    error, _ = _gpu_plans(append, conf, fails=True)
+    assert "DataPageV2" in error and "Retry the write" in error, error
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"),
+                            conf=conf) == {"DataPageV1"}
+
+
+# Operations on an existing table partitioned by `p`. Each one is (statement, expect_gpu_for_v1,
+# prepare): a v1 table must run it on the GPU, except where the operation has no GPU write to begin
+# with, and `prepare` statements run first on the table so that the operation has files to rewrite.
+_parquet_format_version_dml = {
+    "update": ("UPDATE {table} SET s = 'u' WHERE id % 2 = 0", True, []),
+    "delete": ("DELETE FROM {table} WHERE id % 2 = 0", True, []),
+    "merge": ("MERGE INTO {table} t USING (SELECT id, 'm' AS s, CAST(id % 4 AS INT) AS p "
+              "FROM range(0, 64, 2)) src ON t.id = src.id "
+              "WHEN MATCHED THEN UPDATE SET s = src.s", True, []),
+    "optimize": ("OPTIMIZE {table}", True, []),
+    "optimize_zorder": ("OPTIMIZE {table} ZORDER BY (id)", None, []),
+    # Soft-deleted rows leave deletion vectors, which is what a purge rewrites the files for.
+    "reorg_purge": ("REORG TABLE {table} APPLY (PURGE)", None, [
+        "ALTER TABLE {table} SET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true')",
+        "DELETE FROM {table} WHERE id % 8 = 0"]),
+    "insert_overwrite": ("INSERT OVERWRITE TABLE {table} "
+                         "SELECT id, 'o' AS s, CAST(id % 4 AS INT) AS p FROM range(64)", True, []),
+    "insert_replace_where": ("INSERT INTO {table} REPLACE WHERE p = 0 "
+                             "SELECT id, 'r' AS s, 0 AS p FROM range(0, 64, 4)", True, []),
+}
+
+# DataFrameWriter variants, applied to the table at `path` (or `table` by name).
+_parquet_format_version_writers = {
+    "save_append": lambda df, path, table: df.write.format("delta").mode("append").save(path),
+    "save_partitioned_append": lambda df, path, table: df.write.format("delta").mode("append")
+        .partitionBy("p").save(path),
+    "save_replace_where": lambda df, path, table: df.filter("p = 0").write.format("delta")
+        .mode("overwrite").option("replaceWhere", "p = 0").save(path),
+    "save_dynamic_partition_overwrite": lambda df, path, table: df.filter("p IN (0, 1)")
+        .write.format("delta").mode("overwrite").option("partitionOverwriteMode", "dynamic")
+        .partitionBy("p").save(path),
+    "save_as_table_append": lambda df, path, table: df.write.format("delta").mode("append")
+        .saveAsTable(table),
+}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Materialized partition columns were added in OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+def test_delta_43_new_path_materialized_partition_option_fallback(spark_tmp_path, mode):
+    """A save to a path with no table persists its `delta.*` options, so a materialized partition
+    column request there must fall back even though no table has the property yet."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        spark.sql("SELECT id, CAST(id % 2 AS INT) AS part FROM range(8)").write \
+            .format("delta").mode(mode).partitionBy("part") \
+            .option("delta.enableMaterializePartitionColumnsFeature", "true").save(path)
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+                    reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+def test_delta_43_new_path_variant_shredding_option_fallback(spark_tmp_path, mode):
+    """A save to a path with no table persists its `delta.*` options, so a variant shredding
+    request there must fall back even though no table has the property yet."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write(spark):
+        spark.sql("SELECT id, parse_json('{\"a\": 1}') AS v FROM range(4)").write \
+            .format("delta").mode(mode) \
+            .option("delta.enableVariantShredding", "true").save(path)
+    assert not _wrote_on_gpu(write, conf)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_save_as_table_overwrite_keeps_properties(
+        spark_tmp_table_factory):
+    """DataFrameWriter V1 saveAsTable in overwrite mode keeps the existing table's metadata, so a
+    table asking for DataPageV2 must not be rewritten on the GPU, which cannot write it and
+    would fail at write time on every retry."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA "
+        "TBLPROPERTIES ('delta.parquet.format.version' = '2.12.0')").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("overwrite") \
+                .saveAsTable(table)
+    assert not _wrote_on_gpu(write, conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_save_as_table_overwrite_ignores_explicit_version(
+        spark_tmp_table_factory):
+    """DataFrameWriter V1 saveAsTable in overwrite mode keeps the existing table's metadata and
+    ignores a `delta.parquet.format.version` given with the write, so an explicit 1.0.0 must not
+    let a DataPageV2 table be planned on the GPU, which would then fail at write time."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA "
+        "TBLPROPERTIES ('delta.parquet.format.version' = '2.12.0')").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, True):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("overwrite") \
+                .option("delta.parquet.format.version", "1.0.0").saveAsTable(table)
+    assert not _wrote_on_gpu(write, conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_invalid_creation_default_stale_snapshot(spark_tmp_path):
+    """Delta can hold a snapshot saying a table does not exist after the table was created
+    elsewhere. Planning then builds the creation properties from the session's defaults, which
+    may be invalid. Planning must not fail on that: the write falls back to the CPU write, which
+    decides the outcome, so the GPU does exactly what the CPU does."""
+    source = spark_tmp_path + "/SOURCE"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(_parquet_format_version_query).write
+                     .format("delta").save(source), conf=conf)
+
+    def stale_table(suffix):
+        """A table at a new path whose cached log still holds the empty snapshot."""
+        path = f"{spark_tmp_path}/DELTA_DATA_{suffix}"
+
+        def setup(spark):
+            jvm = spark._jvm
+            jvm.org.apache.spark.sql.delta.DeltaLog.forTable(spark._jsparkSession, path)
+            hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+            source_path = jvm.org.apache.hadoop.fs.Path(source)
+            fs = source_path.getFileSystem(hadoop_conf)
+            # Caching the log already created the target directory, so copy the contents.
+            for child in fs.listStatus(source_path):
+                assert jvm.org.apache.hadoop.fs.FileUtil.copy(
+                    fs, child.getPath(), fs, jvm.org.apache.hadoop.fs.Path(path), False,
+                    hadoop_conf)
+        with_cpu_session(setup, conf=conf)
+        return path
+
+    invalid_default = copy_and_update(
+        conf, {"spark.databricks.delta.properties.defaults.parquet.format.version": "invalid"})
+
+    def appender(path):
+        return lambda spark: spark.sql(_parquet_format_version_query).write.format("delta") \
+            .mode("append").save(path)
+    try:
+        with_cpu_session(appender(stale_table("cpu")), conf=invalid_default)
+        cpu_error = None
+    except Exception as e:
+        cpu_error = str(e)
+    gpu_error, plans = _gpu_plans(appender(stale_table("gpu")), invalid_default,
+                                  fails=cpu_error is not None)
+    _assert_cpu_write_plan(plans, "ExecutedCommandExec")
+    if cpu_error is not None:
+        assert "invalid" in gpu_error and "invalid" in cpu_error
+
+
+def _parquet_format_version_dml_tables(base_table, path_prefix, suffix, targets):
+    """The tables of the `suffix` side that a case uses: by `name`, by `path`, or both."""
+    return [table for kind, table in (("name", f"{base_table}_{suffix}"),
+                                      ("path", f"delta.`{path_prefix}_{suffix}`"))
+            if kind in targets]
+
+
+def _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, version, v2_pages,
+                                              targets):
+    """Creates identical partitioned CPU and GPU tables, with several small files in each, only
+    in the forms (`name`, `path`) the case operates on."""
+    with _hadoop_writer_version(spark, v2_pages):
+        for suffix in ("cpu", "gpu"):
+            for table in _parquet_format_version_dml_tables(
+                    base_table, path_prefix, suffix, targets):
+                spark.sql(f"CREATE TABLE {table} (id BIGINT, s STRING, p INT) USING DELTA "
+                          f"PARTITIONED BY (p) "
+                          f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}')")
+                for start in range(0, 64, 16):
+                    # One task per insert keeps several rows in each file, so a DELETE of some
+                    # rows leaves deletion vectors instead of dropping whole files.
+                    spark.sql(f"INSERT INTO {table} SELECT id, CAST(id AS STRING), "
+                              f"CAST(id % 4 AS INT) FROM range({start}, {start + 16}, 1, 1)")
+
+
+def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, operation,
+                                      expect_gpu_for_v1, prepare=(), targets=("path",)):
+    """Runs `operation(spark, suffix)` on the CPU and GPU tables. A v1 table writes on the GPU,
+    a v2 table on the CPU, and both tables end with the same rows and page versions. The
+    operation must have written files to the table, or the checks above would say nothing."""
+    v2_pages = version != "1.0.0"
+    def create_and_prepare(spark):
+        _create_parquet_format_version_dml_tables(
+            spark, base_table, path_prefix, version, v2_pages, targets)
+        for suffix in ("cpu", "gpu"):
+            for statement in prepare:
+                spark.sql(statement.format(table=f"delta.`{path_prefix}_{suffix}`")).collect()
+    with_cpu_session(create_and_prepare, conf=copy_and_update(
+        conf, {"spark.databricks.delta.delete.deletionVectors.persistent": "true"}
+        if prepare else {}))
+
+    def data_files(suffix):
+        return with_cpu_session(lambda spark: frozenset(
+            file for table in _parquet_format_version_dml_tables(
+                base_table, path_prefix, suffix, targets)
+            for file in spark.table(table).inputFiles()), conf=conf)
+    files_before = {suffix: data_files(suffix) for suffix in ("cpu", "gpu")}
+
+    def run(suffix):
+        def func(spark):
+            with _hadoop_writer_version(spark, v2_pages):
+                operation(spark, suffix)
+        return func
+    with_cpu_session(run("cpu"), conf=conf)
+    wrote_on_gpu = _wrote_on_gpu(run("gpu"), conf)
+    if v2_pages:
+        assert not wrote_on_gpu, "a DataPageV2 table must not be written by the GPU"
+    elif expect_gpu_for_v1:
+        assert wrote_on_gpu, "a DataPageV1 table is expected to be written by the GPU"
+    for suffix in ("cpu", "gpu"):
+        assert data_files(suffix) != files_before[suffix], \
+            f"the operation wrote no data files to the {suffix} table"
+
+    def snapshot(spark, table):
+        return spark.table(table).orderBy("id", "s").collect()
+    for table_of in [lambda suffix, kind=kind: _parquet_format_version_dml_tables(
+            base_table, path_prefix, suffix, (kind,))[0] for kind in targets]:
+        assert_equal(
+            with_cpu_session(lambda spark: snapshot(spark, table_of("cpu")), conf=conf),
+            with_cpu_session(lambda spark: snapshot(spark, table_of("gpu")), conf=conf))
+        pages = [with_cpu_session(lambda spark: _data_page_types(spark, table_of(suffix)),
+                                  conf=conf) for suffix in ("cpu", "gpu")]
+        assert pages[0] == pages[1] == {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("name", [
+    pytest.param(name, marks=delta_reorg_xfail) if name == "reorg_purge" else name
+    for name in _parquet_format_version_dml])
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_dml(
+        spark_tmp_table_factory, spark_tmp_path, name, version):
+    """UPDATE, DELETE, MERGE, OPTIMIZE, REORG and overwrites write files too: they run on the GPU
+    for a v1 table and on the CPU for a table asking for DataPageV2."""
+    statement, expect_gpu_for_v1, prepare = _parquet_format_version_dml[name]
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.rapids.sql.command.OptimizeTableCommand": "true",
+        "spark.databricks.delta.autoCompact.enabled": "false"})
+
+    def operation(spark, suffix):
+        table = f"delta.`{spark_tmp_path}/DELTA_{suffix}`"
+        spark.sql(statement.format(table=table)).collect()
+    _check_parquet_format_version_dml(
+        spark_tmp_table_factory.get(), spark_tmp_path + "/DELTA", version, conf, operation,
+        expect_gpu_for_v1, prepare)
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("name", list(_parquet_format_version_writers))
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_dataframe_writer(
+        spark_tmp_table_factory, spark_tmp_path, name, version):
+    """DataFrameWriter saves, partitioned writes, replaceWhere, dynamic partition overwrite and
+    saveAsTable follow the table's page version too."""
+    base_table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    write = _parquet_format_version_writers[name]
+
+    def operation(spark, suffix):
+        df = spark.range(64).selectExpr("id", "CAST(id AS STRING) AS s", "CAST(id % 4 AS INT) AS p")
+        write(df, f"{spark_tmp_path}/DELTA_{suffix}", f"{base_table}_{suffix}")
+    _check_parquet_format_version_dml(
+        base_table, spark_tmp_path + "/DELTA", version, conf, operation, True,
+        targets=("name",) if name == "save_as_table_append" else ("path",))

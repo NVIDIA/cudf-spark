@@ -442,6 +442,37 @@ downstream operators may still execute on GPU. Queries that prune all Variant co
 remain eligible for GPU scans even when the files contain shredded Variant data. GPU
 Variant writes remain unsupported.
 
+### Variant field extraction
+
+GPU `try_variant_get` supports the registered scalar targets, including decimal targets
+with precision up to 38 and nonnegative scale, when incompatible operations and the CPU
+expression bridge are enabled. Strict `variant_get` and negative-scale decimal targets
+remain on the CPU.
+
+For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQL null for
+final target overflow. Other source representations, including integer, string, boolean, and
+floating-point values, are converted by Spark through the CPU bridge.
+
+SQL-null parents stay on the GPU for every target, and missing paths and encoded Variant
+nulls do for every target except decimal. For decimal targets, a missing path or encoded
+Variant null uses the bridge, so that malformed object field ids raise Spark's error.
+Malformed bytes that extraction reports, rows that Spark's Variant constructor rejects, and
+path steps that meet a primitive type ID Spark does not recognize use the bridge so that Spark
+raises its error. Any row requiring the bridge sends the entire input batch through CPU
+evaluation, even when the surrounding plan contains `GpuVariantGet`. Temporary extraction and
+decoding columns are released before CPU conversion.
+
+Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
+intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
+Values outside that intermediate range fall back even if the final target could hold them;
+for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
+Width-specific decimal payload precision and scale are checked, but these checks do not
+validate the entire Variant path. For targets other than decimal, object field ids that are
+unsorted or outside the metadata dictionary, which the Variant spec forbids, can return SQL
+null where Spark returns a value or raises an error. Malformed or noncanonical object and
+metadata encodings may also differ from Spark for any target; incompatible-operation gating
+remains in place.
+
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility
@@ -460,6 +491,28 @@ When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently i
 The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files.
 At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
 format, and will error out in that case.
+
+## Delta Lake Parquet format version
+
+OSS Delta Lake 4.3 lets a table choose the Parquet data page version of the files Delta writes
+through the `delta.parquet.format.version` table property, or the `parquet.writer.version`
+Spark configuration when the property is unset. The plugin's GPU Parquet writer only writes
+`DataPageV1` pages: libcudf can write version 2 page headers, but the cuDF Java API does not
+expose that option yet. A write whose requested version resolves to `1.0.0`, or that does not
+request one, stays on the GPU. A write that resolves to a newer version, which would produce
+`DataPageV2` pages, falls back to the CPU for append, overwrite, CTAS, RTAS, UPDATE, DELETE,
+MERGE, OPTIMIZE, REORG, `replaceWhere` and dynamic partition overwrite. Delta 4.3
+knows the versions `1.0.0` and `2.12.0` and picks the highest known one that is at or below the
+requested value, so `2.0.0` through `2.11.x` resolve to `1.0.0` and stay on the GPU. An
+invalid value falls back so that the CPU raises Delta's own error. A table can hold files of both
+page versions, and the GPU reads both.
+
+## Delta Lake selective replacement
+
+Delta Lake 4.3 `replaceOn` and `replaceUsing` writes support GPU acceleration,
+including targets with persistent deletion vectors. See
+[Delta Lake selective replacement](additional-functionality/delta-lake-selective-replacement.md)
+for supported versions, configuration, examples, and limitations.
 
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 
@@ -689,79 +742,6 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Empty pattern: `""`
 
 Work is ongoing to increase the range of regular expressions that can run on the GPU.
-
-## Array Higher-Order Function `aggregate`
-
-Spark's `aggregate` (also exposed as `reduce`) higher-order function takes any user lambda as
-the merge function:
-
-```sql
-aggregate(arr, zero, (acc, x) -> merge_expr, acc -> finish_expr)
-```
-
-The GPU implementation does not run an arbitrary lambda. Instead, it pattern-matches the merge
-lambda against a fixed set of shapes that map to cuDF segmented reductions, and falls back to
-CPU when the lambda doesn't match. The finish lambda must be the identity (`acc -> acc` or
-omitted).
-
-The merge lambda must reduce to the form `(acc, x) -> op(acc, g(x))` where `op` is associative
-and `g(x)` does not reference `acc`. Supported `op`s and the Catalyst expressions that map to
-each:
-
-| Op       | Catalyst shape         | Element types                     |
-| -------- | ---------------------- | --------------------------------- |
-| SUM      | `Add(acc, g)`          | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
-| PRODUCT  | `Multiply(acc, g)`     | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
-| MAX      | `Greatest(acc, g)` (2 children only) | byte / short / int / long  |
-| MIN      | `Least(acc, g)` (2 children only)    | byte / short / int / long  |
-| ALL      | `And(acc, g)`          | boolean                           |
-| ANY      | `Or(acc, g)`           | boolean                           |
-
-The decomposer also accepts these structural variations:
-
-- **Commuted operands**: `op(g, acc)` is treated the same as `op(acc, g)`.
-- **`Cast` around the acc side**: `Add(Cast(acc, t), g)` and chained casts on the acc side are
-  unwrapped (g must still not reference acc).
-- **`If` branches**: `If(cond, op(acc, t_g), op(acc, f_g))` is lifted to
-  `op(acc, If(cond, t_g, f_g))`. A bare-acc branch (e.g. `If(cond, acc + 1, acc)`) is treated as
-  `op(acc, identity)` and lifted to `op(acc, If(cond, t_g, identity))`. `cond` must not
-  reference acc. For `MAX` / `MIN`, this structural rewrite falls back when the initial zero can
-  be null because a bare-acc branch must preserve the no-contribution null accumulator state.
-- **`CaseWhen` branches**: same handling as `If`, generalized to N branches with a required
-  `else` branch.
-- **Nested `If` / `CaseWhen`**: handled recursively as long as every branch eventually reduces
-  to op-of-acc with `op` consistent across all branches.
-
-The following shapes fall back to CPU:
-
-- Lambdas whose body uses an op that isn't one of the six above (e.g. `Subtract`, `Divide`),
-  or `Greatest`/`Least` with three or more children.
-- Lambdas where `g(x)` references `acc`, or where different `If`/`CaseWhen` branches use
-  different ops.
-- A `CaseWhen` without an `else` branch (the implicit-null fall-through is not modelled).
-- A finish lambda that isn't the identity.
-- `g(x).dataType` that doesn't equal the accumulator/zero type (Spark's
-  `checkInputDataTypes` rule).
-- `MAX` / `MIN` on `float` / `double`: cuDF's `fmax(NaN, x) = x` absorbs NaN, while Spark's
-  `Greatest` / `Least` use `Double.compare` which propagates NaN.
-- `MAX` / `MIN` with a nullable initial zero and a bare-acc branch in `If` / `CaseWhen`: replacing
-  bare acc with an identity value would lose Spark's no-contribution null accumulator state.
-- `ALL` / `ANY` when the input array can contain null elements or the lifted `g(x)` expression
-  can produce nulls: cuDF's INCLUDE-null segmented all/any returns null whenever any element is
-  null, while Spark's 3VL short-circuits (`false AND null = false`,
-  `true OR null = true`).
-- `SUM` / `PRODUCT` on `float` / `double` when
-  `spark.rapids.sql.variableFloatAgg.enabled=false`: cuDF's parallel tree-reduction sums in a
-  different order than Spark's sequential left-fold.
-- `SUM` / `PRODUCT` on decimal types: Spark decimal arithmetic has overflow-specific behavior
-  (`SUM` returns null on overflow in non-ANSI mode and raises in ANSI mode), while cuDF segmented
-  reductions do not currently provide matching overflow handling.
-- `SUM` / `PRODUCT` on integer types under `spark.sql.ansi.enabled=true`: cuDF's segmented reduce
-  wraps on overflow rather than raising `ArithmeticException`. Full ANSI support is tracked as a
-  follow-up.
-
-Each fallback condition produces a self-contained reason in the query's GPU plan explain output,
-so users can see exactly which rule triggered the CPU fallback for their query.
 
 ## URL Parsing
 
@@ -1049,12 +1029,9 @@ hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising he
 
 Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
 ([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks
-runtimes, including 14.3 and 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
+Runtime 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
 `0x0ABC`. The GPU returns the corrected result for every Spark version, so results for
-odd-length input differ from the CPU on those runtimes. On Databricks 14.3, setting the internal
-configuration `spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled` to `true`
-(default: `false`) enables the corrected CPU behavior. The GPU behavior is unchanged by this
-setting.
+odd-length input differ from the CPU on those runtimes.
 
 ### String to Date
 

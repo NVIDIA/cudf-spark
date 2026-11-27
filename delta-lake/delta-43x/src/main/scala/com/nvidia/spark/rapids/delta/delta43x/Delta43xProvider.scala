@@ -34,14 +34,15 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsWrite,
   TableCatalog}
 import org.apache.spark.sql.connector.read.Scan
-import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaConfigs,
+import org.apache.spark.sql.delta.{CatalogOwnedTableFeature,
   DeltaDynamicPartitionOverwriteCommand, DeltaLog, DeltaOptions, DeltaParquetFileFormat,
-  IcebergCompat, MaterializePartitionColumnsTableFeature}
+  MaterializePartitionColumnsTableFeature}
 import org.apache.spark.sql.delta.actions.TableFeatureProtocolUtils
 import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaCatalogRestApiShim, DeltaTableV2}
-import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand,
-  UpdateCommand, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.{DeleteCommand, DeltaInsertReplaceOnOrUsingCommand,
+  MergeIntoCommand, OptimizeTableCommand, UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.coordinatedcommits.CatalogOwnedTableUtils
+import org.apache.spark.sql.delta.rapids.delta43x.InsertReplaceOnOrUsingCommandMeta
 import org.apache.spark.sql.delta.serverSidePlanning.ServerSidePlannedTable
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
@@ -184,6 +185,11 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
             meta.willNotWorkOnGpu(
               "Delta 4.3 materialized partition column writes are not supported on GPU")
           }
+          if (Delta43xConfigChecker.isV1SaveAsTableOverwrite(cpuExec.writeOptions)) {
+            // saveAsTable keeps the existing metadata, which may ask for DataPageV2.
+            Delta43xConfigChecker.tagRetainedProperties(meta, cpuExec.session,
+              snapshot.metadata.configuration, cpuExec.writeOptions)
+          }
         case _: ServerSidePlannedTable =>
           meta.willNotWorkOnGpu(
             "Delta 4.3 server-side planned table replacement is not supported on GPU")
@@ -195,24 +201,11 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
   private def tagIfUnsupportedWriterFeatures(
       meta: RapidsMeta[_, _, _],
       properties: Map[String, String],
+      writeOptions: Map[String, String],
       hasPartitionColumns: Boolean,
       spark: SparkSession): Unit = {
-    val effectiveProperties = DeltaConfigs.mergeGlobalConfigs(
-      spark.sessionState.conf, properties)
-    if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {
-      meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
-    }
-    val supportedFeatures =
-      TableFeatureProtocolUtils.getSupportedFeaturesFromTableConfigs(effectiveProperties)
-    val materializesPartitionColumns =
-      IcebergCompat.isAnyEnabled(effectiveProperties) ||
-        DeltaConfigs.ENABLE_MATERIALIZE_PARTITION_COLUMNS_FEATURE
-          .fromMap(effectiveProperties).contains(true) ||
-        supportedFeatures.contains(MaterializePartitionColumnsTableFeature)
-    if (hasPartitionColumns && materializesPartitionColumns) {
-      meta.willNotWorkOnGpu(
-        "Delta 4.3 materialized partition column writes are not supported on GPU")
-    }
+    Delta43xConfigChecker.tagCreationProperties(
+      meta, spark, properties, writeOptions, hasPartitionColumns)
   }
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
@@ -233,8 +226,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
         cpuExec.ident,
         cpuExec.properties)
     }
-    tagIfUnsupportedWriterFeatures(
-      meta, cpuExec.properties, cpuExec.partitioning.nonEmpty, cpuExec.session)
+    tagIfUnsupportedWriterFeatures(meta, cpuExec.properties, cpuExec.writeOptions,
+      cpuExec.partitioning.nonEmpty, cpuExec.session)
   }
 
   override def tagForGpu(
@@ -252,8 +245,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
         tagIfTargetTableUnsupported(meta, cpuExec)
       }
     }
-    tagIfUnsupportedWriterFeatures(
-      meta, cpuExec.properties, cpuExec.partitioning.nonEmpty, cpuExec.session)
+    tagIfUnsupportedWriterFeatures(meta, cpuExec.properties, cpuExec.writeOptions,
+      cpuExec.partitioning.nonEmpty, cpuExec.session)
   }
 
   override def tagForGpu(
@@ -292,6 +285,9 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       GpuOverrides.runnableCmd[DeleteCommand](
           "Delete rows from a Delta Lake table",
           (a, conf, p, r) => new DeleteCommandMeta(a, conf, p, r)),
+      GpuOverrides.runnableCmd[DeltaInsertReplaceOnOrUsingCommand](
+          "Atomically replace matching rows in a Delta Lake table",
+          (a, conf, p, r) => new InsertReplaceOnOrUsingCommandMeta(a, conf, p, r)),
       GpuOverrides.runnableCmd[UpdateCommand](
           "Update rows from a Delta Lake table",
           (a, conf, p, r) => new UpdateCommandMeta(a, conf, p, r)),
@@ -310,6 +306,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
+    // Internal DV matching scans need generated physical row indexes even before the
+    // target has any DVs. Match the reader selection used by the other Delta providers.
     val needsGeneratedRowIndex = !fmt.optimizationsEnabled && !fmt.hasTablePath
     if (isPushDVPredicateDownEnabled(conf) && !needsGeneratedRowIndex) {
       GpuDeltaParquetFileFormat2(

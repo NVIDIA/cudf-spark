@@ -202,6 +202,3 @@ for library_path in native_libraries(root_dir, minimum_size):
 
 write_lines(os.path.join(metadata_dir, "deflated-chunks.list"), deflated_entries)
 write_lines(os.path.join(metadata_dir, "chunk-manifests.list"), manifests)
-if manifests:
-    marker = open(os.path.join(metadata_dir, "enabled"), "w")
-    marker.close()

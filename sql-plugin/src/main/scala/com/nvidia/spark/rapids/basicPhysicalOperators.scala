@@ -67,11 +67,12 @@ class GpuProjectExecMeta(
     val projectList = GpuProjectAstPlanner.wrapProjectOutputs(
       gpuExprs, proj.conf, conf.isProjectAstEnabled, conf.isProjectAstJitEnabled)
         .map(_.asInstanceOf[NamedExpression]).toList
-    // Report original eligibility here and final backend selection after tiering.
-    if (conf.shouldExplain && conf.isProjectAstEnabled) {
+    // Report original eligibility here and final backend selection after tiering. These outputs
+    // run on the GPU either way, so NOT_ON_GPU does not report them.
+    if (conf.shouldExplainAll && conf.isProjectAstEnabled) {
       val legacyExplain = childExprs.iterator.zip(projectList.iterator).flatMap {
         case (meta, expression) if GpuAstJitExpression.extractTopLevel(expression).isEmpty =>
-          Some(meta.explainAst(conf.shouldExplainAll)).filter(_.nonEmpty)
+          Some(meta.explainAst(all = true)).filter(_.nonEmpty)
               .map(explanation => s"  Legacy Project AST eligibility:\n$explanation")
         case _ => None
       }
@@ -1765,7 +1766,22 @@ case class GpuRangeExec(
 }
 
 
-case class GpuUnionExec(children: Seq[SparkPlan]) extends ShimSparkPlan with GpuExec {
+object GpuUnionExec {
+  // GpuUnionExecShim implementations retain Spark's SQLConf-based API. Use a private snapshot
+  // that always enables partitioning when this node was stamped non-plain, rather than consulting
+  // the live session conf again.
+  private lazy val partitioningAwareUnionConf = {
+    val snapshot = new SQLConf()
+    snapshot.setConfString("spark.sql.unionOutputPartitioning", "true")
+    snapshot
+  }
+}
+
+case class GpuUnionExec(children: Seq[SparkPlan])(
+    val isPlainUnion: Boolean) extends ShimSparkPlan with GpuExec {
+
+  override def otherCopyArgs: Seq[AnyRef] =
+    Seq[AnyRef](isPlainUnion.asInstanceOf[java.lang.Boolean])
 
   // updating nullability to make all the children consistent
   override def output: Seq[Attribute] = {
@@ -1783,7 +1799,12 @@ case class GpuUnionExec(children: Seq[SparkPlan]) extends ShimSparkPlan with Gpu
   }
 
   override def outputPartitioning: Partitioning =
-    GpuUnionExecShim.getOutputPartitioning(children, output, conf)
+    if (isPlainUnion) {
+      UnknownPartitioning(0)
+    } else {
+      GpuUnionExecShim.getOutputPartitioning(
+        children, output, GpuUnionExec.partitioningAwareUnionConf)
+    }
 
   // The smallest of our children
   override def outputBatching: CoalesceGoal =
@@ -1795,11 +1816,16 @@ case class GpuUnionExec(children: Seq[SparkPlan]) extends ShimSparkPlan with Gpu
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
+    // Read this before creating child RDDs. A child such as an adaptive cache scan can sharpen
+    // its partitioning when executed, but this invocation must build the same union RDD that its
+    // caller observed from outputPartitioning.
+    val partitioning = outputPartitioning
+    val rdds = children.map(_.executeColumnar())
 
     GpuUnionExecShim.unionColumnarRdds(
       sparkContext,
-      children.map(_.executeColumnar()),
-      outputPartitioning,
+      rdds,
+      partitioning,
       numOutputRows,
       numOutputBatches)
   }
