@@ -863,15 +863,18 @@ object ExchangeMappingCache extends Logging {
   private val cache = new mutable.WeakHashMap[Exchange, WeakReference[Exchange]]
 
   /** Try to find a recent GPU exchange that has replaced the specified CPU canonical plan. */
-  def findGpuExchangeReplacement(cpuCanonical: Exchange): Option[Exchange] = {
+  def findGpuExchangeReplacement(cpuCanonical: Exchange): Option[Exchange] = cache.synchronized {
     cache.get(cpuCanonical).flatMap(_.get)
   }
 
   /** Add a GPU exchange to the exchange cache */
   def trackExchangeMapping(cpuCanonical: Exchange, gpuExchange: Exchange): Unit = {
-    val old = findGpuExchangeReplacement(cpuCanonical)
-    if (!old.exists(_.asInstanceOf[GpuBroadcastExchangeExec].isGpuPlanningComplete)) {
-      cache.put(cpuCanonical, WeakReference(gpuExchange))
+    // Concurrent planners share this map and a WeakHashMap is not thread safe.
+    cache.synchronized {
+      val old = findGpuExchangeReplacement(cpuCanonical)
+      if (!old.exists(_.asInstanceOf[GpuBroadcastExchangeExec].isGpuPlanningComplete)) {
+        cache.put(cpuCanonical, WeakReference(gpuExchange))
+      }
     }
   }
 }
