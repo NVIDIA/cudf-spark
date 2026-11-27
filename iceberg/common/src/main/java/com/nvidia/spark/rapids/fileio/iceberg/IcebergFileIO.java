@@ -53,8 +53,18 @@ public class IcebergFileIO implements RapidsFileIO {
     return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path), delegate);
   }
 
+  /**
+   * Creates an input file with an exact, non-negative length. Zero denotes an empty file,
+   * unlike the unknown-length sentinel accepted by some Iceberg FileIO implementations.
+   * Use {@link #newInputFile(String)} when the length is unknown.
+   *
+   * @throws IllegalArgumentException if length is negative, before accessing the delegate
+   */
   @Override
   public IcebergInputFile newInputFile(String path, long length) throws IOException {
+    if (length < 0) {
+      throw new IllegalArgumentException("length must be non-negative");
+    }
     return IcebergS3InputFile.maybeCreate(
         delegate.newInputFile(path, length), delegate, OptionalLong.of(length));
   }

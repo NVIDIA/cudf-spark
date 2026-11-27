@@ -39,12 +39,18 @@ public class IcebergInputFile implements RapidsInputFile {
   }
 
   /**
-   * Wrap an input file with its known length, or an empty optional if the length is unknown.
+   * Wrap an input file with its exact, non-negative length, or an empty optional if unknown.
+   * A present zero denotes an empty file and does not trigger a delegate length lookup.
+   *
+   * @throws IllegalArgumentException if the supplied length is negative
    */
   public IcebergInputFile(InputFile delegate, OptionalLong length) {
     Objects.requireNonNull(delegate, "delegate can't be null");
     this.delegate = delegate;
     this.length = Objects.requireNonNull(length, "length can't be null");
+    if (length.isPresent() && length.getAsLong() < 0) {
+      throw new IllegalArgumentException("length must be non-negative");
+    }
   }
 
   @Override
