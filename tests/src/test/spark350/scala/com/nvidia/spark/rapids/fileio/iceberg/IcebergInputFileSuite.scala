@@ -31,34 +31,34 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 class IcebergInputFileSuite extends AnyFunSuite with Matchers {
-  test("negative known lengths are rejected by the input file wrapper") {
+  test("zero and negative known lengths are rejected by the input file wrapper") {
     val delegate = mock(classOf[InputFile])
-    for (length <- Seq(-1L, Long.MinValue)) {
+    for (length <- Seq(0L, -1L, Long.MinValue)) {
       intercept[IllegalArgumentException] {
         new IcebergInputFile(delegate, OptionalLong.of(length))
-      }.getMessage shouldBe "length must be non-negative"
+      }.getMessage shouldBe "length must be positive"
     }
     verifyNoInteractions(delegate)
   }
 
-  test("both known-length FileIO overloads reject negative lengths before delegate access") {
+  test("both known-length FileIO overloads reject non-positive lengths before delegate access") {
     val delegate = mock(classOf[FileIO])
     val io: RapidsFileIO = new IcebergFileIO(delegate)
     val path = new Path("s3://bucket/file.parquet")
-    for (length <- Seq(-1L, Long.MinValue)) {
+    for (length <- Seq(0L, -1L, Long.MinValue)) {
       intercept[IllegalArgumentException] {
         io.newInputFile(path.toString, length)
-      }.getMessage shouldBe "length must be non-negative"
+      }.getMessage shouldBe "length must be positive"
       intercept[IllegalArgumentException] {
         io.newInputFile(path, length)
-      }.getMessage shouldBe "length must be non-negative"
+      }.getMessage shouldBe "length must be positive"
     }
     verifyNoInteractions(delegate)
   }
 
-  test("known lengths including zero avoid delegate length lookups") {
+  test("positive known lengths avoid delegate length lookups") {
     val delegate = mock(classOf[InputFile])
-    for (length <- Seq(0L, 17L, Long.MaxValue)) {
+    for (length <- Seq(1L, 17L, Long.MaxValue)) {
       new IcebergInputFile(delegate, OptionalLong.of(length)).getLength shouldBe length
     }
     verifyNoInteractions(delegate)
