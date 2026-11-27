@@ -4,7 +4,7 @@ Planning decisions that learn from earlier runs. A heuristic reads history when 
 and records what the query did when it ends. If history is off, missing, stale or unusable, the
 static decision is used unchanged; the two are never blended. The one heuristic today sizes scan
 splits for GPU file readers: v1 file sources (catalog tables and path reads, including Delta),
-Hive text tables, and DSv2 file scans (Parquet, ORC, CSV, JSON, Avro).
+Hive text tables, DSv2 file scans (Parquet, ORC, CSV, JSON, Avro), and Iceberg batch scans.
 
 ## Enabling
 
@@ -58,9 +58,12 @@ the history metrics API (`MetricStores.current()`) only; the driver plugin's
 | decide / observe (v1) | `GpuFileSourceScanExec.createNonBucketedReadRDD` / `internalDoExecuteColumnar` |
 | decide / observe (Hive text) | `GpuHiveTableScanExec.createReadRDDForDirectories` / `internalDoExecuteColumnar` |
 | decide / observe (DSv2) | `HistorySizedFileScan.partitions` / `GpuBatchScanExec.internalDoExecuteColumnar` (`registerForExecution`) |
+| decide / observe (Iceberg) | `GpuSparkBatch.planInputPartitions` (regroups Iceberg's planned tasks) / `GpuReaderFactory` |
 
-All three register their scan every time the exec runs, so a plan that is executed again is
-recorded again.
+The v1, Hive and DSv2 scans register every time the exec runs, so a plan that is executed again
+is recorded again. Iceberg scans register each planning and record only the newest, since runtime
+filtering re-plans them. Iceberg's own groups are kept for metadata tables, partition-key
+grouping, a `split-size` read option, and scans with delete files.
 
 Driver log lines, kept stable for tooling:
 
