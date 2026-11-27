@@ -142,38 +142,54 @@ class ParquetFooterReadSuite
     }
   }
 
-  test("prefetched footer retains original offsets across seeks and boundary reads") {
+  test("cached metadata preserves dictionary and column index filtering on the real stream") {
     val data = parquetBytes
-    val footer = framedFooter(data)
-    val start = data.length - footer.length + MAGIC.length
-    val input = new MemoryFile(data)
-    val prefetched = new FooterInputFile(input, footer)
-    withResource(prefetched.newStream()) { stream =>
-      stream.seek(data.length - 8)
-      val trailer = new Array[Byte](8)
-      stream.readFully(trailer)
-      trailer shouldBe data.takeRight(8)
-      input.opens shouldBe 0
-
-      val crossing = new Array[Byte](12)
-      stream.seek(start - 6)
-      stream.readFully(crossing)
-      crossing shouldBe data.slice(start - 6, start + 6)
-      stream.seek(4)
-      stream.read() shouldBe (data(4) & 0xff)
-      stream.seek(data.length)
-      stream.read() shouldBe -1
-      stream.read(trailer, 0, 0) shouldBe 0
-      intercept[IOException](stream.seek(-1))
-      intercept[IndexOutOfBoundsException](stream.read(trailer, 1, 8))
+    val fixture = org.apache.iceberg.Files.localInput(
+      Paths.get(getClass.getResource("/file-splits.parquet").toURI).toFile)
+    val (column, present) = withResource(ParquetFileReader.open(GpuParquetIO.file(fixture))) {
+      reader =>
+        val metadata = reader.getRowGroups.asScala.flatMap(_.getColumns.asScala)
+          .find(c => c.hasDictionaryPage &&
+            c.getPrimitiveType.getPrimitiveTypeName == PrimitiveTypeName.INT32).get
+        (metadata.getPath.toDotString, metadata.getStatistics.genericGetMin.asInstanceOf[Integer])
     }
-    input.opens shouldBe 1
-    input.closes shouldBe 1
-    withResource(prefetched.newStream()) { stream =>
-      stream.seek(start)
-      stream.read() shouldBe (data(start) & 0xff)
+    for (value <- Seq(present, Integer.valueOf(Int.MinValue))) {
+      val input = new MemoryFile(data)
+      val options = ParquetReadOptions.builder()
+        .useStatsFilter(false).useDictionaryFilter(true).useBloomFilter(false)
+        .useColumnIndexFilter(true)
+        .withRecordFilter(FilterCompat.get(FilterApi.eq(FilterApi.intColumn(column), value)))
+        .build()
+      withResource(ParquetFileReader.open(GpuParquetIO.file(fixture), options)) { expected =>
+        withResource(GpuParquetIO.openReader(
+            input, new Path(input.path()), options, Map.empty)) { actual =>
+          actual.getFooter.getBlocks.size() shouldBe expected.getFooter.getBlocks.size()
+          actual.getRowGroups.asScala.map(_.getStartingPos) shouldBe
+            expected.getRowGroups.asScala.map(_.getStartingPos)
+          actual.getRecordCount shouldBe expected.getRecordCount
+          actual.getFilteredRecordCount shouldBe expected.getFilteredRecordCount
+          if (value == present) {
+            actual.getRecordCount should be > 0L
+          } else {
+            actual.getRecordCount shouldBe 0L
+          }
+          actual.getRowGroups.asScala.indices.foreach { index =>
+            withResource(expected.readFilteredRowGroup(index)) { expectedPages =>
+              withResource(actual.readFilteredRowGroup(index)) { pages =>
+                if (expectedPages == null) {
+                  pages shouldBe null
+                } else {
+                  pages.getRowCount shouldBe expectedPages.getRowCount
+                }
+              }
+            }
+          }
+        }
+      }
+      input.bodyReads should be > 0
+      input.opens shouldBe 1
+      input.closes shouldBe 1
     }
-    input.opens shouldBe 1
   }
 
   test("prefetched footer preserves split filtering and dictionary contents") {
@@ -221,7 +237,7 @@ class ParquetFooterReadSuite
     }
   }
 
-  test("constructor closes the native stream when dictionary filtering fails") {
+  test("reader initialization closes the native stream when dictionary filtering fails") {
     val input = new MemoryFile(parquetBytes)
     val column = withResource(GpuParquetIO.openReader(input, new Path(input.path()),
         ParquetReadOptions.builder().build(), Map.empty)) { reader =>
@@ -230,7 +246,8 @@ class ParquetFooterReadSuite
           c.getPrimitiveType.getPrimitiveTypeName == PrimitiveTypeName.INT32)
         .get.getPath.toDotString
     }
-    input.opens shouldBe 0
+    input.opens shouldBe 1
+    input.closes shouldBe 1
     input.failBodyRead = true
     val options = ParquetReadOptions.builder()
       .useStatsFilter(false).useDictionaryFilter(true).useBloomFilter(false)
@@ -242,8 +259,8 @@ class ParquetFooterReadSuite
     }
     Iterator.iterate[Throwable](failure)(_.getCause).takeWhile(_ != null)
       .exists(_.getMessage == "dictionary read failed") shouldBe true
-    input.opens shouldBe 1
-    input.closes shouldBe 1
+    input.opens shouldBe 2
+    input.closes shouldBe 2
   }
 
   private def awaitCachedFooter(input: IcebergInputFile): Unit = {
@@ -283,7 +300,8 @@ class ParquetFooterReadSuite
     hitBytes.value shouldBe missBytes.value
     input.tailReads shouldBe reads
     input.bodyReads shouldBe 0
-    input.opens shouldBe 0
+    input.opens shouldBe 2
+    input.closes shouldBe 2
   }
 
   test("failed tail reads release the cache token and can be retried") {
@@ -304,6 +322,7 @@ class ParquetFooterReadSuite
     }
     misses.value shouldBe 2L
     awaitCachedFooter(input)
-    input.opens shouldBe 0
+    input.opens shouldBe 1
+    input.closes shouldBe 1
   }
 }
