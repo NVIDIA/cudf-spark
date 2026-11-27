@@ -26,7 +26,8 @@ from iceberg import (
     iceberg_nested_write_gens_list, iceberg_unsupported_mark, merge_partition_transforms_distributed,
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
-    row_lineage_df, rapids_reader_types)
+    row_lineage_df, rapids_reader_types, setup_iceberg_write_default_tables,
+    assert_iceberg_write_defaults, assert_iceberg_write_only_default_fallback)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_gpu_session, with_cpu_session
 
@@ -297,6 +298,59 @@ def test_iceberg_merge_v3_table_fallback(
         target_base_name,
         [fallback_exec],
         conf=copy_and_update(iceberg_merge_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("merge_mode,insert_only,expected_writer", [
+    pytest.param("copy-on-write", False, "GpuReplaceDataExec", id="cow"),
+    pytest.param("merge-on-read", False, "GpuWriteDeltaExec", id="mor"),
+    pytest.param("merge-on-read", True, "GpuAppendDataExec", id="insert-only")])
+@allow_non_gpu("LocalTableScanExec")
+def test_iceberg_merge_write_defaults(
+        spark_tmp_table_factory, merge_mode, insert_only, expected_writer):
+    cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
+        spark_tmp_table_factory, {"write.merge.mode": merge_mode})
+    conf = copy_and_update(iceberg_merge_v3_enabled_conf, {
+        "spark.sql.adaptive.enabled": "false", "spark.sql.shuffle.partitions": "2"})
+
+    def merge(spark, table):
+        # Insert-only MERGE is rewritten to append, including on a MOR table.
+        matched = "" if insert_only else """
+            WHEN MATCHED AND t.id = 2 THEN UPDATE SET optional_added = NULL
+            WHEN MATCHED THEN UPDATE SET p = s.p"""
+        spark.sql(f"""
+            MERGE INTO {table} t
+            USING (SELECT * FROM VALUES (1L, 1), (2L, 1), (3L, 0), (4L, 1) AS v(id, p)) s
+            ON t.id = s.id
+            {matched}
+            WHEN NOT MATCHED THEN INSERT (id, p) VALUES (s.id, s.p)
+        """).collect()
+
+    inserted = "current" if catalog_has_default else None
+    expected = [(1, 0 if insert_only else 1, "legacy"),
+                (2, 1, "legacy" if insert_only else None), (3, 0, inserted), (4, 1, inserted)]
+    assert_iceberg_write_defaults(
+        cpu_table, gpu_table, merge, expected, conf, expected_writer=expected_writer)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Remote catalogs can fail on fixed defaults (#17078)")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("merge_mode,fallback_exec", [
+    pytest.param("copy-on-write", "ReplaceDataExec", id="cow"),
+    pytest.param("merge-on-read", "WriteDeltaExec", id="mor")])
+@allow_non_gpu(
+    "LocalTableScanExec", "ReplaceDataExec", "WriteDeltaExec", "MergeRowsExec", "BatchScanExec",
+    "ColumnarToRowExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
+def test_iceberg_merge_write_only_default_fallback(
+        spark_tmp_table_factory, merge_mode, fallback_exec):
+    assert_iceberg_write_only_default_fallback(
+        spark_tmp_table_factory,
+        "MERGE INTO {table} t USING (SELECT * FROM VALUES (1L), (2L) AS v(id)) s ON t.id = s.id "
+        "WHEN MATCHED THEN UPDATE SET id = s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)",
+        fallback_exec, {"write.merge.mode": merge_mode})
 
 
 @iceberg_fast_test

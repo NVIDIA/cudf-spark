@@ -20,14 +20,15 @@ from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import *
 from iceberg import (
-    _add_eq_deletes_from_df,
+    _add_eq_deletes_from_df, check_default_rows,
     iceberg_cow_format_versions, iceberg_mor_format_versions, with_iceberg_dml_session,
     with_iceberg_format_versions, create_iceberg_table, get_full_table_name,
     iceberg_write_enabled_conf, iceberg_base_table_cols, iceberg_gens_list,
     iceberg_nested_write_gens_list, iceberg_unsupported_mark,
     delete_partition_transforms_distributed, _build_tblprops, assert_iceberg_files_use_codec,
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types)
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types,
+    setup_iceberg_fixed_default_table, assert_iceberg_default_file_parity)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -47,6 +48,40 @@ iceberg_delete_mor_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {}
 # would be DeleteFromTableExec.
 DELETE_TEST_SEED = 42
 DELETE_TEST_SEED_OVERRIDE_REASON = "Ensure reproducible test data for DELETE operations"
+
+
+@iceberg
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Remote catalogs can fail on fixed defaults (#17078)")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_v3_write_only_default_position_delete(spark_tmp_table_factory):
+    base = get_full_table_name(spark_tmp_table_factory)
+    cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
+    props = {"write.delete.mode": "merge-on-read"}
+
+    def setup(spark):
+        for table in (cpu_table, gpu_table):
+            setup_iceberg_fixed_default_table(
+                spark, table, initial_only=False, table_properties=props, initial_rows=2)
+
+    with_cpu_session(setup)
+
+    def delete(spark, table):
+        spark.sql(f"DELETE FROM {table} WHERE id = 1").collect()
+
+    with_cpu_session(lambda spark: delete(spark, cpu_table), conf=iceberg_write_enabled_conf)
+    with_iceberg_dml_session(lambda spark: delete(spark, gpu_table), "3", "merge-on-read",
+                             conf=iceberg_write_enabled_conf, gpu_writers=("GpuWriteDeltaExec",))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.table(gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true"
+                                  else cpu_table), conf=iceberg_write_enabled_conf)
+
+    def check(spark):
+        for table in (cpu_table, gpu_table):
+            assert spark.table(table).collect() == [Row(id=2, payload=None)]
+        assert_iceberg_default_file_parity(spark, cpu_table, gpu_table)
+
+    with_cpu_session(check, conf=iceberg_write_enabled_conf)
+
 
 def create_iceberg_table_with_data(table_name: str, 
                                    partition_col_sql=None,
@@ -1104,14 +1139,6 @@ def _add_supported_delete_defaults(spark, table_name):
     spark.sql(f'REFRESH TABLE {table_name}')
 
 
-def _assert_delete_rows(expected):
-    def check(cpu_rows, gpu_rows):
-        for rows in (cpu_rows, gpu_rows):
-            assert sorted([tuple(row) for row in rows], key=repr) == sorted(expected, key=repr)
-        return cpu_rows, gpu_rows
-    return check
-
-
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason='Requires local equality-delete UDF')
@@ -1152,7 +1179,7 @@ def test_iceberg_v3_supported_defaults_with_equality_deletes(
         lambda spark: spark.sql(f'SELECT {columns} FROM {table_name}'),
         conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
               'spark.rapids.sql.format.parquet.reader.type': reader_type},
-        result_canonicalize_func_before_compare=_assert_delete_rows(expected))
+        result_canonicalize_func_before_compare=check_default_rows(expected))
 
 
 @iceberg
@@ -1214,7 +1241,7 @@ def test_iceberg_v3_defaults_with_position_and_mixed_deletes(
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: read(spark, 'delete_key, string_key'),
         conf=conf,
-        result_canonicalize_func_before_compare=_assert_delete_rows([row[1:] for row in expected]))
+        result_canonicalize_func_before_compare=check_default_rows([row[1:] for row in expected]))
 
     def check_metadata(cpu_rows, gpu_rows):
         for rows in (cpu_rows, gpu_rows):
@@ -1229,4 +1256,4 @@ def test_iceberg_v3_defaults_with_position_and_mixed_deletes(
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: read(spark, 'count(*)'),
         conf=conf,
-        result_canonicalize_func_before_compare=_assert_delete_rows([(len(expected),)]))
+        result_canonicalize_func_before_compare=check_default_rows([(len(expected),)]))
