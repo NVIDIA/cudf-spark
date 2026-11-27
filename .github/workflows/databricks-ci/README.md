@@ -29,25 +29,27 @@ reconciliation before retrying it.
 - Use a protected GitHub environment named `databricks-ci`. Allow deployments
   from the exact `main` branch only, not tags or copied PR branches. Do not
   put these tokens in repository or organization secrets.
-- Store `DATABRICKS_AWS2_TOKEN`, `DATABRICKS_AWS_TOKEN`,
-  `DATABRICKS_AZURE3_TOKEN`, `DATABRICKS_JUMP_PRIVATE_KEY` and
-  `DATABRICKS_JUMP_KNOWN_HOSTS` in that environment. Rotate them there.
-  Its `DATABRICKS_PROFILES_JSON` variable maps each profile to `host`,
-  `driver`, `worker`, numeric `ssh_port` and the dedicated CI
-  `creator_user_name`; aws2 also needs `jump_host` and `jump_user`.
+- Store one token per workspace in that environment: `DATABRICKS_AWS2_TOKEN`,
+  `DATABRICKS_AWS_TOKEN` and `DATABRICKS_AZURE3_TOKEN`. Its
+  `DATABRICKS_PROFILES_JSON` variable maps each profile to its HTTPS `host`,
+  `driver`, `worker` and dedicated CI `creator_user_name`.
 - Use isolated CI Databricks workspaces and compute identities: PR code runs
   on the driver. Do not expose shared production storage, credentials or
-  instance permissions there. Give PR compute read-only access to shared
-  archives; only the protected cache job needs write access. The runner needs
-  HTTPS access to the configured workspaces and SSH to their drivers, directly
-  or via the pinned bastion.
+  instance permissions there. PR compute must not be able to modify binaries
+  shared with trusted workloads. Provide a read-only preseeded cache or an
+  isolated CI cache. The runner uses the workspace HTTPS API; no SSH or
+  bastion credentials are needed.
 - Set `DATABRICKS_CI_RUNNER_GROUP` to a dedicated ephemeral Linux runner
   group restricted to [the DB cell](../databricks-ci-cell.yml),
-  [hourly cleanup](../databricks-cleanup.yml) and [cache preparation](../cache.yml)
-  on `main`. Install Git, GitHub CLI, OpenSSH, Bash, curl, Python 3.9+ and Requests. Set
+  [cache preparation](../cache.yml) and [hourly cleanup](../databricks-cleanup.yml)
+  on `main`. Install Git, GitHub CLI, Bash, curl, Python 3.9+ and Requests. Set
   `DATABRICKS_CI_ENABLED=true` only after these controls are in place.
   Missing configuration fails a required Databricks selection before allocation.
 
 After each phase, the Actions console shows stdout and stderr tails. Failed
 phases also show bounded diagnostic excerpts. No cloud credentials are passed
 to the source under test.
+
+Fresh drivers start with prewarmed third-party Maven dependencies when available.
+A missing or corrupt seed leaves Maven free to download dependencies normally;
+JNI and private SNAPSHOTs are never supplied by this cache.

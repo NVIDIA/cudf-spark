@@ -1,5 +1,16 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Exercise the GHA orchestration boundary without a cluster, credentials or network."""
 
@@ -11,7 +22,6 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -20,6 +30,46 @@ SCRIPT = Path(__file__).resolve().parents[3] / ".github/workflows/databricks-ci/
 spec = importlib.util.spec_from_file_location("gha_db_attempts", SCRIPT)
 attempts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(attempts)
+
+
+class Workspace:
+    """Independent API-side records: the controller cannot change these via its local state."""
+
+    def __init__(self):
+        self.calls = []
+        self.records = {}
+        self.specs = []
+        self.startups = []
+        self.creator = "fixture-principal"
+
+    def api(self, method, path, **data):
+        op = path.rsplit("/", 1)[1]
+        self.calls.append((method, op))
+        if op == "Me":
+            return {"userName": self.creator}
+        if op == "create":
+            self.specs.append(data)
+            cid = f"fixture-{len(self.specs)}"
+            self.records[cid] = {**data, "cluster_id": cid, "creator_user_name": self.creator,
+                                 **(self.startups.pop(0) if self.startups else {"state": "RUNNING"})}
+            return {"cluster_id": cid}
+        cid = data["cluster_id"]
+        if op == "get":
+            if cid not in self.records:
+                raise attempts.https.MissingCluster("GET: fixture no longer exists")
+            return self.records[cid].copy()
+        if op == "delete":
+            self.records[cid]["state"] = "TERMINATED"
+        elif op == "permanent-delete":
+            if self.records[cid]["state"] != "TERMINATED":
+                raise AssertionError("permanent-delete on a nonterminal cluster")
+            del self.records[cid]
+        else:
+            raise AssertionError(op)
+        return {}
+
+    def writes(self):
+        return [op for method, op in self.calls if method == "POST"]
 
 
 class GhaAttemptsTest(unittest.TestCase):
@@ -32,20 +82,19 @@ class GhaAttemptsTest(unittest.TestCase):
                                       merge_sha="a" * 40)
         self.adapter = Mock()
         self.discover = self.enter(patch.object(attempts, "discover", return_value={"17.3": "4.0.0"}))
-        self.adapter.attempt_env.side_effect = lambda *args: {"DATABRICKS_HOST": "synthetic"}
-        self.adapter.cleanup_env.return_value = {"DATABRICKS_HOST": "synthetic"}
+        self.api = Workspace()
+        self.adapter.creator_name.return_value = self.api.creator
+        self.env = dict(DATABRICKS_HOST="synthetic", DATABRICKS_TOKEN="offline", DATABRICKS_CLOUD="aws",
+                        DATABRICKS_DRIVER="driver", DATABRICKS_WORKER="worker", DATABRICKS_RUNTIME="runtime")
+        self.adapter.attempt_env.side_effect = lambda *args: {**self.env}
+        self.adapter.cleanup_env.return_value = {**self.env}
         self.adapter.run_workload.return_value = 0
-        self.start = []
-        self.call = []
-        self.cleanup_status = (0, True, True)
-        self.classification = (1, False, False, "NOT_A_CLASSIFIED_SPARK_STARTUP_FAILURE")
-        self.plan = []
-        self.change_id = False
+        self.adapter.source_manifest.return_value = {"sha": self.args.merge_sha, "pins": {}}
         self.enter(patch.dict(attempts.os.environ, {"GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1",
-                                                   "RUNNER_TEMP": str(self.root)}, clear=True))
-        self.enter(patch.object(attempts, "lifecycle", side_effect=self.operation))
-        self.configure = self.enter(patch.object(attempts.subprocess, "run", return_value=Mock(
-            returncode=0, stdout=b'{"cluster_spec":{"custom_tags":{"Existing":"keep"}}}')))
+                       "GITHUB_REPOSITORY": attempts.REPO, "RUNNER_TEMP": str(self.root)}, clear=True))
+        self.enter(patch.dict(sys.modules, {"requests": Mock()}))  # Legacy template imports requests.
+        self.client = self.enter(patch.object(attempts.https, "workspace_api", return_value=self.api.api))
+        self.enter(patch.object(attempts.https.time, "sleep"))
         self.enter(contextlib.redirect_stdout(io.StringIO()))
 
     def enter(self, context):
@@ -53,7 +102,14 @@ class GhaAttemptsTest(unittest.TestCase):
         self.addCleanup(context.__exit__, None, None, None)
         return result
 
-    def test_config_only_ssh_preserves_legacy_default(self):
+    def run_row(self, **scope):
+        attempts.run_row(self.args, self.adapter, **scope)
+
+    def post(self, **scope):
+        self.args.operation = "cleanup"
+        self.run_row(**scope)
+
+    def test_manual_ssh_default_and_optional_config_unchanged(self):
         module = importlib.util.spec_from_file_location("clusterutils", attempts.DB / "clusterutils.py")
         utils = importlib.util.module_from_spec(module)
         with patch.dict(sys.modules, {"requests": Mock()}):
@@ -63,201 +119,181 @@ class GhaAttemptsTest(unittest.TestCase):
         cfg = str(self.root / "ssh_config")
         with patch.dict(attempts.os.environ, DATABRICKS_SSH_CONFIG=cfg):
             self.assertIn("StrictHostKeyChecking=no", opts("key"))
-            with patch.dict(attempts.os.environ, DATABRICKS_SSH_CONFIG_ONLY="1"):
-                with self.assertRaises(ValueError):
-                    opts("key")
-                Path(cfg).touch()
-                self.assertEqual(opts("key"), ["-F", cfg, "-i", "key"])
-
-    def operation(self, op, path, env):
-        self.call.append(op)
-        if op == "prepare":
-            self.start.append(path.parent.name)
-            rc, phase, cid = self.plan.pop(0) if self.plan else (0, "READY", "original")
-            state = dict(schema=1, phase=phase, cluster_id=cid, driver="synthetic.invalid",
-                         reason="TEST_STATE", retryable=rc == 75,
-                         **{k: env[v] for k, v in attempts.IDENTITY.items()})
-        else:
-            state = json.loads(path.read_text())
-            rc = 0
-            if op == "classify-startup":
-                rc, state["classification_available"], state["retryable"], state["reason"] = self.classification
-                if self.change_id:
-                    state["cluster_id"] = "another"
-            if op == "cleanup":
-                rc, state["termination_confirmed"], state["cleanup_complete"] = self.cleanup_status
-        path.write_text(json.dumps(state))
-        return rc
-
-    def run_row(self):
-        attempts.run_row(self.args, self.adapter)
+            self.assertEqual(opts("key")[-2:], ["-F", cfg])
 
     def test_success_then_post_cleanup(self):
         self.run_row()
-        self.assertEqual(self.call, ["prepare", "install-readiness", "verify-readiness", "cleanup"])
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+        self.assertEqual(self.api.calls[-1], ("GET", "get"))
+        self.adapter.source_manifest.assert_called_once_with(self.args.candidate.resolve(), self.args.merge_sha)
         build, test = self.adapter.run_workload.call_args_list
-        self.assertEqual(build.args[0], "build")
-        self.assertEqual(test.args[0], "test")
-        self.assertEqual(test.args[1]["DATABRICKS_CLUSTER_ID"], "original")
-        self.assertNotIn("SPARK_STARTUP_CHECK", build.args[1].get("EXTRA_ENVS", ""))
-        self.assertIn("SPARK_STARTUP_CHECK=", test.args[1]["EXTRA_ENVS"])
+        self.assertEqual([build.args[0], test.args[0]], ["build", "test"])
+        for call in (build, test):
+            self.assertEqual(call.args[1]["DATABRICKS_CLUSTER_ID"], "fixture-1")
+            self.assertNotIn("DATABRICKS_DRIVER_ADDRESS", call.args[1])
+            self.assertIs(call.args[-1], self.adapter.source_manifest.return_value)
+        config, = self.api.specs
+        name = "gha-42-1-17.3-CI_PART2-aws2-1"
+        self.assertEqual(config["cluster_name"], name)
+        self.assertEqual(config["custom_tags"], {**attempts.managed_tags("aws2", name), "ResourceClass": "SingleNode"})
+        self.assertNotIn("ssh_public_keys", config)
+        self.assertEqual(config["autotermination_minutes"], 390)
+        self.assertEqual((config["data_security_mode"], config["single_user_name"]), ("SINGLE_USER", self.api.creator))
+        self.assertEqual((config["driver_node_type_id"], config["node_type_id"]), ("driver", "worker"))
+        self.assertEqual(config["aws_attributes"]["availability"], "SPOT_WITH_FALLBACK")
         self.assertFalse((self.args.state_dir / "work").exists())
-        spec = json.loads((self.args.state_dir / "aws2-1/config.json").read_text())["cluster_spec"]
-        self.assertEqual(spec["cluster_name"], "gha-42-1-17.3-CI_PART2-aws2-1")
-        self.assertEqual(spec["custom_tags"], {"Existing": "keep", "CI_MANAGED_BY": "cudf-spark-databricks-ci",
-                         "CI_REPOSITORY": "NVIDIA/cudf-spark", "CI_WORKFLOW": ".github/workflows/databricks-ci.yml",
-                         "CI_PROFILE": "aws2", "CI_BUILD_TAG": spec["cluster_name"]})
-        self.args.operation = "cleanup"
-        self.run_row()
-        self.run_row()
-        self.discover.assert_called_once_with(self.args.candidate, self.args.merge_sha)
-        self.assertEqual(self.start, ["aws2-1"])
-        self.adapter.cleanup_env.assert_called_once_with("aws2")
-        self.assertFalse((self.args.state_dir / "aws2-1").exists())
+        self.post()
+        self.post()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
         self.assertTrue((self.args.state_dir / "cleanup-complete").is_file())
 
-    def test_runtime_must_be_enabled_before_creating_any_attempt_state(self):
+    def test_validate_inputs_and_identity_before_create(self):
         self.args.runtime = "19.10"
         with self.assertRaisesRegex(attempts.Failure, "not enabled"):
             self.run_row()
-        self.assertFalse(self.args.state_dir.exists())
-        self.assertFalse(self.adapter.mock_calls)
-        self.discover.return_value = {"19.10": "4.2.1"}
-        self.run_row()
-        self.assertEqual(self.adapter.attempt_env.call_args.args[:4], ("aws2", "19.10", "4.2.1", "CI_PART2"))
-
-    def test_preparation_capacity_is_bounded_and_ordered(self):
-        self.plan = [(75, "START", "allocated")] * 6
-        with self.assertRaisesRegex(attempts.Failure, "attempts exhausted"):
+        self.adapter.source_manifest.assert_not_called()
+        self.args.runtime = "17.3"
+        self.adapter.creator_name.return_value = "wrong-principal"
+        with self.assertRaisesRegex(attempts.Failure, "principal"):
             self.run_row()
-        self.assertEqual(self.start, ["aws2-1", "aws2-2", "aws-1", "aws-2", "azure3-1", "azure3-2"])
-        self.assertEqual(self.call, ["prepare", "cleanup"] * 6)
+        self.assertEqual(self.api.writes(), [])
+
+    def test_capacity_bounded_and_ordered(self):
+        self.api.startups = [{"state": "TERMINATED", "termination_reason": {
+            "code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT", "type": "CLIENT_ERROR"}}] * 6
+        with self.assertRaisesRegex(attempts.Failure, "exhausted.*STOCKOUT"):
+            self.run_row()
+        self.assertEqual([s["cluster_name"].split("PART2-")[1] for s in self.api.specs],
+                         ["aws2-1", "aws2-2", "aws-1", "aws-2", "azure3-1", "azure3-2"])
+        self.assertEqual(self.api.writes(), ["create", "permanent-delete"] * 6)
         self.adapter.run_workload.assert_not_called()
 
-    def test_ambiguous_create_is_never_retried_or_deleted(self):
-        self.plan = [(75, "CREATE", None)]
+    def test_unexpected_compute_is_cleaned_without_running_approved_source(self):
+        self.api.startups = [{"state": "RUNNING", "data_security_mode": "NONE"}]
+        with self.assertRaisesRegex(attempts.Failure, "dedicated single-node"):
+            self.run_row()
+        self.adapter.run_workload.assert_not_called()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+
+    def test_lost_workload_response_does_not_reexecute(self):
+        self.adapter.run_workload.side_effect = [0, attempts.https.TransientRequest("GET command status timed out")]
+        with self.assertRaisesRegex(attempts.https.TransientRequest, "command status timed out"):
+            self.run_row()
+        self.assertEqual(len(self.adapter.run_workload.call_args_list), 2)
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+
+    def test_lost_create_response_no_second_allocation(self):
+        def ambiguous(method, path, **data):
+            result = self.api.api(method, path, **data)
+            if path.endswith("/create"):
+                raise attempts.https.TransientRequest("POST create timed out")
+            return result
+        self.client.return_value = ambiguous
+        with self.assertRaisesRegex(attempts.Failure, "create timed out.*No confirmed cluster ID"):
+            self.run_row()
         with self.assertRaisesRegex(attempts.Failure, "No confirmed cluster ID"):
+            self.post()
+        self.assertEqual(self.api.writes(), ["create"])
+
+    def test_foreign_cluster_record_blocks_cleanup_and_retry(self):
+        def foreign(phase, env, cid, *args):
+            if phase == "test":
+                self.api.records[cid]["custom_tags"]["CI_PROFILE"] = "different"
+                return 75
+            return 0
+        self.adapter.run_workload.side_effect = foreign
+        with self.assertRaisesRegex(attempts.Failure, "foreign cluster identity"):
             self.run_row()
-        self.assertEqual(self.call, ["prepare"])
-        (self.args.state_dir / "aws2-1/state.json").unlink()
-        self.args.operation = "cleanup"
+        with self.assertRaisesRegex(attempts.Failure, "foreign cluster identity"):
+            self.post()
+        self.assertEqual(self.api.writes(), ["create"])
+
+    def test_post_reconciles_ambiguous_purge_without_replay(self):
+        def interrupted(method, path, **data):
+            result = self.api.api(method, path, **data)
+            if path.endswith("/permanent-delete"):
+                raise attempts.https.TransientRequest("response lost")
+            return result
+        self.client.return_value = interrupted
+        self.adapter.run_workload.return_value = 12
+        with self.assertRaisesRegex(attempts.Failure, "Build failed.*12.*cleanup: response lost"):
+            self.run_row()
+        self.post()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+
+    def test_api_denial_is_not_missing_and_cannot_authorize_replacement(self):
+        def denied(method, path, **data):
+            if path.endswith("/get") and not self.api.records:
+                raise RuntimeError("GET cluster: HTTP 404 (unclassified)")
+            return self.api.api(method, path, **data)
+        self.client.return_value = denied
+        self.api.startups = [{"state": "TERMINATED", "termination_reason": {
+            "code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT"}}]
+        with self.assertRaisesRegex(attempts.Failure, "STOCKOUT.*HTTP 404"):
+            self.run_row()
+        self.assertEqual(self.api.writes(), ["create", "permanent-delete"])
+
+    def test_ordinary_test_failure_and_cancellation_do_not_reallocate(self):
+        self.adapter.run_workload.side_effect = [0, 76]
+        with self.assertRaisesRegex(attempts.Failure, "Test failed .*76"):
+            self.run_row()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+        self.post()
+        self.args.operation = "run"
+        self.args.state_dir = self.root / "next"
+        def cancel(phase, env, cid, *args):
+            if phase == "test":
+                self.api.records[cid].update(state="TERMINATED", termination_reason={
+                    "code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT"})
+                return 143
+            return 0
+        self.adapter.run_workload.side_effect = cancel
+        with self.assertRaisesRegex(attempts.Failure, "Test failed .*143"):
+            self.run_row()
+        self.assertEqual(len(self.api.specs), 2)
+
+    def test_only_provider_corroborated_failure_can_retry(self):
+        def fail(phase, env, cid, *args):
+            if phase == "test" and cid == "fixture-1":
+                self.api.records[cid].update(state="TERMINATED", termination_reason={
+                    "code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT", "type": "CLIENT_ERROR"})
+                return 1
+            return 0
+        self.adapter.run_workload.side_effect = fail
+        self.run_row()
+        self.assertEqual(self.api.writes(), ["create", "permanent-delete", "create", "delete", "permanent-delete"])
+        self.assertIsNone(attempts.confirmed_infra({"state": "RUNNING", "termination_reason": {
+            "code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT"}}))
+        self.assertIsNone(attempts.confirmed_infra({"state": "TERMINATED", "termination_reason": {
+            "code": "BOOTSTRAP_TIMEOUT", "type": "CLIENT_ERROR"}}))
+
+    def test_post_rejects_lost_or_changed_identity(self):
+        self.run_row()
+        with patch.dict(attempts.os.environ, GITHUB_RUN_ATTEMPT="2"):
+            with self.assertRaisesRegex(attempts.Failure, "ownership"):
+                self.post()
+        path = self.args.state_dir / "aws2-1/state.json"
+        state = json.loads(path.read_text())
+        path.write_text(json.dumps({**state, "cluster_id": "other"}))
+        with self.assertRaisesRegex(attempts.Failure, "ID changed"):
+            self.post()
+        path.unlink()
         with self.assertRaisesRegex(attempts.Failure, "Missing or unreadable cluster state"):
-            self.run_row()
+            self.post()
         self.assertFalse((self.args.state_dir / "cleanup-complete").exists())
 
-    def test_unconfirmed_cleanup_blocks_replacement(self):
-        self.plan = [(75, "SSH", "allocated")]
-        self.cleanup_status = (0, False, True)
-        with self.assertRaisesRegex(attempts.Failure, "prepare: exit=75.*cleanup unconfirmed"):
-            self.run_row()
-        self.assertEqual(self.call, ["prepare", "cleanup"])
-
-    def test_build_is_never_classified(self):
-        self.adapter.run_workload.return_value = 75
-        with self.assertRaisesRegex(attempts.Failure, "Build failed"):
-            self.run_row()
-        self.assertEqual(self.call, ["prepare", "cleanup"])
-
-    def test_ordinary_test_failure_does_not_repeat(self):
-        self.adapter.run_workload.side_effect = [0, 75]
-        with self.assertRaisesRegex(attempts.Failure, "Test failed .*exit=75"):
-            self.run_row()
-        self.assertEqual(self.call, ["prepare", "install-readiness", "classify-startup", "cleanup"])
-
-    def test_interrupted_test_has_no_classification_or_replacement(self):
-        self.adapter.run_workload.side_effect = [0, 143]
-        with self.assertRaisesRegex(attempts.Failure, "interrupted"):
-            self.run_row()
-        self.assertEqual(self.call, ["prepare", "install-readiness", "cleanup"])
-
-    def test_foreign_classification_never_deletes_or_replaces(self):
-        self.adapter.run_workload.side_effect = [0, 1]
-        self.change_id = True
-        with self.assertRaisesRegex(attempts.Failure, "cluster ID changed"):
-            self.run_row()
-        self.args.operation = "cleanup"
-        with self.assertRaisesRegex(attempts.Failure, "cluster ID changed"):
-            self.run_row()
-        self.assertEqual(self.call, ["prepare", "install-readiness", "classify-startup"])
-
-    def test_only_provider_corroborated_test_startup_can_retry(self):
-        self.classification = (75, True, True, "CLOUD_PROVIDER_RESOURCE_STOCKOUT")
-        self.adapter.run_workload.side_effect = [0, 1, 0, 0]
-        self.run_row()
-        self.assertEqual(self.start, ["aws2-1", "aws2-2"])
-        self.assertEqual(self.call[2:5], ["classify-startup", "cleanup", "prepare"])
-
-    def test_marker_on_candidate_driver_is_not_authority_for_retry(self):
-        self.classification = (75, True, True, "SPARK_STARTUP_DISK_FULL")
-        self.adapter.run_workload.side_effect = [0, 1]
-        with self.assertRaisesRegex(attempts.Failure, "SPARK_STARTUP_DISK_FULL"):
-            self.run_row()
-        self.assertEqual(self.call, ["prepare", "install-readiness", "classify-startup", "cleanup"])
-
-    def test_post_refuses_to_forget_a_known_id_if_state_is_lost(self):
-        self.run_row()
-        (self.args.state_dir / "aws2-1/state.json").unlink()
-        self.args.operation = "cleanup"
-        with self.assertRaisesRegex(attempts.Failure, "Missing or unreadable cluster state"):
-            self.run_row()
-        self.assertTrue(self.args.state_dir.exists())
-
-    def test_post_rejects_other_run_before_using_profile(self):
-        self.run_row()
-        self.args.operation = "cleanup"
-        with patch.dict(attempts.os.environ, {"GITHUB_RUN_ATTEMPT": "2"}):
-            with self.assertRaisesRegex(attempts.Failure, "ownership"):
-                self.run_row()
-        self.adapter.cleanup_env.assert_not_called()
-
-    def test_post_cannot_confirm_cleanup_if_runner_lost_attempt_directory(self):
-        self.run_row()
-        attempts.shutil.rmtree(self.args.state_dir)
-        self.args.operation = "cleanup"
-        with self.assertRaisesRegex(attempts.Failure, "ownership"):
-            self.run_row()
-        self.adapter.cleanup_env.assert_not_called()
-
-
-class LifecycleContractTest(unittest.TestCase):
-    def test_real_cli_state_classifier_and_cleanup(self):
-        # Exercise the checked-in CLI and argument parser. Only its network/SSH boundaries are fake.
-        spec = importlib.util.spec_from_file_location("db_lifecycle", attempts.DB / "cluster_fallback.py")
-        cli = importlib.util.module_from_spec(spec)
-        with patch.dict(sys.modules, {"requests": Mock(), "clusterutils": Mock()}):
-            spec.loader.exec_module(cli)
-        env = {v: "offline-" + k for k, v in attempts.IDENTITY.items()}
-        marker = json.dumps({"runtime": "databricks", "phase": "FAILED", "reason": "UNSPECIFIED"})
-        calls = []
-
-        def api(method, endpoint, **kwargs):
-            calls.append((method, endpoint))
-            if endpoint == "create":
-                self.assertEqual(kwargs["json"]["custom_tags"]["CI_BUILD_TAG"], env["BUILD_TAG"])
-                return {"cluster_id": "fixture-id"}
-            self.assertEqual((kwargs.get("params") or kwargs["json"])["cluster_id"], "fixture-id")
-            return {"state": "TERMINATED", "termination_reason": {"code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT"}}
-
-        def fake_transport(argv, **kwargs):
-            self.assertEqual(Path(argv[2]), attempts.DB / "cluster_fallback.py")
-            with patch.object(sys, "argv", argv[2:]), patch.dict(attempts.os.environ, kwargs["env"], clear=True):
-                return SimpleNamespace(returncode=cli.main())
-
-        with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(cli, "request", side_effect=api))
-            stack.enter_context(patch.object(cli, "wait_for_driver", return_value="driver.invalid"))
-            stack.enter_context(patch.object(cli, "wait_for_ssh"))
-            stack.enter_context(patch.object(cli, "readiness_command", side_effect=[
-                None, SimpleNamespace(stdout=marker), SimpleNamespace(stdout="")]))
-            stack.enter_context(patch.object(attempts.subprocess, "run", side_effect=fake_transport))
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            path = Path(directory) / "state.json"
-            path.with_name("config.json").write_text(json.dumps(
-                {"cluster_spec": {"num_workers": 0}, "readiness_modes": ["databricks"]}))
-            with self.assertRaisesRegex(attempts.Retryable, "CLOUD_PROVIDER_RESOURCE_STOCKOUT"):
-                attempts.run_attempt(path, env, lambda phase, _env, _cid: int(phase == "test"))
-            self.assertEqual(calls, [("POST", "create"), ("GET", "get"), ("POST", "delete"),
-                                     ("GET", "get"), ("POST", "permanent-delete")])
-            state = json.loads(path.read_text())
-            self.assertIs(state["cleanup_complete"], True)
-            self.assertIs(state["termination_confirmed"], True)
+    def test_fork_single_allocation_cannot_use_production_tags(self):
+        scope = dict(profiles=("aws2",), attempts_per_profile=1, repository="example/cudf-spark",
+                     workflow=".github/workflows/fork.yml")
+        with self.assertRaisesRegex(attempts.Failure, "scope mismatch"):
+            self.run_row(**scope)
+        self.api.startups = [{"state": "TERMINATED", "termination_reason": {"code": "CLOUD_PROVIDER_RESOURCE_STOCKOUT"}}]
+        with patch.dict(attempts.os.environ, GITHUB_REPOSITORY=scope["repository"],
+                        GITHUB_WORKFLOW_REF=scope["repository"] + "/" + scope["workflow"] + "@refs/heads/pilot"):
+            with self.assertRaisesRegex(attempts.Failure, "exhausted"):
+                self.run_row(**scope)
+            self.post(**scope)
+        self.assertEqual(len(self.api.specs), 1)
+        self.assertEqual(self.api.specs[0]["autotermination_minutes"], 10)
+        self.assertTrue(self.api.specs[0]["cluster_name"].startswith("fork-gha-"))
+        self.assertEqual(self.api.specs[0]["custom_tags"]["CI_MANAGED_BY"], attempts.MANAGER + "-fork")

@@ -3,7 +3,11 @@
 
 """Filter untrusted Databricks log records on the controller, not on the PR driver."""
 
+import base64
+import json
+import os
 import re
+import stat
 from ipaddress import IPv6Address
 from urllib.parse import urlsplit
 
@@ -146,3 +150,32 @@ def public_lines(records, hidden=()):
         if line.strip() and not any(s in line for s in hidden) and _safe_text(line):
             public.append(line if len(line) <= 500 else line[:500] + _OMITTED)
     return public
+
+
+def snapshot(directory, finished, ok):
+    """Return bounded post-run output; never follow links or block on a driver-supplied pipe."""
+    if not finished:
+        raise ValueError("No live preview")
+    cap = 512 * 1024
+    fd = os.open(directory / "console.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or meta.st_size > cap:
+            raise ValueError("Invalid driver receipt")
+        data = stream.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError("Oversized driver receipt")
+    chunks = json.loads(data)
+    if not isinstance(chunks, list) or len(chunks) != 4 or not all(isinstance(c, str) for c in chunks):
+        raise ValueError("Invalid driver streams")
+    streams = []
+    for encoded, max_kb in zip(chunks, (129, 129, 33, 33)):
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > max_kb * 1024:
+            raise ValueError("Oversized driver stream")
+        streams.append(public_lines(re.sub(rb"\x1b\[[0-9;:]*m", b"", raw).split(b"\n")))
+    limit = 1000 if ok else 10
+    diag = [] if ok else (streams[2] + streams[3] or (streams[1] or streams[0])[-80:])
+    if len(diag) > 1000:
+        diag = diag[:499] + [_OMITTED] + diag[-500:]
+    return {"stdout": streams[0][-limit:], "stderr": streams[1][-limit:], "diagnostics": diag}

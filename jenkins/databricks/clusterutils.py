@@ -150,14 +150,9 @@ class ClusterUtils(object):
 
     @staticmethod
     def get_ssh_options(private_key_file):
-        config = os.environ.get("DATABRICKS_SSH_CONFIG")
-        if os.environ.get("DATABRICKS_SSH_CONFIG_ONLY") == "1":
-            # Command-line -o overrides the host verification policy in the supplied config.
-            if not config or not os.path.isfile(config):
-                raise ValueError("Expected the per-attempt SSH config")
-            return ["-F", config, "-i", private_key_file]
         options = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                    "-i", private_key_file]
+        config = os.environ.get("DATABRICKS_SSH_CONFIG")
         # A per-attempt config supplies the target port and optional jump host.
         return options + (["-F", config] if config else ["-p", "2200"])
 

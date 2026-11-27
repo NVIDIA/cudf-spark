@@ -50,6 +50,22 @@ jobs:
           python3 -I control/.github/workflows/databricks-ci/prior-cleanup.py --runtime "$DB_RUNTIME" --mode "$DB_MODE"
           python3 -I -c 'import requests'
           bash control/.github/workflows/databricks-ci/submodules.sh candidate
+      - name: Look up the trusted Maven seed digest
+        id: seed
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .db-ci-maven-seed/sha256
+          key: db-ci-maven-receipt-v1-latest
+          restore-keys: db-ci-maven-receipt-v1-
+      - name: Select verified seed or use a cold Maven repository
+        if: steps.seed.outcome == 'success' && steps.seed.outputs.cache-matched-key != ''
+        shell: bash
+        run: |
+          if read -r sha < .db-ci-maven-seed/sha256 && [[ $sha =~ ^[0-9a-f]{64}$ ]]; then
+            echo "DB_MAVEN_SEED_SHA256=$sha" >> "$GITHUB_ENV"
+          fi
       - name: Build and test on Databricks
         id: attempts
         timeout-minutes: 330
@@ -58,8 +74,6 @@ jobs:
           DATABRICKS_AWS2_TOKEN: ${{ secrets.DATABRICKS_AWS2_TOKEN }}
           DATABRICKS_AWS_TOKEN: ${{ secrets.DATABRICKS_AWS_TOKEN }}
           DATABRICKS_AZURE3_TOKEN: ${{ secrets.DATABRICKS_AZURE3_TOKEN }}
-          DATABRICKS_JUMP_PRIVATE_KEY: ${{ secrets.DATABRICKS_JUMP_PRIVATE_KEY }}
-          DATABRICKS_JUMP_KNOWN_HOSTS: ${{ secrets.DATABRICKS_JUMP_KNOWN_HOSTS }}
         run: |
           args=()
           if [[ ${EXPECTED_POLICY:2:1} == 1 ]]; then args+=(--reduced); fi
