@@ -157,7 +157,7 @@ object DeltaRuntimeShim {
     }
   }
 
-  private[rapids] def getPreDelta42ShimClassName(
+  private[rapids] def getSpark4PreDelta42ShimClassName(
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
     (deltaVersion, sparkVersion) match {
@@ -165,8 +165,14 @@ object DeltaRuntimeShim {
         Some("org.apache.spark.sql.delta.rapids.delta40x.Delta40xRuntimeShim")
       case ("4.1.0", SparkVersion("4", "1", "0" | "1")) =>
         Some("org.apache.spark.sql.delta.rapids.delta41x.Delta41xRuntimeShim")
-      case (_, SparkVersion(major, _, _)) if BigInt(major) >= 4 =>
-        None
+      case _ => None
+    }
+  }
+
+  private def getPreDelta42ShimClassName(deltaVersion: String): Option[String] = {
+    SPARK_VERSION match {
+      case SparkVersion(major, _, _) if BigInt(major) >= 4 =>
+        getSpark4PreDelta42ShimClassName(deltaVersion, SPARK_VERSION)
       case _ =>
         getPreSpark4ShimClassName(deltaVersion)
     }
@@ -203,7 +209,7 @@ object DeltaRuntimeShim {
     if (isDelta42Plus(deltaVersion)) {
       getDelta42PlusShimClassName(deltaVersion, SPARK_VERSION)
     } else {
-      getPreDelta42ShimClassName(deltaVersion, SPARK_VERSION)
+      getPreDelta42ShimClassName(deltaVersion)
     }
   }
 

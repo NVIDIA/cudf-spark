@@ -122,7 +122,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("4.1.0", "4.1.1", "delta41x")
     ).foreach { case (deltaVersion, sparkVersion, expectedShim) =>
       val shimClassName =
-        DeltaRuntimeShim.getPreDelta42ShimClassName(deltaVersion, sparkVersion)
+        DeltaRuntimeShim.getSpark4PreDelta42ShimClassName(deltaVersion, sparkVersion)
       assert(shimClassName.exists(_.contains(expectedShim)))
     }
   }
@@ -138,7 +138,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("3.3.3", "4.0.1"),
       ("2.4.0", "4.1.1")
     ).foreach { case (deltaVersion, sparkVersion) =>
-      assert(DeltaRuntimeShim.getPreDelta42ShimClassName(
+      assert(DeltaRuntimeShim.getSpark4PreDelta42ShimClassName(
         deltaVersion, sparkVersion).isEmpty)
     }
   }

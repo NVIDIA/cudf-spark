@@ -373,6 +373,9 @@ class SourceResolverTest(unittest.TestCase):
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/delta/DeltaProbeImplSuite.scala',
              'spark401', ('401', '402', '411'),
              ('401', '402', '405', '411', '412', '413', '414')),
+            ('tests', 'src/test/scala/org/apache/spark/sql/delta/rapids/'
+             'DeltaRuntimeShimSuite.scala', 'spark401', ('401', '402', '411'),
+             ('401', '402', '405', '411', '412', '413', '414')),
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/shims/'
              'Spark40GpuDataSourceCustomMetricsSuite.scala', 'spark400',
              ('400', '400db173', '401', '402', '403', '404',
