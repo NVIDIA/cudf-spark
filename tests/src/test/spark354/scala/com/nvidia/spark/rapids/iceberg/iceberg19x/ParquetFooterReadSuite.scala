@@ -214,7 +214,8 @@ class ParquetFooterReadSuite extends AnyFunSuite with Matchers with BeforeAndAft
     val column = withResource(GpuParquetIO.openReader(input, new Path(input.path()),
         ParquetReadOptions.builder().build(), Map.empty)) { reader =>
       reader.getRowGroups.asScala.flatMap(_.getColumns.asScala)
-        .find(c => c.hasDictionaryPage && c.getPrimitiveType.getPrimitiveTypeName == PrimitiveTypeName.INT32)
+        .find(c => c.hasDictionaryPage &&
+          c.getPrimitiveType.getPrimitiveTypeName == PrimitiveTypeName.INT32)
         .get.getPath.toDotString
     }
     input.opens shouldBe 0
