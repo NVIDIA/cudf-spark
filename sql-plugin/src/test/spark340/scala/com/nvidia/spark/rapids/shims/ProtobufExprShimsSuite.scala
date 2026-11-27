@@ -115,10 +115,12 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
   private def fakeMessage(
       fields: Seq[ProtobufFieldDescriptor],
-      name: String = "test.Message"): ProtobufMessageDescriptor =
+      name: String = "test.Message",
+      extensions: Boolean = false): ProtobufMessageDescriptor =
     new ProtobufMessageDescriptor {
       def syntax: String = "PROTO2"
       override def fullName: String = name
+      override def hasExtensions: Boolean = extensions
       def findField(n: String): Option[ProtobufFieldDescriptor] = fields.find(_.name == n)
       def fieldNames: Seq[String] = fields.map(_.name)
     }
@@ -212,6 +214,28 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
       idSchema, descriptor, "root message", depth = 0) ==
       Left("root message has fields missing from the Spark schema: node"))
+  }
+
+  test("compat rejects hidden fields when protobuf extensions are registered") {
+    // Spark validates extension fields through its registry, and they are absent from the
+    // descriptor's own fields, so hiding the message they target would skip that check.
+    val extended = fakeMessage(Nil, "test.Empty", extensions = true)
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("empty", 2, "MESSAGE", Some(extended))), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 0) ==
+      Left("root message has fields missing from the Spark schema: empty"))
+
+    // An extension on the message that owns the omitted field is rejected as well.
+    val extendedRoot = fakeMessage(Seq(fakeField("id", 1, "INT32"), emptyMessageField),
+      "test.Root", extensions = true)
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, extendedRoot, "root message", depth = 0) ==
+      Left("root message has registered protobuf extensions, " +
+        "which the GPU decoder does not validate"))
   }
 
   test("compat rejects oneof and map empty-message fields missing from the Spark schema") {

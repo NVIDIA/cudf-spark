@@ -34,6 +34,7 @@ from protobuf_data_gen import call_protobuf_function, materialize_protobuf_data
 from spark_session import (
     is_before_spark_340,
     is_databricks_runtime,
+    is_spark_420_or_later,
     is_spark_protobuf_available,
     spark_version,
     with_cpu_session,
@@ -272,13 +273,14 @@ def _field(name, number, ftype, label="optional", default=None,
     }
 
 
-def _msg(name, fields, enums=None, oneofs=None):
+def _msg(name, fields, enums=None, oneofs=None, extension_ranges=None):
     """Declarative message spec for `_build_proto2_descriptor`."""
     return {
         "name": name,
         "fields": fields,
         "enums": enums or [],
         "oneofs": oneofs or [],
+        "extension_ranges": extension_ranges or [],
     }
 
 
@@ -288,7 +290,8 @@ def _enum(name, values, allow_alias=False):
 
 
 def _build_proto2_descriptor(
-        spark, filename, messages, file_enums=None, java_string_check_utf8=False):
+        spark, filename, messages, file_enums=None, java_string_check_utf8=False,
+        file_extensions=None):
     """Build FileDescriptorSet bytes from declarative message and enum specs."""
     fd = _new_proto2_file(spark, filename)
     if java_string_check_utf8:
@@ -324,6 +327,8 @@ def _build_proto2_descriptor(
 
     for message_spec in messages:
         message_proto = fd.message_type.add(name=message_spec["name"])
+        for range_start, range_end in message_spec.get("extension_ranges", []):
+            message_proto.extension_range.add(start=range_start, end=range_end)
         for oneof_name in message_spec.get("oneofs", []):
             message_proto.oneof_decl.add(name=oneof_name)
         for enum_spec in message_spec["enums"]:
@@ -342,6 +347,18 @@ def _build_proto2_descriptor(
                 field_proto.options.packed = True
             if field_spec.get("oneof_index") is not None:
                 field_proto.oneof_index = field_spec["oneof_index"]
+
+    # File-level `extend` declarations: Spark reads them through its extension registry,
+    # so they never appear among the extended message's own fields.
+    for extendee, field_spec in file_extensions or []:
+        extension_proto = fd.extension.add(
+            name=field_spec["name"],
+            number=field_spec["number"],
+            label=label_map[field_spec["label"]],
+            type=type_map[field_spec["type"]],
+            extendee=extendee)
+        if field_spec["type_name"] is not None:
+            extension_proto.type_name = field_spec["type_name"]
 
     fds = descriptor_pb2.FileDescriptorSet()
     fds.file.add().CopyFrom(fd)
@@ -997,6 +1014,23 @@ def _build_nested_empty_message_field_descriptor_set_bytes(spark):
             _field("id", 1, "INT32"),
             _field("child", 2, "MESSAGE", type_name=".test.Child"),
         ]),
+    ])
+
+
+def _build_extension_empty_message_descriptor_set_bytes(spark):
+    """`extend Empty { optional Ext ext = 100; }`: Spark still reads Empty as an empty schema
+    and drops Root's field, but validates the extension through its registry. The extension
+    is a separate empty message because extending Empty with itself is a recursive schema,
+    which Spark rejects during analysis."""
+    return _build_proto2_descriptor(spark, "extension_empty_field.proto", [
+        _msg("Empty", [], extension_ranges=[(100, 200)]),
+        _msg("Ext", []),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+    ], file_extensions=[
+        (".test.Empty", _field("ext", 100, "MESSAGE", type_name=".test.Ext")),
     ])
 
 
@@ -1950,8 +1984,10 @@ def _build_group_descriptor_set_bytes(spark):
     ])
 
 
-def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None):
-    return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id)
+def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None,
+                   marks=()):
+    return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id,
+                        marks=marks)
 
 
 _oneof_child = _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"x")
@@ -1989,6 +2025,29 @@ _fallback_cases = [
     _fallback_case("nesting_too_deep",
                    lambda spark: _build_nested_depth_descriptor_set_bytes(spark, 12),
                    "Level1", _encode_nested_depth_message(1, 12)),
+    # Spark validates registered extension fields through its registry, which is absent from
+    # the descriptor fields the GPU decoder reads, so the message they target stays on the CPU.
+    _fallback_case("registered_extension_on_empty_message",
+                   _build_extension_empty_message_descriptor_set_bytes, "Root",
+                   _encode_length_delimited_field(
+                       2, _encode_length_delimited_field(100, b"")),
+                   conf={"spark.sql.function.protobufExtensions.enabled": "true"},
+                   marks=pytest.mark.skipif(
+                       not is_spark_420_or_later(),
+                       reason="protobuf extension registry was added in Spark 4.2")),
+    # The same descriptor with a malformed payload inside the extension: on Spark 4.2 the CPU
+    # returns a null row in PERMISSIVE, so a GPU decode that skipped the extension would
+    # return a decoded row instead.
+    _fallback_case("malformed_registered_extension",
+                   _build_extension_empty_message_descriptor_set_bytes, "Root",
+                   _encode_length_delimited_field(
+                       2, _encode_length_delimited_field(
+                           100, _encode_tag(1, 0) + _MALFORMED_VARINT)),
+                   options={"mode": "PERMISSIVE"},
+                   conf={"spark.sql.function.protobufExtensions.enabled": "true"},
+                   marks=pytest.mark.skipif(
+                       not is_spark_420_or_later(),
+                       reason="protobuf extension registry was added in Spark 4.2")),
     _fallback_case("unsupported_option", _build_simple_descriptor_set_bytes, "Simple",
                    _simple_valid, options={"emit.default.values": "true"}),
     _fallback_case("disabled_by_expression_config", _build_simple_descriptor_set_bytes, "Simple",

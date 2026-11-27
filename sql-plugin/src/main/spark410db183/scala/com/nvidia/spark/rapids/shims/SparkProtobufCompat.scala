@@ -25,4 +25,7 @@ package com.nvidia.spark.rapids.shims
 private[shims] object SparkProtobufCompat extends BinarySparkProtobufCompat {
   override private[shims] def unwrapMessageDescriptor(raw: AnyRef): AnyRef =
     ProtobufReflection.invoke0[AnyRef](raw, "descriptor")
+
+  override private[shims] def messagesWithExtensions(raw: AnyRef): Set[String] =
+    readExtensionOwners(raw)
 }

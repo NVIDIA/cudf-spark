@@ -132,9 +132,16 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
         .map(name => name -> emptyMessageField(desc, name, depth))
       val (hidden, unsupported) = omitted.partition(_._2.isDefined)
-      Either.cond(unsupported.isEmpty, hidden.flatMap(_._2),
-        s"$location has fields missing from the Spark schema: " +
-          unsupported.map(_._1).mkString(", "))
+      for {
+        // Spark validates extension fields through its registry, but they are absent from the
+        // descriptor's own fields, so the GPU decoder would never check them.
+        _ <- Either.cond(!desc.hasExtensions, (),
+          s"$location has registered protobuf extensions, " +
+            "which the GPU decoder does not validate")
+        fields <- Either.cond(unsupported.isEmpty, hidden.flatMap(_._2),
+          s"$location has fields missing from the Spark schema: " +
+            unsupported.map(_._1).mkString(", "))
+      } yield fields
     }.toEither.left.map { t =>
       s"Failed to read protobuf metadata for $location: ${t.getMessage}"
     }.flatMap(identity)
@@ -164,7 +171,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       desc: ProtobufMessageDescriptor,
       visited: Set[String],
       depth: Int): Boolean = {
-    if (desc.syntax != proto2Syntax || visited.contains(desc.fullName)) {
+    if (desc.syntax != proto2Syntax || desc.hasExtensions ||
+        visited.contains(desc.fullName)) {
       false
     } else {
       val nested = visited + desc.fullName
@@ -188,7 +196,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
         s"Failed to resolve protobuf descriptor for message '${exprInfo.messageName}': " +
           s"${cause.getMessage}"
       }
-      .map(new ReflectiveMessageDescriptor(_))
+      .map { case (desc, extensionOwners) =>
+        new ReflectiveMessageDescriptor(desc, extensionOwners)
+      }
   }
 
   private def reflectMessageName(e: Expression): Either[String, String] =
@@ -209,7 +219,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
   private def buildMessageDescriptor(
       messageName: String,
-      descriptorSource: ProtobufDescriptorSource): AnyRef = {
+      descriptorSource: ProtobufDescriptorSource): (AnyRef, Set[String]) = {
     val cls = ShimReflectionUtils.loadClass(sparkProtobufUtilsObjectClassName)
     val module = cls.getField("MODULE$").get(null)
     val buildMethod = cls.getMethod("buildDescriptor", classOf[String], classOf[scala.Option[_]])
@@ -220,11 +230,25 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       messageName,
       descriptorSource,
       filePath => Files.readAllBytes(Paths.get(filePath)))
-    unwrapMessageDescriptor(built)
+    (unwrapMessageDescriptor(built), messagesWithExtensions(built))
   }
 
   /** Shims override this when Spark wraps the descriptor together with extension metadata. */
   private[shims] def unwrapMessageDescriptor(raw: AnyRef): AnyRef = raw
+
+  /**
+   * Full names of the message types a registered extension targets, empty when this Spark
+   * version has no extension registry. Shims that read the wrapper override this.
+   */
+  private[shims] def messagesWithExtensions(raw: AnyRef): Set[String] = Set.empty
+
+  /**
+   * Reads the extension registry Spark built for this descriptor. Throws when the member
+   * cannot be read, so unreadable metadata falls back instead of hiding unvalidated fields.
+   */
+  private[shims] def readExtensionOwners(raw: AnyRef): Set[String] =
+    ProtobufReflection.invoke0[scala.collection.Map[String, Seq[AnyRef]]](
+      raw, "fullNamesToExtensions").iterator.filter(_._2.nonEmpty).map(_._1).toSet
 
   /** Supplies the path or bytes expected by Spark; readDescriptorFile is only needed for paths. */
   private[shims] def invokeBuildDescriptor(
@@ -244,7 +268,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private[shims] def readDescriptorSyntax(desc: AnyRef): String =
     Try(readFileSyntax(ProtobufReflection.getFile(desc))).getOrElse("")
 
-  private final class ReflectiveMessageDescriptor(raw: AnyRef) extends ProtobufMessageDescriptor {
+  private final class ReflectiveMessageDescriptor(
+      raw: AnyRef,
+      extensionOwners: Set[String]) extends ProtobufMessageDescriptor {
     override lazy val syntax: String = readDescriptorSyntax(raw)
     override lazy val javaStringCheckUtf8: Boolean = Try {
       val fileOptions =
@@ -254,15 +280,20 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     }.getOrElse(true)
 
     override def findField(name: String): Option[ProtobufFieldDescriptor] =
-      Option(ProtobufReflection.findFieldByName(raw, name)).map(new ReflectiveFieldDescriptor(_))
+      Option(ProtobufReflection.findFieldByName(raw, name))
+        .map(new ReflectiveFieldDescriptor(_, extensionOwners))
 
     override lazy val fieldNames: Seq[String] = ProtobufReflection.getFieldNames(raw)
 
     override lazy val fullName: String =
       ProtobufReflection.invoke0[String](raw, "getFullName")
+
+    override lazy val hasExtensions: Boolean = extensionOwners.contains(fullName)
   }
 
-  private final class ReflectiveFieldDescriptor(raw: AnyRef) extends ProtobufFieldDescriptor {
+  private final class ReflectiveFieldDescriptor(
+      raw: AnyRef,
+      extensionOwners: Set[String]) extends ProtobufFieldDescriptor {
     override lazy val name: String = ProtobufReflection.invoke0[String](raw, "getName")
     override lazy val fieldNumber: Int = ProtobufReflection.getFieldNumber(raw)
     override lazy val protoTypeName: String = typeName(ProtobufReflection.getFieldType(raw))
@@ -295,7 +326,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       }.flatMap(identity)
     override lazy val messageDescriptor: Option[ProtobufMessageDescriptor] =
       if (protoTypeName == "MESSAGE" || protoTypeName == "GROUP") {
-        Some(new ReflectiveMessageDescriptor(ProtobufReflection.getMessageType(raw)))
+        Some(new ReflectiveMessageDescriptor(
+          ProtobufReflection.getMessageType(raw), extensionOwners))
       } else {
         None
       }

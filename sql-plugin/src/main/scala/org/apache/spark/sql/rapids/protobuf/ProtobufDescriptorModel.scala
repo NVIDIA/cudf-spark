@@ -124,6 +124,8 @@ trait ProtobufMessageDescriptor {
   def syntax: String
   /** Fully qualified message name, used to detect recursive types. */
   def fullName: String = ""
+  /** Whether a registered protobuf extension targets this message type. */
+  def hasExtensions: Boolean = false
   /** File-level UTF-8 validation option; the reflective adapter uses true if reading fails. */
   def javaStringCheckUtf8: Boolean = false
   /** Looks up the protobuf field name, returning None when absent. */
