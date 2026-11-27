@@ -143,6 +143,18 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("getShimClassName dispatches pre-4.2 versions on the running Spark line") {
+    val (supportedDelta, expectedShim, unsupportedDelta) =
+      if (org.apache.spark.SPARK_VERSION.startsWith("4.0.")) {
+        ("4.0.1", "delta40x", "4.1.0")
+      } else {
+        assert(org.apache.spark.SPARK_VERSION.startsWith("4.1.1"))
+        ("4.1.0", "delta41x", "4.0.1")
+      }
+    assert(DeltaRuntimeShim.getShimClassName(supportedDelta).exists(_.contains(expectedShim)))
+    assert(DeltaRuntimeShim.getShimClassName(unsupportedDelta).isEmpty)
+  }
+
   test("Delta 3.3 runtime shim selection requires Delta 3.3") {
     Seq("3.3.0", "3.3.3").foreach { deltaVersion =>
       assert(DeltaRuntimeShim.getDelta33ShimClassName(deltaVersion).exists(_.contains("delta33x")))
