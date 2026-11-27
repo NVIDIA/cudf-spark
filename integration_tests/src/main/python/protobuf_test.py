@@ -34,6 +34,7 @@ from protobuf_data_gen import call_protobuf_function, materialize_protobuf_data
 from spark_session import (
     is_before_spark_340,
     is_databricks_runtime,
+    is_databricks_version_or_later,
     is_spark_420_or_later,
     is_spark_protobuf_available,
     spark_version,
@@ -1984,6 +1985,13 @@ def _build_group_descriptor_set_bytes(spark):
     ])
 
 
+# Spark 4.2 added the protobuf extension registry, and DBR 18.3 backports it on Spark 4.1,
+# which is the runtime the spark410db183 shim reads it on.
+_requires_extension_registry = pytest.mark.skipif(
+    not (is_spark_420_or_later() or is_databricks_version_or_later(18, 3)),
+    reason="protobuf extension registry requires Spark 4.2 or Databricks 18.3")
+
+
 def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None,
                    marks=()):
     return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id,
@@ -2032,9 +2040,7 @@ _fallback_cases = [
                    _encode_length_delimited_field(
                        2, _encode_length_delimited_field(100, b"")),
                    conf={"spark.sql.function.protobufExtensions.enabled": "true"},
-                   marks=pytest.mark.skipif(
-                       not is_spark_420_or_later(),
-                       reason="protobuf extension registry was added in Spark 4.2")),
+                   marks=_requires_extension_registry),
     # The same descriptor with a malformed payload inside the extension: on Spark 4.2 the CPU
     # returns a null row in PERMISSIVE, so a GPU decode that skipped the extension would
     # return a decoded row instead.
@@ -2045,9 +2051,7 @@ _fallback_cases = [
                            100, _encode_tag(1, 0) + _MALFORMED_VARINT)),
                    options={"mode": "PERMISSIVE"},
                    conf={"spark.sql.function.protobufExtensions.enabled": "true"},
-                   marks=pytest.mark.skipif(
-                       not is_spark_420_or_later(),
-                       reason="protobuf extension registry was added in Spark 4.2")),
+                   marks=_requires_extension_registry),
     _fallback_case("unsupported_option", _build_simple_descriptor_set_bytes, "Simple",
                    _simple_valid, options={"emit.default.values": "true"}),
     _fallback_case("disabled_by_expression_config", _build_simple_descriptor_set_bytes, "Simple",
