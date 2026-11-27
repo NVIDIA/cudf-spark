@@ -8,12 +8,17 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 import source
+
+with patch.object(sys, "path", [str(source.HERE.parent / "gpu-ci"), *sys.path]):
+    from groups import gpu_matrix
+    import select_impact
 
 
 BASE, HEAD, MERGE, OTHER = (c * 40 for c in "abcd")
@@ -110,6 +115,89 @@ class SourceTest(unittest.TestCase):
         for paths, expected in cases:
             with self.subTest(paths=paths):
                 self.assertEqual(impact([os.fsencode(path) for path in paths]), expected)
+
+    def test_combined_lane_selection_from_the_same_changes(self):
+        root = source.HERE.parents[2]
+        db_select = runpy.run_path(str(source.HERE / "select-impact.py"))["select"]
+        catalog = json.loads((root / ".github/gpu-ci-suites.json").read_text())["suites"]
+        scala = "tests/src/test/scala/com/nvidia/spark/rapids/ExampleSuite.scala"
+        python = "integration_tests/src/main/python/example_test.py"
+        db = "jenkins/databricks/test.sh"
+        suite, case = ["com.nvidia.spark.rapids.ExampleSuite"], ["example_test.py::test_example"]
+        ut_full = {r["group"]: None for r in catalog["unit"]["groups"]}
+        it_full = {r["group"]: None for r in catalog["integration"]["groups"]}
+        ut_target = dict.fromkeys(ut_full, suite)
+        it_target = {r["group"]: case for r in catalog["integration"]["groups"] if r["shard"] == 1}
+        unavailable = subprocess.CalledProcessError(128, ["git", "diff"])
+        versions = json.dumps({"17.3": "4.0.0", "18.3": "4.1.0"})
+        combinations = [
+            ([scala], ut_target, {}, False),
+            ([python], {}, it_target, False),
+            ([scala, db], ut_target, {}, True),
+            ([python, db], {}, it_target, True),
+            ([scala, python], ut_target, it_target, False),
+            ([scala, python, db], ut_target, it_target, True),
+            ([".github/workflows/gpu-ci/check-reports.py", python, db], ut_full, it_target, True),
+            ([scala, ".github/workflows/gpu-ci/it.sh"], ut_target, it_full, False),
+            ([db], {}, {}, True),
+            (["pom.xml", scala, python], ut_full, it_full, False),
+            (None, ut_full, it_full, True),  # Neither selector can read the diff.
+        ]
+
+        def base_json(repo, ref, path):
+            self.assertEqual(ref, BASE)
+            return json.loads((repo / path).read_text())
+
+        for paths, ut, it, needs_db in combinations:
+            with self.subTest(paths=paths):
+                diff = unavailable if paths is None else b"\0".join(os.fsencode(p) for p in paths)
+                with patch.object(subprocess, "check_output", side_effect=[f"{MERGE} {BASE} {HEAD}".encode(), diff]):
+                    db_plan = db_select(root, BASE, HEAD, MERGE, self.pr["title"])
+                self.assertEqual(db_plan["run"], needs_db)
+
+                modes = {p: "100755" if p.endswith(".sh") else "100644" for p in paths or []}
+                raw = b"".join(f":{mode} {mode} aabbcc ddeeff M\0{p}\0".encode() for p, mode in modes.items())
+                with (
+                    patch.object(subprocess, "check_output", side_effect=[unavailable if paths is None else raw]),
+                    patch.object(select_impact, "base_json", side_effect=base_json),
+                    patch.object(select_impact, "affected_suites", return_value=suite),
+                    patch.object(select_impact, "affected_cases", return_value={1: case}),
+                ):
+                    standalone = gpu_matrix(root, ["unit", "integration"], BASE, MERGE)["include"]
+                self.output.unlink(missing_ok=True)
+                with (
+                    patch.dict(os.environ, DB_ENABLED="true", DB_RUNNER_GROUP="test-only"),
+                    patch.object(source, "standalone_rows", return_value=standalone),
+                    patch.object(subprocess, "check_output", side_effect=[json.dumps(db_plan), versions]),
+                ):
+                    self.invoke("--candidate", str(root))
+                outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+                rows = json.loads(outputs["matrix"])["include"]
+                self.assertEqual({r["group"]: r.get("targets") for r in rows if r["kind"] != "databricks"}, ut | it)
+                self.assertEqual([r for r in rows if r["kind"] == "databricks"], self.db if needs_db else [])
+
+    def test_missing_invalid_or_disagreeing_base_rules_keep_full_standalone(self):
+        root = source.HERE.parents[2]
+        kinds = ["unit", "integration"]
+        full = gpu_matrix(root, kinds)
+        db_path = "jenkins/databricks/test.sh"
+        current_rules = json.loads((root / select_impact.RULES_PATH).read_text())
+        for base_rules in (FileNotFoundError("no impact policy"), {"file_owners": {}}, current_rules):
+            def base_json(repo, ref, path):
+                self.assertEqual(ref, BASE)  # Never use the candidate's policy to drop its own lanes.
+                if path == select_impact.DB_RULES_PATH:
+                    return {"cluster": {"exclusive_files": []}}
+                self.assertEqual(path, select_impact.RULES_PATH)
+                if isinstance(base_rules, Exception):
+                    raise base_rules
+                return base_rules
+
+            with (
+                self.subTest(base_rules=base_rules),
+                patch.object(select_impact, "modified_files", return_value={db_path: "100755"}),
+                patch.object(select_impact, "base_json", side_effect=base_json),
+            ):
+                self.assertEqual(gpu_matrix(root, kinds, BASE, MERGE), full)
 
     def test_db_selection_preserves_reduced_policy_and_requires_configured_runner(self):
         self.pr["title"] = "[Databricks] [REDUCED-IT]"

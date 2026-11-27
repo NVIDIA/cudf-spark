@@ -18,13 +18,14 @@ import subprocess
 def cluster_impact(paths):
     # Read the policy next to this trusted script, not from the PR checkout.
     rules = json.loads(Path(__file__).with_name("paths.json").read_text())["cluster"]
-    patterns, excluded = rules["include_regex"], rules["skip_if_all_under"]
-    if not (isinstance(patterns, list) and patterns and isinstance(excluded, list)
-            and all(isinstance(s, str) and s for s in patterns + excluded)):
+    patterns, excluded, exclusive = rules["include_regex"], rules["skip_if_all_under"], rules["exclusive_files"]
+    if not (isinstance(patterns, list) and patterns and isinstance(excluded, list) and isinstance(exclusive, list)
+            and all(isinstance(s, str) and s for s in patterns + excluded + exclusive)):
         raise ValueError("Invalid Databricks cluster rules in paths.json")
     match = re.compile("|".join(f"(?:{p})" for p in patterns).encode(), re.DOTALL)
     prefixes = tuple(p.encode() for p in excluded)
-    return any(not path.startswith(prefixes) for path in paths) and any(match.search(path) for path in paths)
+    return (bool({p.encode() for p in exclusive}.intersection(paths)) or
+            (any(not path.startswith(prefixes) for path in paths) and any(match.search(path) for path in paths)))
 
 
 def select(repo, base, head, merge, title):

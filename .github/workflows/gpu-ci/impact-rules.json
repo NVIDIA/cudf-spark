@@ -1,0 +1,17 @@
+{
+  "file_owners": {
+    ".github/workflows/gpu-ci/check-reports.py": "unit",
+    ".github/workflows/gpu-ci/it.sh": "integration"
+  },
+  "scala_suite_bases": [
+    "AnyFunSuite",
+    "SparkQueryCompareTestSuite",
+    "RmmSparkRetrySuiteBase"
+  ],
+  "pytest_decorators": [
+    "ignore_order",
+    "pytest.mark.ignore_order",
+    "pytest.mark.parametrize",
+    "pytest.mark.premerge_ci_1"
+  ]
+}

@@ -62,12 +62,17 @@ def gpu_matrix(root, suites, base=None, merge=None):
         from select_impact import select_impact
 
         plan = select_impact(root, base, merge, runtime="standalone")
-        if plan["mode"] == "integration" and it_shards:
-            cases = plan["shards"]
-            groups = [dict(row, targets=cases[row["shard"]]) for row in groups
-                      if row["kind"] == "integration" and row["shard"] in cases]
-        elif plan["mode"] == "unit" and seen_shims:
-            groups = [dict(row, targets=plan["suites"]) for row in groups if row["kind"] == "unit"]
+        selected = []
+        for row in groups:
+            targets = plan.get(row["kind"])
+            if targets is None:
+                selected.append(row)
+                continue
+            if row["kind"] == "integration":
+                targets = targets.get(row["shard"], [])
+            if targets:
+                selected.append(dict(row, targets=targets))
+        groups = selected
     return {"include": groups}
 
 

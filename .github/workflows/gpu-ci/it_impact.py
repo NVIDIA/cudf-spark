@@ -16,8 +16,10 @@ import subprocess
 from it import TEST_ROOT, shard_for
 
 
-def ordinary_decorator(node):
+def ordinary_decorator(node, decorators):
     marker = ast.unparse(node.func if isinstance(node, ast.Call) else node)
+    if marker not in decorators:
+        return False
     if marker == "pytest.mark.parametrize":
         # Literal parameter sets cannot introduce per-parameter skip or supplemental markers.
         if not isinstance(node, ast.Call) or len(node.args) != 2 or node.keywords:
@@ -26,10 +28,10 @@ def ordinary_decorator(node):
             return isinstance(ast.literal_eval(node.args[1]), (tuple, list))
         except (ValueError, TypeError):
             return False
-    return marker in ("ignore_order", "pytest.mark.ignore_order", "pytest.mark.premerge_ci_1")
+    return True
 
 
-def split_cases(source):
+def split_cases(source, decorators):
     """Keep everything except the bodies of ordinary standalone tests byte-for-byte."""
     lines = source.splitlines(keepends=True)
     outside, bodies, end = [], {}, 0
@@ -39,7 +41,7 @@ def split_cases(source):
         return source, {}
     for node in ast.parse(source).body:
         if (not isinstance(node, ast.FunctionDef) or not re.fullmatch(r"test_[a-zA-Z0-9_]+", node.name)
-                or not all(ordinary_decorator(d) for d in node.decorator_list)):
+                or not all(ordinary_decorator(d, decorators) for d in node.decorator_list)):
             continue
         start = node.body[0].lineno - 1
         if start < node.lineno or not lines[start - 1].rstrip().endswith(":"):
@@ -77,7 +79,7 @@ def referenced(root, rev, path, names):
     return False
 
 
-def affected_cases(root, base, merge, paths):
+def affected_cases(root, base, merge, paths, decorators):
     """Return shard -> pytest node IDs, or {} to keep the full configured workload."""
     def git(*args):
         return subprocess.check_output(["git", *args], cwd=root).decode("utf-8")
@@ -89,8 +91,8 @@ def affected_cases(root, base, merge, paths):
             if Path(path).parent != TEST_ROOT or not re.fullmatch(r"[a-z0-9_]+_test\.py", filename):
                 return {}
             old, new = (git("show", f"{rev}:{path}") for rev in (base, merge))
-            old_module, before = split_cases(old)
-            new_module, after = split_cases(new)
+            old_module, before = split_cases(old, decorators)
+            new_module, after = split_cases(new, decorators)
             if old_module != new_module or before.keys() != after.keys():
                 return {}
             names = sorted(name for name in before if before[name] != after[name])

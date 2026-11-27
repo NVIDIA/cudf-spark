@@ -8,10 +8,15 @@
     ".github/workflows/databricks-ci/",
     ".github/workflows/gpu-ci.yml",
     ".github/workflows/gpu-ci-lane.yml",
-    ".github/workflows/gpu-ci/job_receipts.py",
+    ".github/workflows/gpu-ci/",
+    ".github/gpu-ci-suites.json",
     "jenkins/databricks/"
   ],
   "cluster": {
+    "exclusive_files": [
+      "jenkins/databricks/build.sh",
+      "jenkins/databricks/test.sh"
+    ],
     "include_regex": [
       "sql-plugin/src/main/.*[0-9x-]db[0-9]*/",
       "(^|/)delta-lake/",
