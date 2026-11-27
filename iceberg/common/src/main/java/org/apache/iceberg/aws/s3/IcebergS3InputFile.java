@@ -33,6 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.OptionalLong;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -51,7 +52,7 @@ public final class IcebergS3InputFile extends IcebergInputFile {
 
   private IcebergS3InputFile(
       InputFile delegate,
-      long length,
+      OptionalLong length,
       String s3Bucket,
       String s3Key,
       IcebergS3Client icebergS3Client,
@@ -64,10 +65,11 @@ public final class IcebergS3InputFile extends IcebergInputFile {
   }
 
   public static IcebergInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
-    return maybeCreate(inputFile, fileIO, -1L);
+    return maybeCreate(inputFile, fileIO, OptionalLong.empty());
   }
 
-  public static IcebergInputFile maybeCreate(InputFile inputFile, FileIO fileIO, long length) {
+  public static IcebergInputFile maybeCreate(
+      InputFile inputFile, FileIO fileIO, OptionalLong length) {
     // When the gating conf is off (or the file is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.
     IcebergInputFile delegate = new IcebergInputFile(inputFile, length);

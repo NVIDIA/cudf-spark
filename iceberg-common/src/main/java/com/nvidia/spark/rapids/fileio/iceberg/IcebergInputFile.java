@@ -35,16 +35,16 @@ public class IcebergInputFile implements RapidsInputFile {
   private final OptionalLong length;
 
   public IcebergInputFile(InputFile delegate) {
-    this(delegate, -1L);
+    this(delegate, OptionalLong.empty());
   }
 
   /**
-   * Wrap an input file with its known length, or a negative value if the length is unknown.
+   * Wrap an input file with its known length, or an empty optional if the length is unknown.
    */
-  public IcebergInputFile(InputFile delegate, long length) {
+  public IcebergInputFile(InputFile delegate, OptionalLong length) {
     Objects.requireNonNull(delegate, "delegate can't be null");
     this.delegate = delegate;
-    this.length = length >= 0 ? OptionalLong.of(length) : OptionalLong.empty();
+    this.length = Objects.requireNonNull(length, "length can't be null");
   }
 
   @Override

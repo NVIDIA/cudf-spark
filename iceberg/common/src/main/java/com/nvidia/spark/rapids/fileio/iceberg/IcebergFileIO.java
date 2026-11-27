@@ -24,6 +24,7 @@ import org.apache.iceberg.io.FileIO;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.OptionalLong;
 
 /**
  * Implementation of {@link RapidsFileIO} using the Iceberg {@link FileIO}.
@@ -54,7 +55,8 @@ public class IcebergFileIO implements RapidsFileIO {
 
   @Override
   public IcebergInputFile newInputFile(String path, long length) throws IOException {
-    return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path, length), delegate, length);
+    return IcebergS3InputFile.maybeCreate(
+        delegate.newInputFile(path, length), delegate, OptionalLong.of(length));
   }
 
   @Override
