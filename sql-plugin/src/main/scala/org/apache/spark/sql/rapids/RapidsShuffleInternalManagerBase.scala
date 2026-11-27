@@ -962,11 +962,13 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     } finally {
       // Helper to cleanup a single batch
       def cleanupBatch(batch: BatchState): Unit = {
+        // Cancel merger completion and drain any in-flight step before removing from
+        // activeBatches so a concurrent stop(false) cannot omit this batch and abort
+        // mapOutputWriters while its merger is still running.
+        batch.cancelMerger()
         activeBatchesLock.synchronized {
           activeBatches -= batch
         }
-        // Cancel merger completion and any currently scheduled step.
-        batch.cancelMerger()
 
         // Cancel pending futures and close their buffers
         batch.partitionRecords.values().asScala.foreach { recordQueue =>

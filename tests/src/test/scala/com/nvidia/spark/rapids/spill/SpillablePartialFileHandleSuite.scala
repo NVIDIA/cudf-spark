@@ -19,8 +19,9 @@ package com.nvidia.spark.rapids.spill
 import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
 import java.util.concurrent.{CountDownLatch, CyclicBarrier, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 
+import ai.rapids.cudf.{HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool}
 import com.nvidia.spark.rapids.{HostAlloc, RapidsConf}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.BeforeAndAfterEach
@@ -883,81 +884,205 @@ class SpillablePartialFileHandleSuite
     }
   }
 
+  test("finishWrite() waits for an in-flight write() before finalizing totalBytesWritten") {
+    val tempFile = File.createTempFile("test-deterministic-write-finish-", ".tmp")
+    val insideWrite = new CountDownLatch(1)
+    val releaseWrite = new CountDownLatch(1)
+    val writeError = new AtomicReference[Throwable](null)
+    val finishError = new AtomicReference[Throwable](null)
+    val finishCompleted = new AtomicBoolean(false)
+
+    val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+      initialCapacity = 16,
+      maxBufferSize = 1024,
+      memoryThreshold = 0.99,
+      spillFile = tempFile,
+      capacityHintProvider = Some((_, required) => {
+        insideWrite.countDown()
+        assert(releaseWrite.await(5, TimeUnit.SECONDS))
+        required
+      }))
+
+    val chunk = new Array[Byte](64)
+    Arrays.fill(chunk, 0x42.toByte)
+
+    val writerThread = new Thread(() => {
+      try {
+        handle.write(chunk, 0, chunk.length)
+      } catch {
+        case t: Throwable => writeError.set(t)
+      }
+    }, "partial-file-finish-writer")
+
+    val finishThread = new Thread(() => {
+      try {
+        handle.finishWrite()
+      } catch {
+        case t: Throwable => finishError.set(t)
+      } finally {
+        finishCompleted.set(true)
+      }
+    }, "partial-file-finish-caller")
+
+    try {
+      writerThread.start()
+      assert(insideWrite.await(5, TimeUnit.SECONDS),
+        "writer thread did not enter write() expansion")
+
+      finishThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (finishThread.getState != Thread.State.WAITING && System.nanoTime() < deadline) {
+        Thread.`yield`()
+      }
+      assert(finishThread.getState == Thread.State.WAITING,
+        s"finishWrite() should wait while writeInProgress is set, state=${finishThread.getState}")
+      assert(!finishCompleted.get(),
+        "finishWrite() must not complete while write() is still active")
+
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      finishThread.join(5000)
+      assert(!writerThread.isAlive, "writer thread did not finish")
+      assert(!finishThread.isAlive, "finishWrite thread did not finish")
+      assert(writeError.get() == null, s"in-flight write failed: ${writeError.get()}")
+      assert(finishError.get() == null, s"finishWrite failed: ${finishError.get()}")
+      assert(handle.getTotalBytesWritten == chunk.length)
+
+      val readBack = new Array[Byte](chunk.length)
+      assert(handle.read(readBack, 0, readBack.length) == chunk.length)
+      assert(Arrays.equals(readBack, chunk))
+    } finally {
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      finishThread.join(5000)
+      handle.close()
+      if (tempFile.exists()) {
+        tempFile.delete()
+      }
+    }
+  }
+
   test("concurrent buffer expansions under finite host-memory budget do not deadlock") {
+    // Ensure native pools cannot satisfy 256 KiB allocations behind HostAlloc's nonpinned limit.
+    assert(PinnedMemoryPool.getTotalPoolSizeBytes == 0L,
+      "test requires PinnedMemoryPool to be uninitialized so allocations enter host spill")
+    assert(PageableMemoryPool.getTotalPoolSizeBytes == 0L,
+      "test requires PageableMemoryPool to be uninitialized so allocations enter host spill")
+
     // Two 64 KiB handles (128 KiB total, 40% < 99% threshold) concurrently request 256 KiB each
     // under a 320 KiB budget, forcing both allocations into SpillFramework host-spill selection.
     val budgetBytes = 320L * 1024L
     HostAlloc.initialize(budgetBytes)
-    val tempFileA = File.createTempFile("test-concurrent-expand-a-", ".tmp")
-    val tempFileB = File.createTempFile("test-concurrent-expand-b-", ".tmp")
-    val bothInExpand = new CyclicBarrier(2)
-    val errorA = new AtomicReference[Throwable](null)
-    val errorB = new AtomicReference[Throwable](null)
-    val chunk = new Array[Byte](256 * 1024)
-    Arrays.fill(chunk, 0x3c.toByte)
-
-    val handleA = SpillablePartialFileHandle.createMemoryWithSpill(
-      initialCapacity = 64 * 1024,
-      maxBufferSize = 384 * 1024,
-      memoryThreshold = 0.99,
-      spillFile = tempFileA,
-      capacityHintProvider = Some((_, required) => {
-        bothInExpand.await(5, TimeUnit.SECONDS)
-        required
-      }))
-    val handleB = SpillablePartialFileHandle.createMemoryWithSpill(
-      initialCapacity = 64 * 1024,
-      maxBufferSize = 384 * 1024,
-      memoryThreshold = 0.99,
-      spillFile = tempFileB,
-      capacityHintProvider = Some((_, required) => {
-        bothInExpand.await(5, TimeUnit.SECONDS)
-        required
-      }))
-
-    val threadA = new Thread(() => {
-      try {
-        handleA.write(chunk, 0, chunk.length)
-      } catch {
-        case t: Throwable => errorA.set(t)
-      }
-    }, "partial-file-concurrent-expand-a")
-    val threadB = new Thread(() => {
-      try {
-        handleB.write(chunk, 0, chunk.length)
-      } catch {
-        case t: Throwable => errorB.set(t)
-      }
-    }, "partial-file-concurrent-expand-b")
-
     try {
-      threadA.start()
-      threadB.start()
-      threadA.join(10000)
-      threadB.join(10000)
-      assert(!threadA.isAlive, "threadA hung during concurrent expansion under tight host budget")
-      assert(!threadB.isAlive, "threadB hung during concurrent expansion under tight host budget")
-      assert(errorA.get() == null, s"threadA failed: ${errorA.get()}")
-      assert(errorB.get() == null, s"threadB failed: ${errorB.get()}")
+      val tempFileA = File.createTempFile("test-concurrent-expand-a-", ".tmp")
+      val tempFileB = File.createTempFile("test-concurrent-expand-b-", ".tmp")
+      var handleA: SpillablePartialFileHandle = null
+      var handleB: SpillablePartialFileHandle = null
+      var threadA: Thread = null
+      var threadB: Thread = null
+      val spillSelectionProbes = new AtomicInteger(0)
+      val probeHandle = new HostSpillableHandle[HostMemoryBuffer] {
+        override private[spill] var host: Option[HostMemoryBuffer] = None
+        override val approxSizeInBytes: Long = 1L
+        override private[spill] def spillable: Boolean = {
+          spillSelectionProbes.incrementAndGet()
+          false
+        }
+        override def spill(): Long = 0L
+        override private[spill] def doClose(): Unit = ()
+      }
 
-      handleA.finishWrite()
-      handleB.finishWrite()
-      assert(handleA.getTotalBytesWritten == chunk.length)
-      assert(handleB.getTotalBytesWritten == chunk.length)
+      try {
+        SpillFramework.stores.hostStore.trackNoSpill(probeHandle)
+        val bothInExpand = new CyclicBarrier(2)
+        val errorA = new AtomicReference[Throwable](null)
+        val errorB = new AtomicReference[Throwable](null)
+        val chunk = new Array[Byte](256 * 1024)
+        Arrays.fill(chunk, 0x3c.toByte)
+
+        handleA = SpillablePartialFileHandle.createMemoryWithSpill(
+          initialCapacity = 64 * 1024,
+          maxBufferSize = 384 * 1024,
+          memoryThreshold = 0.99,
+          spillFile = tempFileA,
+          capacityHintProvider = Some((_, required) => {
+            bothInExpand.await(5, TimeUnit.SECONDS)
+            required
+          }))
+        handleB = SpillablePartialFileHandle.createMemoryWithSpill(
+          initialCapacity = 64 * 1024,
+          maxBufferSize = 384 * 1024,
+          memoryThreshold = 0.99,
+          spillFile = tempFileB,
+          capacityHintProvider = Some((_, required) => {
+            bothInExpand.await(5, TimeUnit.SECONDS)
+            required
+          }))
+
+        threadA = new Thread(() => {
+          try {
+            handleA.write(chunk, 0, chunk.length)
+          } catch {
+            case t: Throwable => errorA.set(t)
+          }
+        }, "partial-file-concurrent-expand-a")
+        threadB = new Thread(() => {
+          try {
+            handleB.write(chunk, 0, chunk.length)
+          } catch {
+            case t: Throwable => errorB.set(t)
+          }
+        }, "partial-file-concurrent-expand-b")
+
+        threadA.start()
+        threadB.start()
+        threadA.join(10000)
+        threadB.join(10000)
+        assert(!threadA.isAlive, "threadA hung during concurrent expansion under tight host budget")
+        assert(!threadB.isAlive, "threadB hung during concurrent expansion under tight host budget")
+        assert(errorA.get() == null, s"threadA failed: ${errorA.get()}")
+        assert(errorB.get() == null, s"threadB failed: ${errorB.get()}")
+
+        assert(handleA.isSpilled && handleB.isSpilled,
+          s"both handles must spill when 256 KiB expansions exceed 320 KiB budget " +
+            s"(spilledA=${handleA.isSpilled}, spilledB=${handleB.isSpilled})")
+        assert(spillSelectionProbes.get() >= 2,
+          s"expected both expansions to invoke host-spill selection, " +
+            s"got ${spillSelectionProbes.get()}")
+
+        handleA.finishWrite()
+        handleB.finishWrite()
+        assert(handleA.getTotalBytesWritten == chunk.length)
+        assert(handleB.getTotalBytesWritten == chunk.length)
+      } finally {
+        Option(threadA).foreach { t =>
+          t.interrupt()
+          t.join(5000)
+        }
+        Option(threadB).foreach { t =>
+          t.interrupt()
+          t.join(5000)
+        }
+        try {
+          SpillFramework.removeFromHostStore(probeHandle)
+        } catch {
+          case _: Exception =>
+        }
+        Option(handleA).foreach { h =>
+          try { h.close() } catch { case _: Exception => }
+        }
+        Option(handleB).foreach { h =>
+          try { h.close() } catch { case _: Exception => }
+        }
+        if (tempFileA.exists()) {
+          tempFileA.delete()
+        }
+        if (tempFileB.exists()) {
+          tempFileB.delete()
+        }
+      }
     } finally {
-      threadA.interrupt()
-      threadB.interrupt()
-      threadA.join(5000)
-      threadB.join(5000)
-      handleA.close()
-      handleB.close()
       HostAlloc.initialize(-1)
-      if (tempFileA.exists()) {
-        tempFileA.delete()
-      }
-      if (tempFileB.exists()) {
-        tempFileB.delete()
-      }
     }
   }
 

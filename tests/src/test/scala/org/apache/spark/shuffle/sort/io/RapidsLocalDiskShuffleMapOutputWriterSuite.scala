@@ -84,4 +84,38 @@ class RapidsLocalDiskShuffleMapOutputWriterSuite extends AnyFunSuite with Mockit
       sparkContext.stop()
     }
   }
+
+  test("stream, channel, and partition writer operations after abort throw IllegalStateException") {
+    val directory = Files.createTempDirectory("shuffle-abort-guard-").toFile
+    val blockResolver = mock[IndexShuffleBlockResolver]
+    when(blockResolver.getDataFile(1, 3L)).thenReturn(new File(directory, "shuffle.data"))
+    val writer = new RapidsLocalDiskShuffleMapOutputWriter(
+      1, 3L, 2, blockResolver, new SparkConf(false))
+    writer.setForceFileOnlyMode()
+
+    try {
+      val firstPartition = writer.getPartitionWriter(0)
+      val stream = firstPartition.openStream()
+      val channelWrapper = firstPartition.openChannelWrapper().get()
+      val channel = channelWrapper.channel()
+
+      writer.abort(null)
+
+      assertThrows[IllegalStateException] {
+        stream.write(1)
+      }
+      assertThrows[IllegalStateException] {
+        stream.write(Array[Byte](1, 2, 3), 0, 3)
+      }
+      assertThrows[IllegalStateException] {
+        channel.write(ByteBuffer.wrap(Array[Byte](4, 5)))
+      }
+      assertThrows[IllegalStateException] {
+        writer.getPartitionWriter(1)
+      }
+    } finally {
+      writer.abort(null)
+      directory.delete()
+    }
+  }
 }

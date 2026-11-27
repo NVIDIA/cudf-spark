@@ -1419,11 +1419,16 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     val writer = createWriter()
     // Two full 7-partition batches so both merger pool threads write concurrently.
     val records = createTestRecords((0 until 14).map(_ % 7).iterator)
+    val writeError = new AtomicReference[Throwable](null)
+    val writeFatal = new AtomicReference[Throwable](null)
     val writeThread = new Thread(() => {
       try {
         writer.write(records)
       } catch {
-        case _: Throwable => // expected when aborted by stop(false)
+        case NonFatal(e) => writeError.set(e)
+        case t: Throwable =>
+          writeFatal.set(t)
+          throw t
       }
     }, "deterministic-abort-writer")
     val stopThread = new Thread(() => {
@@ -1460,6 +1465,12 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     assert(!stopThread.isAlive, "stop(false) thread did not finish")
     assert(!writeThread.isAlive, "write thread did not finish after stop(false)")
     assert(stopError.get() == null, s"stop(false) threw: ${stopError.get()}")
+    assert(writeFatal.get() == null, s"write thread hit fatal error: ${writeFatal.get()}")
+    assert(writeError.get() != null, "write thread should exit via abort exception")
+    assert(
+      writeError.get().isInstanceOf[CancellationException] ||
+        writeError.get().isInstanceOf[IOException],
+      s"expected CancellationException or IOException on abort, got ${writeError.get()}")
     assert(mergerWriteError.get() == null,
       s"in-flight merger write failed before abort: ${mergerWriteError.get()}")
     assert(!abortedWhileWriting.get(),
@@ -1468,5 +1479,34 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       s"expected both batch writers to be aborted, got ${abortCount.get()}")
     assert(writer.getBytesInFlight == 0L,
       "Bytes in flight should be released after stop(false)")
+  }
+
+  test("write() after stop(false) aborts newly created map output writer and throws IOException") {
+    val abortCount = new AtomicInteger(0)
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def abort(error: Throwable): Unit = {
+            abortCount.incrementAndGet()
+            super.abort(error)
+          }
+        }
+      }
+    }
+
+    val writer = createWriter()
+    assert(writer.stop(false).isEmpty)
+    val error = intercept[IOException] {
+      writer.write(createTestRecords(Iterator(0)))
+    }
+    assert(error.getMessage.contains("already been stopped"))
+    assert(abortCount.get() == 1,
+      s"expected newly created map output writer to be aborted once, got ${abortCount.get()}")
+    assert(writer.getBytesInFlight == 0L)
   }
 }
