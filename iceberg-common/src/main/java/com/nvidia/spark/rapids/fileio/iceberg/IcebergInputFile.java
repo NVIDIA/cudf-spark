@@ -22,6 +22,7 @@ import org.apache.iceberg.io.InputFile;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.OptionalLong;
 
 /**
  * Implementation of {@link RapidsInputFile} using the Iceberg {@link InputFile}.
@@ -31,7 +32,7 @@ import java.util.Objects;
  */
 public class IcebergInputFile implements RapidsInputFile {
   private final InputFile delegate;
-  private final long length;
+  private final OptionalLong length;
 
   public IcebergInputFile(InputFile delegate) {
     this(delegate, -1L);
@@ -43,7 +44,7 @@ public class IcebergInputFile implements RapidsInputFile {
   public IcebergInputFile(InputFile delegate, long length) {
     Objects.requireNonNull(delegate, "delegate can't be null");
     this.delegate = delegate;
-    this.length = length;
+    this.length = length >= 0 ? OptionalLong.of(length) : OptionalLong.empty();
   }
 
   @Override
@@ -53,7 +54,7 @@ public class IcebergInputFile implements RapidsInputFile {
 
   @Override
   public long getLength() throws IOException {
-    return length >= 0 ? length : delegate.getLength();
+    return length.isPresent() ? length.getAsLong() : delegate.getLength();
   }
 
   @Override
