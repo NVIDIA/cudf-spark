@@ -22,14 +22,17 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
+import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids.{GpuLiteral, VersionUtils}
+import com.nvidia.spark.rapids.jni.Protobuf.ENC_DEFAULT
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
-import org.apache.spark.sql.rapids.protobuf.{FlattenedSchemaArrays, ProtobufDescriptorSource,
-  ProtobufExprInfo, ProtobufFieldDescriptor, ProtobufMessageDescriptor, ProtobufPlannerOptions}
+import org.apache.spark.sql.rapids.protobuf.{FlattenedSchemaArrays, ProtobufDefaultValue,
+  ProtobufDescriptorSource, ProtobufEnumMetadata, ProtobufExprInfo, ProtobufFieldDescriptor,
+  ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufPlannerOptions, ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
 class ProtobufExprShimsSuite extends AnyFunSuite {
@@ -110,20 +113,209 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       Seq("foo"))
   }
 
-  test("compat rejects descriptor fields missing from the Spark schema") {
-    // Spark drops fields of empty message types, but still validates them when parsing.
-    val descriptor = new ProtobufMessageDescriptor {
+  private def fakeMessage(
+      fields: Seq[ProtobufFieldDescriptor],
+      name: String = "test.Message",
+      extensions: Boolean = false): ProtobufMessageDescriptor =
+    new ProtobufMessageDescriptor {
       def syntax: String = "PROTO2"
-      def findField(name: String): Option[ProtobufFieldDescriptor] = None
-      def fieldNames: Seq[String] = Seq("id", "empty")
+      override def fullName: String = name
+      override def hasExtensions: Boolean = extensions
+      def findField(n: String): Option[ProtobufFieldDescriptor] = fields.find(_.name == n)
+      def fieldNames: Seq[String] = fields.map(_.name)
     }
+
+  private def fakeField(
+      fieldName: String,
+      number: Int,
+      typeName: String,
+      nested: => Option[ProtobufMessageDescriptor] = None,
+      inOneof: Boolean = false,
+      mapField: Boolean = false): ProtobufFieldDescriptor =
+    new ProtobufFieldDescriptor {
+      def name: String = fieldName
+      def fieldNumber: Int = number
+      def protoTypeName: String = typeName
+      def isRepeated: Boolean = false
+      def isRequired: Boolean = false
+      def isInOneof: Boolean = inOneof
+      override def isMapField: Boolean = mapField
+      def explicitDefaultValue: Either[String, Option[ProtobufDefaultValue]] = Right(None)
+      def enumMetadata: Option[ProtobufEnumMetadata] = None
+      def messageDescriptor: Option[ProtobufMessageDescriptor] = nested
+      def referencedTypeSyntax: Option[String] = nested.map(_.syntax)
+    }
+
+  private def emptyMessage(name: String): ProtobufMessageDescriptor =
+    fakeMessage(Nil, name)
+
+  private val emptyMessageField =
+    fakeField("empty", 2, "MESSAGE", Some(emptyMessage("test.Empty")))
+
+  private val idSchema = StructType(Seq(StructField("id", IntegerType)))
+
+  /** One visible INT32 entry, so a hidden entry has a sibling the decoder returns. */
+  private val visibleIdField = {
+    val idInfo = ProtobufFieldInfo(fieldNumber = 1, protoTypeName = "INT32",
+      sparkType = IntegerType, encoding = ENC_DEFAULT, isSupported = true,
+      unsupportedReason = None, isRequired = false, defaultValue = None, enumMetadata = None)
+    ProtobufSchemaValidator.toFlattenedFieldDescriptor("id", StructField("id", IntegerType),
+      idInfo, parentIdx = -1, depth = 0,
+      outputTypeId = DType.INT32.getTypeId.getNativeId, isOutput = true)
+  }
+
+  test("compat keeps empty-message fields missing from the Spark schema") {
+    // Spark drops fields of empty message types, but still validates them when parsing.
+    val descriptor = fakeMessage(Seq(fakeField("id", 1, "INT32"), emptyMessageField))
     val schema = StructType(Seq(StructField("id", IntegerType)))
-    assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(
-      schema, descriptor, "protobuf field 'child'") ==
-      Left("protobuf field 'child' has fields missing from the Spark schema: empty"))
-    assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(
+
+    val hidden = SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      schema, descriptor, "root message", depth = 0)
+
+    assert(hidden.map(_.map(_.name)) == Right(Seq("empty")))
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
       schema.add("empty", StructType(Seq(StructField("x", IntegerType)))), descriptor,
-      "root message").isRight)
+      "root message", depth = 0) == Right(Seq.empty))
+  }
+
+  test("compat rejects other descriptor fields missing from the Spark schema") {
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("name", 2, "STRING"),
+      fakeField("child", 3, "MESSAGE", Some(fakeMessage(Seq(fakeField("x", 1, "INT32")))))))
+    val schema = StructType(Seq(StructField("id", IntegerType)))
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      schema, descriptor, "protobuf field 'child'", depth = 0) ==
+      Left("protobuf field 'child' has fields missing from the Spark schema: name, child"))
+  }
+
+  test("compat hides a message whose fields are all empty messages") {
+    val wrapper = fakeMessage(Seq(emptyMessageField), "test.Wrapper")
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("wrapper", 2, "MESSAGE", Some(wrapper))), "test.Root")
+
+    val hidden = SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 0)
+
+    assert(hidden.map(_.map(_.name)) == Right(Seq("wrapper")))
+  }
+
+  test("compat rejects a recursive message missing from the Spark schema") {
+    // The type never bottoms out in an empty message, so the decoder cannot be given a
+    // bounded subtree for it.
+    lazy val node: ProtobufMessageDescriptor =
+      fakeMessage(Seq(fakeField("next", 1, "MESSAGE", Some(node))), "test.Node")
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("node", 2, "MESSAGE", Some(node))), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 0) ==
+      Left("root message has fields missing from the Spark schema: node"))
+  }
+
+  test("compat rejects hidden fields when protobuf extensions are registered") {
+    // Spark validates extension fields through its registry, and they are absent from the
+    // descriptor's own fields, so hiding the message they target would skip that check.
+    val extended = fakeMessage(Nil, "test.Empty", extensions = true)
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("empty", 2, "MESSAGE", Some(extended))), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 0) ==
+      Left("root message has fields missing from the Spark schema: empty"))
+
+    // An extension on the message that owns the omitted field is rejected as well.
+    val extendedRoot = fakeMessage(Seq(fakeField("id", 1, "INT32"), emptyMessageField),
+      "test.Root", extensions = true)
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, extendedRoot, "root message", depth = 0) ==
+      Left("root message has registered protobuf extensions, " +
+        "which the GPU decoder does not validate"))
+  }
+
+  test("compat rejects oneof and map empty-message fields missing from the Spark schema") {
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"),
+      fakeField("choice", 2, "MESSAGE", Some(emptyMessage("test.Empty")), inOneof = true),
+      fakeField("entries", 3, "MESSAGE", Some(emptyMessage("test.Entry")),
+        mapField = true)), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 0) ==
+      Left("root message has fields missing from the Spark schema: choice, entries"))
+  }
+
+  test("the GPU decoder accepts a nested hidden empty-message field") {
+    val wrapper = fakeField("wrapper", 2, "MESSAGE",
+      Some(fakeMessage(Seq(emptyMessageField), "test.Wrapper")))
+    val hiddenParent = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(wrapper,
+      parentIdx = -1, depth = 0, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+    val hiddenChild = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(emptyMessageField,
+      parentIdx = 1, depth = 1, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+
+    val flatFields = (visibleIdField, hiddenParent, hiddenChild) match {
+      case (Right(id), Right(parent), Right(child)) => Array(id, parent, child)
+      case other => fail(s"unexpected planning failure: $other")
+    }
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields)
+
+    assert(arrays.isOutput.toSeq == Seq(true, false, false))
+    assert(arrays.toJniDescriptor.numFields() == 3)
+  }
+
+  test("compat rejects an empty-message field at the decoder's depth limit") {
+    // The decoder accepts entries at depth 0 to 9, so the deepest hidden field is depth 9.
+    val descriptor = fakeMessage(Seq(
+      fakeField("id", 1, "INT32"), emptyMessageField), "test.Root")
+
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 9).map(_.map(_.name)) ==
+      Right(Seq("empty")))
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 10) ==
+      Left("root message has fields missing from the Spark schema: empty"))
+  }
+
+  test("compat counts the depth of a hidden subtree from the enclosing message") {
+    // A chain of wrappers around an empty message: the subtree keeps its own entries, so an
+    // omitted field below the root cannot use the whole depth budget.
+    def wrappers(levels: Int): ProtobufFieldDescriptor = {
+      val leaf = fakeField("empty", 1, "MESSAGE", Some(emptyMessage("test.Empty")))
+      (1 to levels).foldLeft(leaf) { (field, level) =>
+        fakeField(s"w$level", 1, "MESSAGE",
+          Some(fakeMessage(Seq(field), s"test.Wrapper$level")))
+      }
+    }
+    val descriptor = fakeMessage(Seq(fakeField("id", 1, "INT32"), wrappers(8)), "test.Root")
+    val name = descriptor.fieldNames.last
+
+    // The subtree holds nine entries, so its deepest one lands at depth 9 only while the
+    // subtree starts at depth 0 or 1.
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 1).map(_.map(_.name)) == Right(Seq(name)))
+    assert(SparkProtobufCompat.hiddenFieldsMissingFromSchema(
+      idSchema, descriptor, "root message", depth = 2) ==
+      Left(s"root message has fields missing from the Spark schema: $name"))
+  }
+
+  test("the GPU decoder accepts a schema with a hidden empty-message field") {
+    val hidden = ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(emptyMessageField,
+      parentIdx = -1, depth = 0, outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+
+    val flatFields = (visibleIdField, hidden) match {
+      case (Right(idField), Right(hiddenField)) => Array(idField, hiddenField)
+      case other => fail(s"unexpected planning failure: $other")
+    }
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields)
+
+    assert(arrays.isOutput.toSeq == Seq(true, false))
+    // The JNI constructor rejects schemas the decoder cannot run.
+    assert(arrays.toJniDescriptor.numFields() == 2)
   }
 
   private def twoFieldSchemaArrays(): FlattenedSchemaArrays = FlattenedSchemaArrays(

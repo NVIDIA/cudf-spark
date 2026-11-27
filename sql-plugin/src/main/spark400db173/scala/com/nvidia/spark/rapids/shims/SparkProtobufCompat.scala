@@ -58,6 +58,15 @@ private[shims] object SparkProtobufCompat extends SparkProtobufCompatBase {
   override private[shims] def unwrapMessageDescriptor(raw: AnyRef): AnyRef =
     Try(ProtobufReflection.invoke0[AnyRef](raw, "descriptor")).getOrElse(raw)
 
+  // Only the backported wrapper carries extensions; once it is present its registry is read
+  // strictly, so metadata this shim cannot read falls back instead of hiding fields.
+  override private[shims] def messagesWithExtensions(raw: AnyRef): Set[String] =
+    if (Try(ProtobufReflection.invoke0[AnyRef](raw, "descriptor")).isSuccess) {
+      readExtensionOwners(raw)
+    } else {
+      Set.empty
+    }
+
   override private[shims] def invokeBuildDescriptor(
       buildMethod: Method,
       module: AnyRef,

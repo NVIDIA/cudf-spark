@@ -90,7 +90,19 @@ class SparkProtobufCompatSuite extends AnyFunSuite {
     }
   }
 
-  private final class DescriptorWithExtensions(val descriptor: AnyRef)
+  private final class DescriptorWithExtensions(
+      val descriptor: AnyRef,
+      val fullNamesToExtensions: Map[String, Seq[AnyRef]] = Map.empty)
+
+  test("compat reads the message types a registered extension targets") {
+    val raw = new DescriptorWithExtensions(new Object,
+      Map("test.Extended" -> Seq(new Object), "test.Plain" -> Seq.empty))
+    assert(compat.readExtensionOwners(raw) == Set("test.Extended"))
+    assert(compat.readExtensionOwners(new DescriptorWithExtensions(new Object)).isEmpty)
+    // A descriptor without the wrapper cannot report extensions, so reading it must fail
+    // rather than report none.
+    assert(scala.util.Try(compat.readExtensionOwners(new Object)).isFailure)
+  }
 
   test("selected shim uses the expected Spark descriptor contract") {
     val legacy = org.apache.spark.SPARK_VERSION.startsWith("3.4.")

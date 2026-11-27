@@ -31,8 +31,9 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
 import org.apache.spark.sql.rapids.protobuf.{FieldReads, FlattenedFieldDescriptor,
-  FlattenedSchemaArrays, ProtobufExprInfo, ProtobufFieldInfo, ProtobufMessageDescriptor,
-  ProtobufPlannerOptions, ProtobufSchemaExtractor, ProtobufSchemaValidator}
+  FlattenedSchemaArrays, ProtobufExprInfo, ProtobufFieldDescriptor, ProtobufFieldInfo,
+  ProtobufMessageDescriptor, ProtobufPlannerOptions, ProtobufSchemaExtractor,
+  ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
 /**
@@ -85,6 +86,10 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
         }
 
         private def planGpuDecode(schema: StructType): Either[String, Unit] = for {
+          // Spark returns an empty schema when it cannot represent any field of the message,
+          // and the decoder cannot build a struct column without children.
+          _ <- Either.cond(schema.fields.nonEmpty, (),
+            "from_protobuf without any field in the Spark schema is not supported on GPU")
           exprInfo <- SparkProtobufCompat.extractExprInfo(e)
           plannerOptions <- SparkProtobufCompat.parsePlannerOptions(exprInfo.options)
           _ <- checkSupportedOptions(exprInfo.options)
@@ -150,17 +155,58 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             if (pathPrefix.isEmpty) "root message" else s"protobuf field '$pathPrefix'"
           val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
           for {
-            _ <- SparkProtobufCompat.checkNoFieldsMissingFromSchema(schema, msgDesc, location)
+            hidden <- SparkProtobufCompat.hiddenFieldsMissingFromSchema(schema, msgDesc,
+              location, depth)
             fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
               schema, msgDesc, enumsAsInts, messageName)
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
-            result <- schema.fields.foldLeft(empty) { (fields, sf) =>
+            outputFields <- schema.fields.foldLeft(empty) { (fields, sf) =>
               fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
                 enumsAsInts, reads.child(sf.name), parentVisible, parentIdx, depth,
                 pathOf(sf.name), _))
             }
+            result <- flattenHiddenFields(hidden, parentIdx, depth, outputFields)
           } yield result
         }
+
+        /**
+         * Appends the message fields Spark leaves out of its schema, each followed by its own
+         * fields, so that the decoder parses and validates the whole omitted subtree. They go
+         * last at every level, because GpuFromProtobuf drops the trailing columns the decoder
+         * returns for them.
+         */
+        private def flattenHiddenFields(
+            hidden: Seq[ProtobufFieldDescriptor],
+            parentIdx: Int,
+            depth: Int,
+            flatFields: Vector[FlattenedFieldDescriptor])
+            : Either[String, Vector[FlattenedFieldDescriptor]] = {
+          val start: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
+          hidden.foldLeft(start) { (fields, fieldDesc) =>
+            fields.flatMap { current =>
+              for {
+                hiddenField <- ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(fieldDesc,
+                  parentIdx = parentIdx, depth = depth,
+                  outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+                children <- hiddenFieldsOf(fieldDesc)
+                result <- flattenHiddenFields(children, parentIdx = current.size, depth + 1,
+                  current :+ hiddenField)
+              } yield result
+            }
+          }
+        }
+
+        /** The declared fields of a hidden message, which are hidden messages themselves. */
+        private def hiddenFieldsOf(
+            fieldDesc: ProtobufFieldDescriptor): Either[String, Seq[ProtobufFieldDescriptor]] =
+          Try {
+            fieldDesc.messageDescriptor
+              .map(msg => msg.fieldNames.flatMap(msg.findField))
+              .getOrElse(Seq.empty)
+          }.toEither.left.map { t =>
+            s"Failed to read the message type of protobuf field '${fieldDesc.name}': " +
+              s"${t.getMessage}"
+          }
 
         private def flattenField(
             sf: StructField,
