@@ -32,11 +32,11 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.getBuilder
 
 class GpuParquetMetadataReadSuite extends AnyFunSuite with Matchers {
-  private def withCacheSession(body: SparkSession => Unit): Unit = {
+  private def withSession(body: SparkSession => Unit): Unit = {
     // File cache is a startup-only setting; changing a shared session's SQLConf is insufficient.
     TrampolineUtil.cleanupAnyExistingSession()
     try {
-      val spark = getBuilder().master("local[1]").appName("Iceberg footer cache")
+      val spark = getBuilder().master("local[1]").appName("Iceberg footer reads")
         .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
         .config("spark.rapids.filecache.enabled", "true")
         .config("spark.sql.adaptive.enabled", "false")
@@ -48,9 +48,9 @@ class GpuParquetMetadataReadSuite extends AnyFunSuite with Matchers {
   }
 
   test("Iceberg metadata reads preserve CPU and GPU results with dictionary predicates") {
-    val warehouse = Files.createTempDirectory("iceberg-cached-footer")
+    val warehouse = Files.createTempDirectory("iceberg-footer-reads")
     try {
-      withCacheSession { spark =>
+      withSession { spark =>
         spark.conf.set("spark.sql.catalog.footer_test", "org.apache.iceberg.spark.SparkCatalog")
         spark.conf.set("spark.sql.catalog.footer_test.type", "hadoop")
         spark.conf.set("spark.sql.catalog.footer_test.warehouse", warehouse.toUri.toString)

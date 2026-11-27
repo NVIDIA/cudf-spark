@@ -203,8 +203,8 @@ public interface IcebergShimUtils {
      * {@code ParquetFileReader.open(InputFile, ParquetReadOptions)} without footer caching
      * and bumps the footer-miss counter on every call so dashboards see non-zero activity
      * instead of silently interpreting "all zeros" as "everything was cached". This default
-     * is used by 1.6.x / 1.9.x whose shaded {@code ParquetFileReader} has no public API to
-     * inject pre-parsed footer metadata. 1.10.x overrides this to route through
+     * is used by 1.6.x. 1.9.x overrides it to prefetch the footer through PerfIO.
+     * 1.10.x and later override this to route through
      * {@code FileCache} via the 4-arg
      * {@code (InputFile, ParquetMetadata, ParquetReadOptions, SeekableInputStream)}
      * constructor.
@@ -217,7 +217,7 @@ public interface IcebergShimUtils {
         Option<GpuMetric> opt = metrics.get(GpuMetric.FILECACHE_FOOTER_MISSES());
         GpuMetric missCounter = opt.isDefined() ? opt.get() : NoopMetric$.MODULE$;
         missCounter.$plus$eq(1L);
-        return ParquetFileReader.open(GpuParquetIO.file(inputFile), options);
+        return ParquetFileReader.open(GpuParquetIO.file(inputFile.getDelegate()), options);
     }
 
     /**

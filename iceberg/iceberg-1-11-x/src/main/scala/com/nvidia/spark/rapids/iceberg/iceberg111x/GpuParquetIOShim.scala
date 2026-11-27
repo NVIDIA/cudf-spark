@@ -47,7 +47,7 @@ object GpuParquetIOShim {
         ParquetFileReader.readFooter(shadedHmbFile, options, hmbStream)
       }
     }
-    val realFile = GpuParquetIO.file(inputFile)
+    val realFile = GpuParquetIO.file(inputFile.getDelegate)
     closeOnExcept(realFile.newStream()) { stream =>
       new ParquetFileReader(realFile, metadata, options, stream)
     }

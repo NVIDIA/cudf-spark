@@ -23,7 +23,6 @@ import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.metrics.Counter;
@@ -93,11 +92,6 @@ public final class IcebergS3InputFile extends IcebergInputFile {
     Counter readBytes = IcebergS3InputFileAccess.readBytesCounter(inputFile);
     return new IcebergS3InputFile(
         inputFile, s3Bucket, s3Key, icebergS3Client, readBytes);
-  }
-
-  @Override
-  public SeekableInputStream open() throws IOException {
-    return new IcebergS3InputStream(this, getLength());
   }
 
   @Override
