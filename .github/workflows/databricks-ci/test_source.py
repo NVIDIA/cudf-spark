@@ -24,6 +24,105 @@ with patch.object(sys, "path", [str(source.HERE.parent / "gpu-ci"), *sys.path]):
 BASE, HEAD, MERGE, OTHER = (c * 40 for c in "abcd")
 
 
+class StandaloneImpactTest(unittest.TestCase):
+    scala = "tests/src/test/scala/example/ImpactFixtureSuite.scala"
+    python = "integration_tests/src/main/python/impact_fixture_test.py"
+    suite = """package example
+import org.scalatest.funsuite.AnyFunSuite
+
+class ImpactFixtureSuite extends AnyFunSuite {
+  test("filter") { assert(1 == 1) }
+}
+"""
+    cases = """import pytest
+
+def twice(x):
+    return x + x
+
+@pytest.mark.parametrize("value", [1, 2])
+def test_impact_twice(value):
+    assert twice(value) == 2 * value
+
+def test_impact_zero():
+    assert twice(0) == 0
+"""
+    full = {"unit": None, "integration": None}
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.git("init", "-q")
+        self.base = self.commit({
+            self.scala: self.suite, self.python: self.cases,
+            select_impact.RULES_PATH: (source.HERE.parents[2] / select_impact.RULES_PATH).read_text(),
+            ".github/gpu-ci-suites.json": json.dumps({"suites": {"integration": {
+                "shard_overrides": {"impact_fixture_test.py": 2}}}}),
+        })
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-c", "user.name=Fixture", "-c", "user.email=ci@example.invalid",
+                                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                                       cwd=self.root, text=True).strip()
+
+    def commit(self, files):
+        for name, contents in files.items():
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if contents is None:
+                path.unlink()
+            elif isinstance(contents, bytes):
+                path.write_bytes(contents)
+            else:
+                path.write_text(contents, encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "fixture")
+        return self.git("rev-parse", "HEAD")
+
+    def plan(self, base, merge):
+        return select_impact.select_impact(self.root, base, merge, runtime="standalone")
+
+    def test_body_edits_select_only_the_changed_suite_and_case(self):
+        scala = self.commit({self.scala: self.suite.replace("1 == 1", "2 == 2")})
+        python = self.commit({self.python: self.cases.replace("2 * value", "value * 2")})
+        suites = ["example.ImpactFixtureSuite"]
+        nodes = {2: ["impact_fixture_test.py::test_impact_twice"]}
+        self.assertEqual(self.plan(self.base, scala), {"unit": suites, "integration": {}})
+        self.assertEqual(self.plan(scala, python), {"unit": [], "integration": nodes})
+        self.assertEqual(self.plan(self.base, python), {"unit": suites, "integration": nodes})
+
+    def test_pytest_collection_or_unreadable_source_keeps_full_coverage(self):
+        for label, changed in [
+            ("decorator", self.cases.replace("[1, 2]", "[1, 2, 3]")),
+            ("shared helper", self.cases.replace("x + x", "2 * x")),
+            ("added case", self.cases + "\ndef test_impact_other():\n    assert twice(3) == 6\n"),
+            ("renamed case", self.cases.replace("test_impact_twice", "test_impact_double")),
+            ("invalid syntax", self.cases.replace("def test_impact_zero():", "def test_impact_zero(:")),
+            ("unreadable blob", self.cases.encode() + b"\xff"),
+        ]:
+            with self.subTest(label):
+                self.assertEqual(self.plan(self.base, self.commit({self.python: changed})), self.full)
+
+    def test_shared_scala_suite_keeps_full_coverage(self):
+        base = self.commit({"tests/src/test/scala/example/Consumer.scala":
+                            "package example\nclass Consumer extends ImpactFixtureSuite\n"})
+        merge = self.commit({self.scala: self.suite.replace("1 == 1", "2 == 2")})
+        self.assertEqual(self.plan(base, merge), self.full)
+
+    def test_pytest_case_collected_from_another_module_keeps_full_coverage(self):
+        base = self.commit({"integration_tests/src/main/python/second_fixture_test.py":
+                            "from impact_fixture_test import test_impact_twice\n"})
+        merge = self.commit({self.python: self.cases.replace("2 * value", "value * 2")})
+        self.assertEqual(self.plan(base, merge), self.full)
+
+    def test_adding_or_renaming_a_test_file_keeps_full_coverage(self):
+        new_path = self.python.replace("impact_fixture_test", "other_fixture_test")
+        added = self.commit({new_path: self.cases})
+        renamed = self.commit({self.python: None})
+        self.assertEqual(self.plan(self.base, added), self.full)
+        self.assertEqual(self.plan(self.base, renamed), self.full)
+
+
 class SourceTest(unittest.TestCase):
     def setUp(self):
         tmp = TemporaryDirectory()
