@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,10 +31,19 @@ import java.util.Objects;
  */
 public class IcebergInputFile implements RapidsInputFile {
   private final InputFile delegate;
+  private final long length;
 
   public IcebergInputFile(InputFile delegate) {
+    this(delegate, -1L);
+  }
+
+  /**
+   * Wrap an input file with its known length, or a negative value if the length is unknown.
+   */
+  public IcebergInputFile(InputFile delegate, long length) {
     Objects.requireNonNull(delegate, "delegate can't be null");
     this.delegate = delegate;
+    this.length = length;
   }
 
   @Override
@@ -44,7 +53,7 @@ public class IcebergInputFile implements RapidsInputFile {
 
   @Override
   public long getLength() throws IOException {
-    return delegate.getLength();
+    return length >= 0 ? length : delegate.getLength();
   }
 
   @Override

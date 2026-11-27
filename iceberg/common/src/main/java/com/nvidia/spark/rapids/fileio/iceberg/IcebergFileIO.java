@@ -54,7 +54,7 @@ public class IcebergFileIO implements RapidsFileIO {
 
   @Override
   public IcebergInputFile newInputFile(String path, long length) throws IOException {
-    return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path, length), delegate);
+    return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path, length), delegate, length);
   }
 
   @Override
