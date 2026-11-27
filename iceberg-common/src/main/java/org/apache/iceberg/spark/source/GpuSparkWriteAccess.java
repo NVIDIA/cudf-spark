@@ -122,10 +122,6 @@ public final class GpuSparkWriteAccess {
     return readField(context, "dataSchema", Schema.class);
   }
 
-  public static StructType contextDataSparkType(Object context) {
-    return readField(context, "dataSparkType", StructType.class);
-  }
-
   public static FileFormat contextDataFileFormat(Object context) {
     return readField(context, "dataFileFormat", FileFormat.class);
   }
