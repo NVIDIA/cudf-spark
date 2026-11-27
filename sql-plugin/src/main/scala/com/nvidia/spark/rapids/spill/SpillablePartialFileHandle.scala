@@ -101,6 +101,9 @@ class SpillablePartialFileHandle private (
   // Guarded by this handle's monitor; `closed` (from StoreHandle) marks the physical close.
   private var readRefCount: Int = 0
   private var closeRequested: Boolean = false
+  // Guarded by this handle's monitor. Set during write() so doClose() waits before freeing `host`
+  // without holding this monitor across expandBuffer()/HostAlloc (which can trigger spill scans).
+  private var writeInProgress: Boolean = false
 
   // Write state
   private var writePosition: Long = 0L
@@ -220,23 +223,25 @@ class SpillablePartialFileHandle private (
         }
 
         try {
-          // Allocate new larger buffer
+          // Allocate new larger buffer outside this handle's monitor so spill selection
+          // triggered by HostAlloc cannot cycle with another handle's monitor.
           val newBuffer = ai.rapids.cudf.HostMemoryBuffer.allocate(newCapacity, false)
           closeOnExcept(newBuffer) { _ =>
             // Copy existing data
             newBuffer.copyFromHostBuffer(0, currentBuffer, 0, writePosition)
-
-            // Remove old buffer tracking and track new one
-            SpillFramework.removeFromHostStore(this)
-            currentBuffer.close()
+          }
+          // Remove old buffer tracking and swap host reference before closing old buffer
+          SpillFramework.removeFromHostStore(this)
+          synchronized {
             host = Some(newBuffer)
             currentBufferCapacity = newCapacity
-            SpillFramework.stores.hostStore.trackNoSpill(this)
-
-            expansionCount += 1
-            logDebug(s"Expanded buffer from $oldCapacity to $newCapacity bytes " +
-              s"(required $requiredCapacity bytes)")
           }
+          currentBuffer.close()
+          SpillFramework.stores.hostStore.trackNoSpill(this)
+
+          expansionCount += 1
+          logDebug(s"Expanded buffer from $oldCapacity to $newCapacity bytes " +
+            s"(required $requiredCapacity bytes)")
           true
         } catch {
           case e: Exception =>
@@ -277,28 +282,45 @@ class SpillablePartialFileHandle private (
 
     // Release buffer and switch to file mode
     SpillFramework.removeFromHostStore(this)
+    synchronized {
+      host = None
+      spilledToDisk = true
+    }
     buffer.close()
-    host = None
-    spilledToDisk = true
     spillCount += 1
 
     logDebug(s"Spilled buffer to ${file.getAbsolutePath} during write " +
       s"($writePosition bytes), continuing write to file")
   }
 
+  private def withActiveWrite(body: => Unit): Unit = {
+    synchronized {
+      if (closed || closeRequested) {
+        throw new IllegalStateException("Partial file handle is closed")
+      }
+      if (writeFinished) {
+        throw new IllegalStateException("Write phase already finished")
+      }
+      writeInProgress = true
+    }
+    try {
+      body
+    } finally {
+      synchronized {
+        writeInProgress = false
+        notifyAll()
+      }
+    }
+  }
+
   /**
    * Write a single byte to the partial file.
-   * Synchronized with close()/doClose() so the backing HostMemoryBuffer cannot be freed
-   * mid-write on abort.
+   * Coordinates with close()/doClose() via `writeInProgress` so the backing HostMemoryBuffer
+   * cannot be freed mid-write without holding the handle monitor across HostAlloc calls.
    */
-  def write(b: Int): Unit = synchronized {
-    if (closed || closeRequested) {
-      throw new IllegalStateException("Partial file handle is closed")
-    }
-    if (writeFinished) {
-      throw new IllegalStateException("Write phase already finished")
-    }
+  def write(b: Int): Unit = withActiveWrite(writeByteInternal(b))
 
+  private def writeByteInternal(b: Int): Unit = {
     if (shouldUseFile) {
       // FILE_ONLY mode or spilled: write to file
       ensureFileOutputStreamOpen()
@@ -312,10 +334,9 @@ class SpillablePartialFileHandle private (
           val requiredCapacity = writePosition + 1
           if (requiredCapacity > currentBufferCapacity) {
             val expanded = expandBuffer(requiredCapacity)
-            // After expansion, may have spilled to file, recursively call write
+            // After expansion, may have spilled to file, retry in file branch
             if (!expanded) {
-              // Spilled to file, retry write (will go to file branch)
-              write(b)
+              writeByteInternal(b)
               return
             }
           }
@@ -330,17 +351,13 @@ class SpillablePartialFileHandle private (
 
   /**
    * Write bytes to the partial file.
-   * Synchronized with close()/doClose() so the backing HostMemoryBuffer cannot be freed
-   * mid-write on abort.
+   * Coordinates with close()/doClose() via `writeInProgress` so the backing HostMemoryBuffer
+   * cannot be freed mid-write without holding the handle monitor across HostAlloc calls.
    */
-  def write(bytes: Array[Byte], offset: Int, length: Int): Unit = synchronized {
-    if (closed || closeRequested) {
-      throw new IllegalStateException("Partial file handle is closed")
-    }
-    if (writeFinished) {
-      throw new IllegalStateException("Write phase already finished")
-    }
+  def write(bytes: Array[Byte], offset: Int, length: Int): Unit =
+    withActiveWrite(writeBytesInternal(bytes, offset, length))
 
+  private def writeBytesInternal(bytes: Array[Byte], offset: Int, length: Int): Unit = {
     if (shouldUseFile) {
       // FILE_ONLY mode or spilled: write to file
       ensureFileOutputStreamOpen()
@@ -356,10 +373,9 @@ class SpillablePartialFileHandle private (
             logDebug(s"Buffer expansion needed: writePos=$writePosition, length=$length, " +
               s"required=$requiredCapacity, current=$currentBufferCapacity")
             val expanded = expandBuffer(requiredCapacity)
-            // After expansion, may have spilled to file, recursively call write
+            // After expansion, may have spilled to file, retry in file branch
             if (!expanded) {
-              // Spilled to file, retry write (will go to file branch)
-              write(bytes, offset, length)
+              writeBytesInternal(bytes, offset, length)
               return
             }
             logDebug(s"After expansion: currentCapacity=$currentBufferCapacity, " +
@@ -381,6 +397,9 @@ class SpillablePartialFileHandle private (
   def finishWrite(): Unit = {
     // Extract streams under lock, close them outside
     val (bos, fos) = synchronized {
+      while (writeInProgress) {
+        wait()
+      }
       if (writeFinished) {
         return
       }
@@ -585,7 +604,7 @@ class SpillablePartialFileHandle private (
    * No lock needed: protectedFromSpill is volatile.
    */
   override private[spill] def spillable: Boolean = {
-    super.spillable && !protectedFromSpill && !spilledToDisk && host.nonEmpty
+    !protectedFromSpill && !spilledToDisk && super.spillable && host.nonEmpty
   }
 
   // Flag to prevent concurrent spill attempts (only accessed within synchronized blocks)
@@ -844,10 +863,10 @@ class SpillablePartialFileHandle private (
     try {
       // Collect resources to close under lock, then close them outside lock
       val (bos, fos, bis, fis, fc, raf) = synchronized {
-        // Wait for any in-progress spill to complete before closing buffer.
+        // Wait for any in-progress spill or write to complete before closing buffer.
         // close() has already committed this handle's closed state, so cleanup must finish even
         // if this thread is interrupted while waiting. Restore the interrupt flag after cleanup.
-        while (spillInProgress) {
+        while (spillInProgress || writeInProgress) {
           try {
             wait()
           } catch {

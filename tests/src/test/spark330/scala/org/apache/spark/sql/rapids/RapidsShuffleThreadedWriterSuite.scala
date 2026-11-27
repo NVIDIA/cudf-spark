@@ -1448,10 +1448,15 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
         "mapOutputWriter.abort() must wait for active BatchMerger steps to finish")
     } finally {
       releaseMergers.countDown()
+      try {
+        writer.stop(false)
+      } catch {
+        case _: Exception =>
+      }
+      stopThread.join(5000)
+      writeThread.join(5000)
     }
 
-    stopThread.join(5000)
-    writeThread.join(5000)
     assert(!stopThread.isAlive, "stop(false) thread did not finish")
     assert(!writeThread.isAlive, "write thread did not finish after stop(false)")
     assert(stopError.get() == null, s"stop(false) threw: ${stopError.get()}")
