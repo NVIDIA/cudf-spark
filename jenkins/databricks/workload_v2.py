@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Driver-side HTTPS workload. Its caller supplies the trusted launchers and immutable source pins."""
+"""Run the pinned project's launchers on the driver, with trusted capture and source verification."""
 
 import json
 import os
@@ -112,6 +112,17 @@ def junit(root):
     return [total, skipped, failed]
 
 
+def stage_launchers(revision, phase, work):
+    # Build output can modify the checkout. Read the selected Git blobs for both phases.
+    names = ("build.sh",) if phase == "build" else ("test.sh", "spark_readiness.sh", "run-test-command.sh")
+    for name in names:
+        with (work / name).open("xb") as out:
+            subprocess.run(["git", "--no-replace-objects", "-C", str(SOURCE), "cat-file", "blob",
+                            f"{revision}:jenkins/databricks/{name}"], stdout=out, check=True, timeout=30,
+                           stderr=subprocess.DEVNULL, env={"PATH": os.defpath, "GIT_CONFIG_GLOBAL": os.devnull,
+                                                          "GIT_CONFIG_NOSYSTEM": "1", "GIT_ALLOW_PROTOCOL": ""})
+
+
 def restore_seed(work, digest, env):
     """The product needs /home/ubuntu; Maven's default user.home follows the Linux account."""
     if not isinstance(digest, str) or not re.fullmatch("[0-9a-f]{64}", digest):
@@ -164,6 +175,7 @@ def run_phase(plan, files, work):
             env.update(SPARK_STARTUP_CHECK=str(work / "spark_readiness.sh"), TEST_TYPE="pre-commit",
                        LOCAL_JAR_PATH="", SPARK_CONF="")
             capture = ["bash", str(work / "run-test-command.sh"), *capture]
+        stage_launchers(plan["source"]["revision"], phase, work)
         stage = phase
         rc = subprocess.run(capture + command, cwd=SOURCE if phase == "build" else HOME,
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

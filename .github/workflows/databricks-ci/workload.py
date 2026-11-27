@@ -124,7 +124,7 @@ def driver_payload(plan, files):
 
 
 def run_workload(phase, env, cluster_id, directory, source):
-    """Use only protected launcher bytes. Never send the controller environment to the driver."""
+    """Send trusted plumbing, not controller credentials. The driver loads the candidate launchers."""
     validate_source(source)
     if cluster_id != env["DATABRICKS_CLUSTER_ID"] or phase not in ("build", "test"):
         raise ValueError("Unexpected workload cluster or phase")
@@ -137,15 +137,13 @@ def run_workload(phase, env, cluster_id, directory, source):
     mode = options[1]
     plan = dict(source=source, runtime=runtime, spark=spark, mode=mode, phase=phase,
                 reduced=options[2] == "true")
-    files = {phase + ".sh": (DB / (phase + ".sh")).read_text(), "capture.py": (HERE / "capture_console.py").read_text()}
+    files = {"capture.py": (HERE / "capture_console.py").read_text()}
     if phase == "build" and re.fullmatch("[0-9a-f]{64}", env.get("DB_MAVEN_SEED_SHA256", "")):
         try:
             files["maven_seed_v2.py"] = (DB / "maven_seed_v2.py").read_text()
             plan["seed"] = env["DB_MAVEN_SEED_SHA256"]
         except OSError:
             print("Maven seed helper unavailable; continuing cold", flush=True)
-    if phase == "test":
-        files.update({name: (DB / name).read_text() for name in ("spark_readiness.sh", "run-test-command.sh")})
     payload = driver_payload(plan, files)
     call = workspace_api(env["DATABRICKS_HOST"], env["DATABRICKS_TOKEN"])
     outcome = None

@@ -28,6 +28,19 @@ def git(path, *args):
     }, stderr=subprocess.DEVNULL, text=True).strip()
 
 
+def commit_launchers(repo, scripts):
+    folder = repo / "jenkins/databricks"
+    folder.mkdir(parents=True)
+    git(repo, "init", "-q")
+    for name, script in scripts.items():
+        (folder / name).write_text(script)
+    git(repo, "add", "jenkins")
+    git(repo, "commit", "-qm", "candidate launchers")
+    for name in scripts:
+        (folder / name).write_text("exit 97\n")  # Uncommitted copies must not be executed.
+    return git(repo, "rev-parse", "HEAD")
+
+
 class WorkloadTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -234,8 +247,10 @@ sys.exit(int(sys.argv[1]))
                 if evidence == "stale":
                     report.write_text(xml)
                 hook = f"""printf '{{"phase":"READY","runtime":"%s"}}' "$1" > '{markers}'/spark-readiness-"$1".json"""
-                files = {"capture.py": cap, "test.sh": script + f"echo actual-output; exit {rc}",
-                         "spark_readiness.sh": hook, "run-test-command.sh": 'exec "$@"'}
+                plan["source"] = dict(source, revision=commit_launchers(tree, {
+                    "test.sh": script + f"echo actual-output; exit {rc}", "spark_readiness.sh": hook,
+                    "run-test-command.sh": 'exec "$@"'}))
+                files = {"capture.py": cap}
                 with patch.multiple(driver, HOME=home, SOURCE=tree, MARKERS=markers, DBR_VERSION=version), \
                         patch.object(driver, "verify_checkout"), \
                         patch.dict(os.environ, DATABRICKS_TOKEN="host-only"):
@@ -271,11 +286,12 @@ sys.exit(int(sys.argv[1]))
                                               f"assert sys.argv[1:] == ['restore','--sha256','{digest}']\n"
                                               f"Path({str(marker)!r}).write_text(os.environ['HOME'])\n"
                                               f"print({receipt!r})\n"
-                                              f"sys.exit({seed_rc})"),
-                         "build.sh": ('test -z "${DATABRICKS_TOKEN:-}${DBFS_CACHE_DIR:-}" || exit 99\n'
-                                      f'echo "building"; exit {product_rc}')}
+                                              f"sys.exit({seed_rc})")}
+                script = ('test -z "${DATABRICKS_TOKEN:-}${DBFS_CACHE_DIR:-}" || exit 99\n'
+                          f'echo "building"; exit {product_rc}')
+                plan["source"] = dict(source, revision=commit_launchers(tree, {"build.sh": script}))
                 with patch.multiple(driver, HOME=home, SOURCE=tree, DBR_VERSION=version), \
-                        patch.object(driver, "checkout", side_effect=lambda _, dest: dest.mkdir()), \
+                        patch.object(driver, "checkout"), \
                         patch.dict(os.environ, DATABRICKS_TOKEN="host-only"):
                     result = driver.run_phase(plan, files, work)
                 self.assertEqual((result["exit"], result["seed"]), (product_rc, status))
