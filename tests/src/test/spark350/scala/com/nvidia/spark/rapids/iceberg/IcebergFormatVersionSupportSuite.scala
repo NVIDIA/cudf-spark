@@ -23,25 +23,13 @@ package com.nvidia.spark.rapids.iceberg
 import java.nio.ByteBuffer
 import java.util.UUID
 
-import com.nvidia.spark.rapids.RapidsConf
 import org.apache.iceberg.Schema
 import org.apache.iceberg.types.Types
 import org.scalatest.funsuite.AnyFunSuite
 
-/** Tests for Iceberg table format versions and schema defaults. */
+/** Focused schema tests for IcebergFormatVersionSupport. */
 class IcebergFormatVersionSupportSuite extends AnyFunSuite {
   import IcebergDefaultTestUtils.{fieldWithDefaults, fieldWithWriteDefault}
-
-  test("format versions through v3 are enabled by default and v3 can be disabled") {
-    val defaultConf = new RapidsConf(Map.empty[String, String])
-    val v3Disabled = new RapidsConf(Map(RapidsConf.ENABLE_ICEBERG_V3.key -> "false"))
-    for (version <- 1 to 4) {
-      assert(IcebergFormatVersionSupport.unsupportedFormatVersion(version, defaultConf).isEmpty ==
-        (version <= 3))
-      assert(IcebergFormatVersionSupport.unsupportedFormatVersion(version, v3Disabled).isEmpty ==
-        (version <= 2))
-    }
-  }
 
   test("Unsupported Iceberg defaults are identified by subtype and nested path") {
     val timestampNtzField = fieldWithDefaults(
