@@ -74,6 +74,10 @@ class CleanupOrphansTest(unittest.TestCase):
         with self.assertRaises(s.InvalidClusterLookup):
             remove(early)
         self.assertEqual(early.call_count, 1)
+        rejected_purge = Mock(side_effect=[info, {"error_code": "UNEXPECTED"}])
+        with self.assertRaisesRegex(s.SweepError, "permanent-delete"):
+            remove(rejected_purge)
+        self.assertEqual(rejected_purge.call_count, 2)
         db = Mock(side_effect=[info, {}, rejected, {"next_page_token": "next"},
                                {"clusters": [{"cluster_id": "other"}]}])
         self.assertTrue(remove(db))
@@ -177,6 +181,7 @@ class CleanupOrphansTest(unittest.TestCase):
                     (400, {"error_code": "RESOURCE_DOES_NOT_EXIST"}, "permanent-delete", True),
                     (400, {"error_code": "other"}, "delete", False), (403, {}, "delete", False),
                     (404, {}, "actions/runs/42/attempts/1", False), (404, {}, "list", False),
+                    (206, {"clusters": []}, "list", False), (202, {}, "permanent-delete", False),
                     (302, {}, "get", False), (503, {}, "get", False)]:
                 with self.subTest(status=status, endpoint=endpoint):
                     requests.request.return_value = Mock(status_code=status, content=b"{}", json=lambda: body)

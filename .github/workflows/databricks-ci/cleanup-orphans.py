@@ -140,8 +140,11 @@ def remove(db, profile, creator, cid, owner):
             break
         if state == "TERMINATED":
             if not purging:
-                if db("POST", "permanent-delete", data) is None:
+                receipt = db("POST", "permanent-delete", data)
+                if receipt is None:
                     return False
+                if receipt != {}:
+                    raise SweepError("Workspace did not confirm the permanent-delete request")
                 purging = True
         elif state not in {"PENDING", "RUNNING", "RESTARTING", "RESIZING", "TERMINATING", "ERROR"} or purging:
             raise SweepError("Unexpected cluster state; withholding further deletion")
@@ -192,6 +195,8 @@ def transport(base, token):
                         return None
                     if (method, endpoint, error) == ("GET", "get", "INVALID_PARAMETER_VALUE"):
                         raise InvalidClusterLookup("Cleanup cluster GET: HTTP 400 INVALID_PARAMETER_VALUE")
+            if endpoint in {"list", "permanent-delete"} and response.status_code != 200:
+                raise SweepError(f"Cleanup API {method} {endpoint}: HTTP {response.status_code}")
             if not 200 <= response.status_code < 300:
                 raise SweepError(f"Cleanup API {method}: HTTP {response.status_code}")
             result = response.json() if response.content or method == "GET" else {}
