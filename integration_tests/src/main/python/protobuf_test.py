@@ -1070,6 +1070,14 @@ def _build_repeated_nested_empty_message_descriptor_set_bytes(spark):
     ])
 
 
+def _one_partition_df(spark, rows):
+    """Build the rows in a single partition, so the decoder sees them in one batch.
+    `coalesce(1)` is not enough: it merges partitions after the rows are already columnar,
+    which leaves the existing batches separate."""
+    return spark.createDataFrame(spark.sparkContext.parallelize(rows, 1),
+                                 schema="idx int, bin binary")
+
+
 def _empty_label(label):
     return lambda spark: _build_empty_message_field_descriptor_set_bytes(spark, label)
 
@@ -1126,8 +1134,7 @@ def test_from_protobuf_projection_with_hidden_fields(
     row = _encode_varint_field(1, 7) + (child * 2 if label == "repeated" else child)
 
     def run_on_spark(spark):
-        df = spark.createDataFrame(
-            [(0, row), (1, None)], schema="idx int, bin binary").coalesce(1)
+        df = _one_partition_df(spark, [(0, row), (1, None)])
         decoded = _decode(from_protobuf_fn, desc, "Root")
         return df.select("idx",
                          decoded.getField("child").getField("selected").alias("selected"))
@@ -1799,7 +1806,7 @@ def test_from_protobuf_malformed_input(
     def run_on_spark(spark):
         # Keep the valid, malformed and null rows in one batch, so that hidden-field
         # validation and the column trimming see them together.
-        df = spark.createDataFrame(rows, schema="idx int, bin binary").coalesce(1)
+        df = _one_partition_df(spark, rows)
         decoded = _decode(from_protobuf_fn, desc, message, dict(options, mode=mode))
         return df.select("idx", *_select_paths(decoded, paths))
 
