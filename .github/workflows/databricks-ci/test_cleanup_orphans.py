@@ -63,6 +63,26 @@ class CleanupOrphansTest(unittest.TestCase):
         self.assertEqual(s.sweep(db, self.gh, "aws2", "ci"), (1, 0))
         db.assert_called_once_with("GET", "list", {"page_size": 100})
 
+    def test_ambiguous_get_needs_accepted_purge_and_complete_inventory(self):
+        rejected = s.InvalidClusterLookup("HTTP 400 INVALID_PARAMETER_VALUE")
+        info = cluster(state="TERMINATED")
+        owner = s.ownership(info, "aws2", "ci")
+        def remove(api):
+            return s.remove(api, "aws2", "ci", info["cluster_id"], owner)
+
+        early = Mock(side_effect=[rejected])
+        with self.assertRaises(s.InvalidClusterLookup):
+            remove(early)
+        self.assertEqual(early.call_count, 1)
+        db = Mock(side_effect=[info, {}, rejected, {"next_page_token": "next"},
+                               {"clusters": [{"cluster_id": "other"}]}])
+        self.assertTrue(remove(db))
+        self.assertEqual([c.args[1] for c in db.call_args_list], ["get", "permanent-delete", "get", "list", "list"])
+        self.assertEqual(db.call_args.args[2]["page_token"], "next")
+        for page in ({"clusters": [cluster()]}, {"clusters": [{}]}):
+            with self.subTest(page=page), self.assertRaises(s.SweepError):
+                remove(Mock(side_effect=[info, {}, rejected, page]))
+
     def test_omitted_creator_requires_independent_workspace_get_even_for_active_attempt(self):
         listed = cluster(creator_user_name=None)
         for detail, fails in [(cluster(creator_user_name=None), True), (cluster(cluster_id="different"), True),
@@ -150,6 +170,9 @@ class CleanupOrphansTest(unittest.TestCase):
         requests = Mock(RequestException=RuntimeError)
         with patch.dict(sys.modules, requests=requests):
             api = s.transport("https://test.invalid/", "fixture")
+            requests.request.return_value = Mock(status_code=400, json=lambda: {"error_code": "INVALID_PARAMETER_VALUE"})
+            with self.assertRaises(s.InvalidClusterLookup):
+                api("GET", "get", {"cluster_id": "offline-1"})
             for status, body, endpoint, missing in [(404, {}, "get", True),
                     (400, {"error_code": "RESOURCE_DOES_NOT_EXIST"}, "permanent-delete", True),
                     (400, {"error_code": "other"}, "delete", False), (403, {}, "delete", False),

@@ -12,7 +12,7 @@ import time
 
 # The workflow uses python -I and checks out this directory from trusted main.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from attempts import MANAGER, PROVIDERS, REPO, WORKFLOW, managed_tags
+from attempts import Failure, MANAGER, PROVIDERS, REPO, WORKFLOW, absent_from_inventory, managed_tags
 from runtimes import RUNTIME
 from workload import creator_name, profile_config
 
@@ -26,6 +26,10 @@ TERMINAL = {"success", "failure", "cancelled", "timed_out", "skipped", "neutral"
 
 class SweepError(Exception):
     pass
+
+
+class InvalidClusterLookup(SweepError):
+    """A rejected GET is not itself proof that a cluster is gone."""
 
 
 def ownership(info, profile, creator, *, listing=False):
@@ -115,7 +119,18 @@ def remove(db, profile, creator, cid, owner):
     deadline = time.monotonic() + 180
     terminating = purging = False
     while time.monotonic() < deadline:
-        info = db("GET", "get", data)
+        try:
+            info = db("GET", "get", data)
+        except InvalidClusterLookup:
+            if not purging:
+                raise
+            try:
+                if absent_from_inventory(lambda params: db("GET", "list", params), cid, deadline):
+                    return True
+            except Failure as exc:
+                raise SweepError(str(exc)) from exc
+            time.sleep(max(0, min(10, deadline - time.monotonic())))
+            continue
         if info is None:  # Already absent; e.g. inline cleanup completed since the list.
             return purging
         if info.get("cluster_id") != cid or ownership(info, profile, creator) != owner:
@@ -167,9 +182,16 @@ def transport(base, token):
             response = requests.request(method, base + endpoint, headers={"Authorization": "Bearer " + token},
                                         **({"params": data} if method == "GET" else {"json": data}),
                                         timeout=(10, 30), allow_redirects=False)
-            if (endpoint in {"get", "delete", "permanent-delete"} and (response.status_code == 404 or
-                    (response.status_code == 400 and response.json().get("error_code") == "RESOURCE_DOES_NOT_EXIST"))):
-                return None
+            if endpoint in {"get", "delete", "permanent-delete"}:
+                if response.status_code == 404:
+                    return None
+                if response.status_code == 400:
+                    detail = response.json()
+                    error = detail.get("error_code") if isinstance(detail, dict) else None
+                    if error == "RESOURCE_DOES_NOT_EXIST":
+                        return None
+                    if (method, endpoint, error) == ("GET", "get", "INVALID_PARAMETER_VALUE"):
+                        raise InvalidClusterLookup("Cleanup cluster GET: HTTP 400 INVALID_PARAMETER_VALUE")
             if not 200 <= response.status_code < 300:
                 raise SweepError(f"Cleanup API {method}: HTTP {response.status_code}")
             result = response.json() if response.content or method == "GET" else {}
