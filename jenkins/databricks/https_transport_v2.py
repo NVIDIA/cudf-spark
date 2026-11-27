@@ -37,6 +37,10 @@ class MissingCluster(RuntimeError):
     """The workspace confirmed that this specific cluster no longer exists."""
 
 
+class InvalidClusterParameter(RuntimeError):
+    """A cluster GET rejected its parameter; this alone does not prove absence."""
+
+
 def observe(call):
     for delay in (2, 5, None):
         try:
@@ -77,6 +81,8 @@ def workspace_api(host, token):
                 if ((method, path) == ("GET", CLUSTERS + "/get") and reply.status in (400, 404)
                         and code == "RESOURCE_DOES_NOT_EXIST"):
                     error = MissingCluster
+                elif (method, path, reply.status, code) == ("GET", CLUSTERS + "/get", 400, "INVALID_PARAMETER_VALUE"):
+                    error = InvalidClusterParameter
                 raise error(f"{method} {path}: HTTP {reply.status}{reason}")
             raw = reply.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:

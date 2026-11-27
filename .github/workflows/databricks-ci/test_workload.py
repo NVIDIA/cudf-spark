@@ -320,6 +320,18 @@ sys.exit(int(sys.argv[1]))
                     call("GET", transport.CLUSTERS + "/get", cluster_id="owned")
                 self.assertIsInstance(caught.exception, transport.MissingCluster if is_missing else RuntimeError)
                 self.assertEqual(isinstance(caught.exception, transport.MissingCluster), is_missing)
+            for method, path, status, code, ambiguous in [
+                    ("GET", "/get", 400, "INVALID_PARAMETER_VALUE", True),
+                    ("GET", "/get", 403, "INVALID_PARAMETER_VALUE", False),
+                    ("GET", "/get", 400, "BAD_REQUEST", False),
+                    ("GET", "/list", 400, "INVALID_PARAMETER_VALUE", False),
+                    ("POST", "/permanent-delete", 400, "INVALID_PARAMETER_VALUE", False)]:
+                with self.subTest(method=method, path=path, status=status, code=code):
+                    response.status, response.read.return_value = status, json.dumps({"error_code": code}).encode()
+                    with self.assertRaises(RuntimeError) as caught:
+                        call(method, transport.CLUSTERS + path, cluster_id="owned")
+                    self.assertEqual(isinstance(caught.exception, transport.InvalidClusterParameter), ambiguous)
+                    self.assertNotIsInstance(caught.exception, transport.MissingCluster)
             response.status, response.read.return_value = 200, b""
             for path in ("/delete", "/permanent-delete"):
                 self.assertEqual(call("POST", transport.CLUSTERS + path, cluster_id="owned"), {})

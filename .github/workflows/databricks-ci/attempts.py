@@ -12,6 +12,7 @@ import shutil
 import signal
 import sys
 from tempfile import TemporaryDirectory
+import time
 
 
 HERE = Path(__file__).resolve().parent
@@ -115,6 +116,37 @@ def confirmed_infra(info):
     return None
 
 
+def absent_from_inventory(list_page, cid, deadline):
+    # Unfiltered list includes recently terminated clusters. An incomplete scan proves nothing.
+    params = {"page_size": 50}
+    seen = set()
+    while len(seen) < 100 and time.monotonic() < deadline:
+        page = list_page(params)
+        if not isinstance(page, dict) or set(page) - {"clusters", "next_page_token", "prev_page_token"}:
+            raise Failure("Invalid clusters/list response while confirming removal")
+        rows = page.get("clusters", [])  # The API may omit an empty repeated field.
+        if not isinstance(rows, list):
+            raise Failure("Invalid clusters/list response while confirming removal")
+        if time.monotonic() >= deadline:
+            break
+        for row in rows:
+            listed_id = row.get("cluster_id") if isinstance(row, dict) else None
+            if not isinstance(listed_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", listed_id):
+                raise Failure("Invalid cluster ID in clusters/list while confirming removal")
+            if listed_id == cid:
+                if row.get("state") != "TERMINATED":
+                    raise Failure("Purged cluster still listed without confirmed TERMINATED state")
+                return False
+        token = page.get("next_page_token", "")
+        if token == "":
+            return True
+        if not isinstance(token, str) or token in seen:
+            raise Failure("Invalid or repeated clusters/list continuation token")
+        seen.add(token)
+        params = {**params, "page_token": token}
+    raise Failure("Cluster removal unconfirmed: clusters/list exceeded its time or page limit")
+
+
 def cleanup(path, env, cluster=None):
     receipt = path.with_name("cluster-id")
     if receipt.exists():
@@ -127,7 +159,7 @@ def cleanup(path, env, cluster=None):
         return
     cid = state["cluster_id"]
     api = https.workspace_api(env["DATABRICKS_HOST"], env["DATABRICKS_TOKEN"])
-    try:
+    if not state.get("purge_requested"):
         def observe():
             info = owned(api, env, cid)
             if info.get("state") in {"PENDING", "RUNNING", "RESTARTING", "RESIZING", "ERROR", "INTERNAL_ERROR"}:
@@ -137,23 +169,39 @@ def cleanup(path, env, cluster=None):
                     api("POST", https.CLUSTERS + "/delete", cluster_id=cid)
             return info
 
-        https.wait("Cluster termination", observe, "state", "TERMINATED",
-                   {"PENDING", "RUNNING", "RESTARTING", "RESIZING", "TERMINATING", "ERROR", "INTERNAL_ERROR"}, 180)
-        if not state.get("purge_requested"):
-            state.update(termination_confirmed=True, purge_requested=True)
-            save_state(path, state)
-            api("POST", https.CLUSTERS + "/permanent-delete", cluster_id=cid)
-        # The request is not a receipt. While the object is visible it must stay terminated.
-        def removed():
-            try:
-                return {"removed": False} if owned(api, env, cid)["state"] == "TERMINATED" else {}
-            except https.MissingCluster:
-                return {"removed": True}
+        try:
+            https.wait("Cluster termination", observe, "state", "TERMINATED",
+                       {"PENDING", "RUNNING", "RESTARTING", "RESIZING", "TERMINATING", "ERROR", "INTERNAL_ERROR"}, 180)
+        except https.MissingCluster as exc:
+            raise Failure("Cluster missing before termination confirmation; withholding replacement") from exc
+        state.update(termination_confirmed=True, purge_requested=True)
+        save_state(path, state)
+        if api("POST", https.CLUSTERS + "/permanent-delete", cluster_id=cid) != {}:
+            raise Failure("Unexpected permanent-delete response; purge acceptance not confirmed")
+        state["purge_accepted"] = True
+        save_state(path, state)
+        print("Cluster termination confirmed; permanent deletion accepted", flush=True)
+    if state.get("termination_confirmed") is not True:
+        raise Failure("No confirmed termination before purge; withholding replacement")
 
-        https.wait("Cluster removal", removed, "removed", True, {False}, 90)
-    except https.MissingCluster:
-        if state.get("termination_confirmed") is not True:
-            raise Failure("Cluster missing before termination confirmation; withholding replacement") from None
+    deadline = time.monotonic() + 90
+
+    def removed():
+        try:
+            return {"removed": False} if owned(api, env, cid)["state"] == "TERMINATED" else {}
+        except https.MissingCluster:
+            return {"removed": True}
+        except https.InvalidClusterParameter:
+            if state.get("purge_accepted") is not True:
+                raise
+            absent = absent_from_inventory(lambda params: api("GET", https.CLUSTERS + "/list", **params),
+                                           cid, deadline)
+            if absent:
+                print("Cluster removal confirmed by clusters/list after GET returned HTTP 400 INVALID_PARAMETER_VALUE",
+                      flush=True)
+            return {"removed": absent}
+
+    https.wait("Cluster removal", removed, "removed", True, {False}, 90)
     state["cleanup_complete"] = True
     save_state(path, state)
 

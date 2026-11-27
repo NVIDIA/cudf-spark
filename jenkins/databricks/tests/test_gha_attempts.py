@@ -233,6 +233,98 @@ class GhaAttemptsTest(unittest.TestCase):
             self.run_row()
         self.assertEqual(self.api.writes(), ["create", "permanent-delete"])
 
+    def test_accepted_purge_requires_complete_inventory_on_invalid_get(self):
+        target = {"cluster_id": "fixture-1", "state": "TERMINATED"}
+        other = {"cluster_id": "other"}
+        listing = Mock(side_effect=[
+            {"clusters": [other], "next_page_token": "next"}, {"clusters": [target]},
+            {"clusters": [other], "next_page_token": "next"}, {},
+        ])
+
+        def workspace(method, path, **fields):
+            if path.endswith("/get") and not self.api.records:
+                raise attempts.https.InvalidClusterParameter("GET: HTTP 400 INVALID_PARAMETER_VALUE")
+            if path.endswith("/list"):
+                self.assertEqual(method, "GET")
+                return listing(fields)
+            return self.api.api(method, path, **fields)
+        self.client.return_value = workspace
+        self.run_row()
+        self.assertEqual([c.args[0].get("page_token") for c in listing.call_args_list],
+                         [None, "next", None, "next"])
+        state = json.loads((self.args.state_dir / "aws2-1/state.json").read_text())
+        self.assertTrue(state["purge_accepted"] and state["cleanup_complete"])
+        self.post()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+
+    def test_unconfirmed_inventory_can_be_retried_without_repeating_purge(self):
+        listing = Mock(side_effect=[RuntimeError("list denied"), {"clusters": []}])
+
+        def workspace(method, path, **fields):
+            if path.endswith("/get") and not self.api.records:
+                raise attempts.https.InvalidClusterParameter("GET: HTTP 400 INVALID_PARAMETER_VALUE")
+            if path.endswith("/list"):
+                return listing()
+            return self.api.api(method, path, **fields)
+        self.client.return_value = workspace
+        with self.assertRaisesRegex(attempts.Failure, "list denied"):
+            self.run_row()
+        self.post()
+        self.assertEqual(listing.call_count, 2)
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+
+    def test_invalid_get_after_lost_purge_response_cannot_use_list(self):
+        def ambiguous(method, path, **fields):
+            if path.endswith("/get") and not self.api.records:
+                raise attempts.https.InvalidClusterParameter("GET: HTTP 400 INVALID_PARAMETER_VALUE")
+            result = self.api.api(method, path, **fields)
+            if path.endswith("/permanent-delete"):
+                raise attempts.https.TransientRequest("purge response lost")
+            return result
+        self.client.return_value = ambiguous
+        with self.assertRaisesRegex(attempts.Failure, "purge response lost"):
+            self.run_row()
+        with self.assertRaisesRegex(attempts.https.InvalidClusterParameter, "INVALID_PARAMETER_VALUE"):
+            self.post()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+        self.assertFalse((self.args.state_dir / "cleanup-complete").exists())
+
+    def test_invalid_or_incomplete_list_never_proves_absence(self):
+        for page in ({"clusters": None}, {"clusters": [{}]}, {"message": "bad response"},
+                     {"clusters": [{"cluster_id": " "}]}, {"clusters": [], "has_more": True},
+                     {"clusters": [{"cluster_id": "fixture-1", "state": "RUNNING"}]},
+                     {"next_page_token": "repeated"}, {"next_page_token": None}):
+            with self.subTest(page=page), self.assertRaises(attempts.Failure):
+                attempts.absent_from_inventory(lambda _: page, "fixture-1", float("inf"))
+        listing = Mock(return_value={})
+        with patch.object(attempts.time, "monotonic", side_effect=[1, 3]), self.assertRaisesRegex(
+                attempts.Failure, "time or page limit"):
+            attempts.absent_from_inventory(listing, "fixture-1", 2)
+        listing.assert_called_once()
+
+    def test_invalid_get_before_purge_does_not_trigger_listing_or_deletion(self):
+        def workspace(method, path, **fields):
+            if path.endswith("/get"):
+                raise attempts.https.InvalidClusterParameter("GET: HTTP 400 INVALID_PARAMETER_VALUE")
+            return self.api.api(method, path, **fields)
+        self.client.return_value = workspace
+        with self.assertRaisesRegex(attempts.Failure, "cleanup: GET: HTTP 400 INVALID_PARAMETER_VALUE"):
+            self.run_row()
+        self.assertEqual(self.api.writes(), ["create"])
+
+    def test_malformed_purge_acknowledgement_does_not_authorize_inventory(self):
+        def workspace(method, path, **fields):
+            if path.endswith("/get") and not self.api.records:
+                raise attempts.https.InvalidClusterParameter("GET: HTTP 400 INVALID_PARAMETER_VALUE")
+            result = self.api.api(method, path, **fields)
+            return {"error_code": "INVALID_PARAMETER_VALUE"} if path.endswith("/permanent-delete") else result
+        self.client.return_value = workspace
+        with self.assertRaisesRegex(attempts.Failure, "purge acceptance not confirmed"):
+            self.run_row()
+        with self.assertRaises(attempts.https.InvalidClusterParameter):
+            self.post()
+        self.assertEqual(self.api.writes(), ["create", "delete", "permanent-delete"])
+
     def test_ordinary_test_failure_and_cancellation_do_not_reallocate(self):
         self.adapter.run_workload.side_effect = [0, 76]
         with self.assertRaisesRegex(attempts.Failure, "Test failed .*76"):
