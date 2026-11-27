@@ -16,7 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["401","402","411"],"carryForward":"none"}
-{"spark":["405","414"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.delta
 

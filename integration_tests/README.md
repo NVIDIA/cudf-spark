@@ -772,13 +772,13 @@ skipped unless both `--delta_lake` and `--unity_catalog` are passed and `DELTA_U
 reachable server.
 
 The suites only apply to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0 or 4.3.0,
-Unity Catalog 0.6.0, and Spark 4.0.1, 4.0.5, 4.1.1, or 4.1.4. The 4.2 implementation validates
-the expected 0.6.0 `UCSingleCatalog` staging shape and falls back if that shape is not recognized.
-The 4.3 suite verifies that the CPU Delta catalog retains REST staging and commit control,
-including catalog identity, managed location, credentials, and metadata-changing operations.
-Failed staged writes are checked for partial table or Delta commit publication. Catalog
-staging-record cleanup is out of scope: Delta 4.3.0's staged-table abort does not remove those
-records, and Unity Catalog 0.6.0 provides no staging-delete REST operation.
+Unity Catalog 0.6.0, and Spark 4.0.1 or 4.1.1. The 4.2 implementation validates the expected 0.6.0
+`UCSingleCatalog` staging shape and falls back if that shape is not recognized. The 4.3 suite
+verifies that the CPU Delta catalog retains REST staging and commit control, including catalog
+identity, managed location, credentials, and metadata-changing operations. Failed staged writes
+are checked for partial table or Delta commit publication. Catalog staging-record cleanup is out
+of scope: Delta 4.3.0's staged-table abort does not remove those records, and Unity Catalog 0.6.0
+provides no staging-delete REST operation.
 Reads and classic path tables can still use the GPU.
 
 In Delta 4.3.0, dynamic partition overwrite, UPDATE, and MERGE write generated row-tracking

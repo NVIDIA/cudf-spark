@@ -136,9 +136,9 @@ object DeltaRuntimeShim {
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
     (deltaVersion, sparkVersion) match {
-      case ("4.2.0", SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4")) =>
+      case ("4.2.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
         Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
-      case ("4.3.0", SparkVersion("4", "0", "1" | "5") | SparkVersion("4", "1", "1" | "4")) =>
+      case ("4.3.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
         Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
       case _ => None
     }
@@ -157,7 +157,28 @@ object DeltaRuntimeShim {
     }
   }
 
+  private[rapids] def getSpark4PreDelta42ShimClassName(
+      deltaVersion: String,
+      sparkVersion: String): Option[String] = {
+    (deltaVersion, sparkVersion) match {
+      case (version, SparkVersion("4", "0", _)) if version.startsWith("4.0.") =>
+        Some("org.apache.spark.sql.delta.rapids.delta40x.Delta40xRuntimeShim")
+      case ("4.1.0", SparkVersion("4", "1", "0" | "1")) =>
+        Some("org.apache.spark.sql.delta.rapids.delta41x.Delta41xRuntimeShim")
+      case _ => None
+    }
+  }
+
   private def getPreDelta42ShimClassName(deltaVersion: String): Option[String] = {
+    SPARK_VERSION match {
+      case SparkVersion(major, _, _) if BigInt(major) >= 4 =>
+        getSpark4PreDelta42ShimClassName(deltaVersion, SPARK_VERSION)
+      case _ =>
+        getPreSpark4ShimClassName(deltaVersion)
+    }
+  }
+
+  private def getPreSpark4ShimClassName(deltaVersion: String): Option[String] = {
     if (VersionUtils.cmpSparkVersion(3, 2, 0) < 0) {
       None
     } else if (VersionUtils.cmpSparkVersion(3, 3, 0) < 0) {
@@ -178,11 +199,6 @@ object DeltaRuntimeShim {
     } else if (VersionUtils.cmpSparkVersion(3, 5, 2) > 0 &&
                VersionUtils.cmpSparkVersion(4, 0, 0) < 0) {
       getDelta33ShimClassName(deltaVersion)
-    } else if (VersionUtils.cmpSparkVersion(4, 0, 0) >= 0 &&
-               VersionUtils.cmpSparkVersion(4, 1, 0) < 0) {
-      Some("org.apache.spark.sql.delta.rapids.delta40x.Delta40xRuntimeShim")
-    } else if (VersionUtils.cmpSparkVersion(4, 1, 0) >= 0) {
-      Some("org.apache.spark.sql.delta.rapids.delta41x.Delta41xRuntimeShim")
     } else {
       None
     }

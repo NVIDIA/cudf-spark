@@ -16,7 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["401","402","411"],"carryForward":"none"}
-{"spark":["405","414"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 
@@ -28,7 +27,7 @@ import com.nvidia.spark.rapids.{GpuOverrides, RapidsConf, SparkQueryCompareTestS
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
-import org.apache.spark.{SPARK_VERSION, SparkConf, SparkException}
+import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
@@ -65,7 +64,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.2 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.0.5", "4.1.1", "4.1.4").foreach { sparkVersion =>
+    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
       val shimClassName = DeltaRuntimeShim.getDelta42PlusShimClassName("4.2.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta42x")))
     }
@@ -74,10 +73,11 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("Delta 4.2 runtime shim selection rejects unsupported combinations") {
     val unsupported = Seq(
       ("4.2.0", "4.0.0"),
-      ("4.2.0", "4.0.4"),
+      ("4.2.0", "4.0.5"),
       ("4.2.0", "4.1.0"),
       ("4.2.0", "4.1.2"),
       ("4.2.0", "4.1.3"),
+      ("4.2.0", "4.1.4"),
       ("4.2.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
@@ -87,7 +87,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.0.5", "4.1.1", "4.1.4").foreach { sparkVersion =>
+    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
       val shimClassName = DeltaRuntimeShim.getDelta42PlusShimClassName("4.3.0", sparkVersion)
       assert(shimClassName.exists(_.contains("delta43x")))
     }
@@ -96,10 +96,11 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("Delta 4.3 runtime shim selection rejects unsupported combinations") {
     val unsupported = Seq(
       ("4.3.0", "4.0.0"),
-      ("4.3.0", "4.0.4"),
+      ("4.3.0", "4.0.5"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
       ("4.3.0", "4.1.3"),
+      ("4.3.0", "4.1.4"),
       ("4.3.1", "4.0.1"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
@@ -113,12 +114,45 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("existing Delta versions use the pre-4.2 runtime shim selection") {
-    val expectedShim = if (SPARK_VERSION.startsWith("4.0.")) "delta40x" else "delta41x"
-    Seq("2.1.0", "3.3.3", "4.0.0", "4.1.0").foreach { deltaVersion =>
-      assert(DeltaRuntimeShim.getDelta42PlusShimClassName(deltaVersion, "4.0.1").isEmpty)
-      assert(DeltaRuntimeShim.getShimClassName(deltaVersion).exists(_.contains(expectedShim)))
+  test("pre-4.2 runtime shim selection covers supported Spark lines") {
+    Seq(
+      ("4.0.0", "4.0.0", "delta40x"),
+      ("4.0.1", "4.0.5", "delta40x"),
+      ("4.1.0", "4.1.0", "delta41x"),
+      ("4.1.0", "4.1.1", "delta41x")
+    ).foreach { case (deltaVersion, sparkVersion, expectedShim) =>
+      val shimClassName =
+        DeltaRuntimeShim.getSpark4PreDelta42ShimClassName(deltaVersion, sparkVersion)
+      assert(shimClassName.exists(_.contains(expectedShim)))
     }
+  }
+
+  test("pre-4.2 runtime shim selection rejects unsupported Spark lines") {
+    Seq(
+      ("4.1.0", "4.0.1"),
+      ("4.0.1", "4.1.1"),
+      ("4.1.0", "4.1.2"),
+      ("4.1.0", "4.1.3"),
+      ("4.1.0", "4.1.4"),
+      ("4.1.0", "4.2.0"),
+      ("3.3.3", "4.0.1"),
+      ("2.4.0", "4.1.1")
+    ).foreach { case (deltaVersion, sparkVersion) =>
+      assert(DeltaRuntimeShim.getSpark4PreDelta42ShimClassName(
+        deltaVersion, sparkVersion).isEmpty)
+    }
+  }
+
+  test("getShimClassName dispatches pre-4.2 versions on the running Spark line") {
+    val (supportedDelta, expectedShim, unsupportedDelta) =
+      if (org.apache.spark.SPARK_VERSION.startsWith("4.0.")) {
+        ("4.0.1", "delta40x", "4.1.0")
+      } else {
+        assert(org.apache.spark.SPARK_VERSION.startsWith("4.1.1"))
+        ("4.1.0", "delta41x", "4.0.1")
+      }
+    assert(DeltaRuntimeShim.getShimClassName(supportedDelta).exists(_.contains(expectedShim)))
+    assert(DeltaRuntimeShim.getShimClassName(unsupportedDelta).isEmpty)
   }
 
   test("Delta 3.3 runtime shim selection requires Delta 3.3") {
