@@ -29,14 +29,15 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 
-/** Schema fixtures shared by the default-read unit suites. */
-private[iceberg] object IcebergDefaultTestUtils {
+/** Schema fixtures shared by the default-value unit suites. */
+object IcebergDefaultTestUtils {
   def fieldWithDefaults(
       id: Int,
       name: String,
       icebergType: org.apache.iceberg.types.Type,
       required: Boolean,
-      initialDefault: Option[AnyRef]): Option[Types.NestedField] = {
+      initialDefault: Option[AnyRef],
+      writeDefault: Option[AnyRef] = None): Option[Types.NestedField] = {
     try {
       val factory = classOf[Types.NestedField].getMethod(
         if (required) "required" else "optional", classOf[String])
@@ -49,9 +50,24 @@ private[iceberg] object IcebergDefaultTestUtils {
       initialDefault.foreach { value =>
         builderClass.getMethod("withInitialDefault", classOf[Object]).invoke(builder, value)
       }
+      writeDefault.foreach { value =>
+        builderClass.getMethod("withWriteDefault", classOf[Object]).invoke(builder, value)
+      }
       Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
     } catch {
       case _: NoSuchMethodException => None
+    }
+  }
+
+  def fieldWithWriteDefault(
+      id: Int,
+      name: String,
+      icebergType: org.apache.iceberg.types.Type,
+      writeDefault: AnyRef,
+      initialDefault: Option[AnyRef] = None): Types.NestedField = {
+    fieldWithDefaults(id, name, icebergType, required = false, initialDefault = initialDefault,
+      writeDefault = Some(writeDefault)).getOrElse {
+      org.scalatest.Assertions.cancel("Iceberg runtime does not expose v3 field defaults")
     }
   }
 

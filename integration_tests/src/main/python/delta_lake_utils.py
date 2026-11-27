@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import lru_cache
 import json
 import os.path
 import pytest
@@ -90,6 +91,10 @@ def set_delta_num_records(spark, target_path, num_records, log_version=0):
     jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
 
 
+_SUPPORTED_OSS_DELTA_43_VERSIONS = ("4.3.0", "4.3.1", "4.3.2.2")
+
+
+@lru_cache(maxsize=1)
 def _loaded_delta_lake_version():
     try:
         context_class_loader = (
@@ -138,31 +143,28 @@ def is_oss_delta_lake_41_or_42():
 
 
 def is_oss_delta_lake_42_or_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.2.0", "4.3.0"))
+    return is_oss_delta_lake_42() or is_supported_oss_delta_lake_43()
 
 
-def is_oss_delta_lake_43():
+def is_supported_oss_delta_lake_43():
     return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() == "4.3.0")
+            and _loaded_delta_lake_version() in _SUPPORTED_OSS_DELTA_43_VERSIONS)
 
 
 def is_oss_delta_lake_40_to_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.0.0", "4.0.1", "4.1.0", "4.2.0", "4.3.0"))
+    return is_oss_delta_lake_40() or is_oss_delta_lake_41_to_43()
 
 
 def is_oss_delta_lake_41_to_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))
+    return is_oss_delta_lake_41_or_42() or is_supported_oss_delta_lake_43()
 
 
 delta_reorg_xfail = pytest.mark.xfail(
     not is_databricks_runtime()
-    and _loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0", "4.3.0")
-    and not is_spark_local_mode(),
-    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and 4.3.0 calls SparkSession.active on "
-           "executors in distributed mode: "
+    and not is_spark_local_mode()
+    and (_loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0") or is_supported_oss_delta_lake_43()),
+    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and supported 4.3 releases calls "
+           "SparkSession.active on executors in distributed mode: "
            "https://github.com/delta-io/delta/issues/7776")
 
 

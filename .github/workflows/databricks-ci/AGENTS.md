@@ -23,4 +23,4 @@
   installs, repository credentials, JNI/private artifacts or SNAPSHOTs.
   A manual cache refresh replaces even a same-size damaged workspace seed.
 - Run `python3 -m unittest discover -s .github/workflows/databricks-ci` and
-  `python3 -m unittest discover -s jenkins/databricks/tests` from the repo root.
+  `python3 -m unittest discover -s jenkins/databricks/tests -p '*test*.py'` from the repo root.

@@ -17,7 +17,7 @@ case "${1:?missing CPU CI operation}" in
       exit 0
     fi
     python3 -B -m unittest discover -s .github/workflows/databricks-ci
-    python3 -B -m unittest discover -s jenkins/databricks/tests
+    python3 -B -m unittest discover -s jenkins/databricks/tests -p '*test*.py'
     ;;
   required)
     jobs=$(jq -cne --argjson images "$VALIDATE" --arg maven "$MAVEN" '

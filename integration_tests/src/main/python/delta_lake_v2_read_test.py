@@ -18,7 +18,7 @@ from pyspark.sql import DataFrame
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error,
                      assert_gpu_fallback_collect)
-from delta_lake_utils import is_oss_delta_lake_42_or_43, is_oss_delta_lake_43
+from delta_lake_utils import is_oss_delta_lake_42_or_43, is_supported_oss_delta_lake_43
 from marks import allow_non_gpu, delta_lake, ignore_order
 from spark_session import with_cpu_session
 
@@ -42,7 +42,7 @@ def _read_v2(spark, path, options=None):
     identifier = jvm.org.apache.spark.sql.connector.catalog.Identifier.of(
         spark.sparkContext._gateway.new_array(jvm.java.lang.String, 0), 'delta_v2')
     table_class = (jvm.io.delta.spark.internal.v2.catalog.DeltaV2Table
-                   if is_oss_delta_lake_43() else jvm.io.delta.spark.internal.v2.catalog.SparkTable)
+                   if is_supported_oss_delta_lake_43() else jvm.io.delta.spark.internal.v2.catalog.SparkTable)
     table = table_class(identifier, path, options or {})
     none = jvm.scala.Option.empty()
     relation = jvm.org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation.create(
@@ -179,7 +179,7 @@ def test_delta_v2_runtime_filter_preserves_partitions(spark_tmp_path, partition_
         assert len(original) == len(gpu)
         identity = jvm.java.lang.System.identityHashCode
         for cpu_part, gpu_part in zip(original, gpu):
-            if is_oss_delta_lake_43():
+            if is_supported_oss_delta_lake_43():
                 cpu_files, gpu_files = cpu_part.files(), gpu_part.files()
                 assert all(c.equals(g) for c, g in zip(cpu_files, gpu_files))
             else:
@@ -200,7 +200,7 @@ def test_delta_v2_runtime_filter_preserves_partitions(spark_tmp_path, partition_
         gpu_scan.filter(predicates)
         remaining = gpu_scan.toBatch().planInputPartitions()
         assert bool(len(remaining)) == (partition_value == 2)
-        if is_oss_delta_lake_43():
+        if is_supported_oss_delta_lake_43():
             # 4.3 repacks files after filtering; the number of task partitions can stay the same.
             assert sum(len(p.files()) for p in remaining) < sum(len(p.files()) for p in original)
             assert all(f.partitionValues().getInt(0) == partition_value for p in remaining for f in p.files())
@@ -264,7 +264,7 @@ def test_delta_v2_unsupported_reader_feature_fallback(spark_tmp_path):
 
 
 @allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec')
-@pytest.mark.skipif(not is_oss_delta_lake_43(), reason='V2 row metadata is exposed in Delta 4.3')
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(), reason='V2 row metadata is exposed in Delta 4.3')
 def test_delta_v2_row_tracking_metadata_fallback(spark_tmp_path):
     def setup(spark):
         _write_table(spark, spark_tmp_path)

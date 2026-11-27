@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.catalyst.expressions.DynamicPruningExpression
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
-import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.rapids.{ExternalSource, GpuFileSourceScanExec}
 
 class FileSourceScanExecMeta(plan: FileSourceScanExec,
     conf: RapidsConf,
@@ -63,7 +63,10 @@ class FileSourceScanExecMeta(plan: FileSourceScanExec,
   // partition filters and data filters are not run on the GPU
   override val childExprs: Seq[ExprMeta[_]] = Seq.empty
 
-  override def tagPlanForGpu(): Unit = ScanExecShims.tagGpuFileSourceScanExecSupport(this)
+  override def tagPlanForGpu(): Unit = {
+    ScanExecShims.tagGpuFileSourceScanExecSupport(this)
+    ExternalSource.tagUnclaimedParquetSubclass(this)
+  }
 
   override def convertToCpu(): SparkPlan = {
     val cpu = wrapped.copy(partitionFilters = partitionFilters)

@@ -600,7 +600,7 @@ def test_delta_optimize_partitioned_table(spark_tmp_path, enable_deletion_vector
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
 @pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
 def test_delta_optimize_normalized_timestamp_partitions(
@@ -824,7 +824,7 @@ def test_delta_optimize_zorder_with_deletion_vectors(spark_tmp_path, partition_c
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
 @pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
 def test_delta_optimize_zorder_normalized_timestamp_partitions(

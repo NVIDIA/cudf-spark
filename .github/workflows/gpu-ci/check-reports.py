@@ -61,11 +61,17 @@ def main():
         sys.exit(stage(build / "surefire-reports", destination / "selected", expected=set(suites)))
     # The entry point preserves the full suite before rerunning just FileCacheIntegrationSuite.
     filecache = group != "ut2"
-    checks = [("surefire-reports", filecache)]
+    delta = (scala, shim, group) == ("2.13", "401", "scala213")
+    checks = [("filecache-reports" if delta else "surefire-reports", filecache)]
     if filecache:
         checks.append(("unit-reports", False))
     results = [stage(build / name, destination / name, needs_filecache)
                for name, needs_filecache in checks]
+    if delta:
+        for spark in ("401", "411"):
+            results.append(stage(module / "target" / f"spark{spark}" / "surefire-reports",
+                                 destination / f"delta-{spark}",
+                                 expected={"org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite"}))
     if any(results):
         sys.exit(f"Missing or failed GPU unit-test evidence for Spark {shim} ({group})")
 

@@ -39,7 +39,7 @@ delta_delete_enabled_conf = copy_and_update(delta_writes_enabled_conf,
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DELETE record-count validation was added in OSS Delta 4.3")
 def test_delta_delete_num_records_validation_without_dv(spark_tmp_path):
     def do_delete(spark):
@@ -63,7 +63,7 @@ def test_delta_delete_num_records_validation_without_dv(spark_tmp_path):
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="DELETE record-count validation was added in OSS Delta 4.3")
 def test_delta_delete_num_records_validation(spark_tmp_path):
     conf = copy_and_update(delta_delete_enabled_conf, {
@@ -731,7 +731,7 @@ def two_part_int_data(spark):
 @allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric history regression coverage")
 @pytest.mark.parametrize("predicate, metrics_from_metadata, expected_metrics, expected_num_rows", [
     # No commit is made when nothing matches, so there is no history entry; the row count is 0.
@@ -759,7 +759,7 @@ def test_delta_delete_43_reports_zero_row_count_metrics(
 @allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric history regression coverage")
 @pytest.mark.parametrize("predicate, expected_deleted, expected_copied", [
     ("id = 3", 1, 9),
@@ -788,7 +788,7 @@ def test_delta_delete_43_rewrite_row_count_metrics(
 
 
 @delta_lake
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric runtime shim coverage")
 @pytest.mark.parametrize("always_report, expected", [
     (False, None),
@@ -820,7 +820,7 @@ def test_delta_delete_43_zero_metric_runtime_shim(always_report, expected):
 @allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric history regression coverage")
 @pytest.mark.parametrize("partition_columns", [None, ["part"]], ids=["unpartitioned", "partitioned"])
 @pytest.mark.parametrize("predicate, expected_deleted", [
@@ -1236,7 +1236,7 @@ def stable_event_fields(event):
 @allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric stats event coverage")
 @pytest.mark.parametrize("always_report", [False, True], ids=["flag_off", "flag_on"])
 @pytest.mark.parametrize("predicate, partition_columns, deletion_vectors, metrics_from_metadata,"

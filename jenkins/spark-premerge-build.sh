@@ -54,6 +54,21 @@ run_unit_shim() {
         -Dpytest.TEST_TAGS='' -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
 }
 
+run_delta43_shim_tests() {
+    local shim=$1 delta=$2
+    if [[ "$shim" == 411 ]]; then
+        # Build against Delta 4.3.0 before testing the plugin with Delta 4.3.1.
+        env -u SPARK_HOME \
+            $MVN -f scala2.13/ -B $MVN_URM_MIRROR -pl tests -am -Dbuildver="$shim" -Pdelta43-tests \
+            -DskipTests install $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
+    fi
+    env -u SPARK_HOME \
+        $MVN -f scala2.13/ -B $MVN_URM_MIRROR -pl tests -Dbuildver="$shim" -Pdelta43-tests \
+        -Ddelta.test.version="$delta" test $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
+        -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false \
+        -DwildcardSuites=org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite
+}
+
 ci_unit() {
     local shim=${SPARK_SHIM:?Set SPARK_SHIM to one premerge unit-test shim}
     local project supported
@@ -71,6 +86,12 @@ ci_unit() {
         return 1
     fi
     run_unit_shim "${UNIT_TEST_MODE:?Set UNIT_TEST_MODE to package or filecache}" "$shim" "$project"
+    if [[ "$project" == scala2.13 && "$shim" == 401 && "$UNIT_TEST_MODE" == filecache ]]; then
+        # This lane owns both Delta checks. The 401 Delta and FileCache runs share a report directory.
+        mv "$project/tests/target/spark401/surefire-reports" "$project/tests/target/spark401/filecache-reports"
+        run_delta43_shim_tests 401 4.3.0
+        run_delta43_shim_tests 411 4.3.1
+    fi
 }
 
 mvn_verify() {
@@ -273,7 +294,12 @@ ci_scala213() {
     do
         echo "Spark version (Scala 2.13): $version"
         run_unit_shim filecache "$version" scala2.13
+        if [[ "$version" == "401" ]]; then
+            run_delta43_shim_tests 401 4.3.0
+        fi
     done
+
+    run_delta43_shim_tests 411 4.3.1
 
     # Download a Scala 2.13 version of Spark (use Spark 4.0.1 for Spark 4 shuffle testing)
     # don't leak the new version here, it's only for use within this function
