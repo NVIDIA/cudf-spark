@@ -32,7 +32,6 @@ import org.apache.hadoop.hive.common.io.DiskRangeList
 import org.apache.orc.{DataReader, OrcProto, StripeInformation}
 import org.apache.orc.impl.DataReaderProperties
 
-import org.apache.spark.sql.rapids.GpuTaskMetrics
 
 abstract class GpuOrcDataReaderBase(
     props: DataReaderProperties,
@@ -290,17 +289,7 @@ abstract class GpuOrcDataReaderBase(
   private def readRangesToHostMemory(
       output: HostMemoryBuffer,
       ranges: Seq[CopyRange]): Unit = {
-    if (ranges.nonEmpty) {
-      recordPerfIOBackend()
-      inputFile.readVectored(output, ranges.asJava)
-    }
-  }
-
-  private def recordPerfIOBackend(): Unit = {
-    val scheme = props.getPath.toUri.getScheme
-    if (scheme != null && scheme.startsWith("s3")) {
-      GpuTaskMetrics.get.recordPerfioS3BackendOnce()
-    }
+    if (ranges.nonEmpty) inputFile.readVectored(output, ranges.asJava)
   }
 
   override def close(): Unit = {}

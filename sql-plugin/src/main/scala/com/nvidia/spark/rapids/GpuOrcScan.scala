@@ -39,7 +39,6 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SchemaUtils._
 import com.nvidia.spark.rapids.filecache.FileCache
-import com.nvidia.spark.rapids.fileio.FileIOConfig
 import com.nvidia.spark.rapids.io.async._
 import com.nvidia.spark.rapids.jni.{CastStrings, GpuTimeZoneDB, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
@@ -72,7 +71,6 @@ import org.apache.spark.sql.execution.datasources.rapids.OrcFiltersWrapper
 import org.apache.spark.sql.execution.datasources.v2.{EmptyPartitionReader, FileScan}
 import org.apache.spark.sql.execution.datasources.v2.orc.OrcScan
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.{ArrayType, CharType, DataType, DecimalType, MapType, StringType, StructType}
@@ -874,7 +872,6 @@ case class OrcOutputStripe(
  */
 case class OrcPartitionReaderContext(
     filePath: Path,
-    inputFile: RapidsInputFile,
     conf: Configuration,
     fileSchema: TypeDescription,
     updatedReadSchema: TypeDescription,
@@ -886,7 +883,8 @@ case class OrcPartitionReaderContext(
     blockIterator: BufferedIterator[OrcOutputStripe],
     requestedMapping: Option[Array[Int]],
     writerTimezone: String,
-    writerUsedProlepticGregorian: Boolean)
+    writerUsedProlepticGregorian: Boolean,
+    inputFile: RapidsInputFile)
 
 case class OrcBlockMetaForSplitCheck(
     filePath: Path,
@@ -1502,7 +1500,7 @@ private case class GpuOrcFileFilterHandler(
 
   private[rapids] val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   private val orcFilterPushDown = sqlConf.orcFilterPushDown
-  private val fileIOConfig = FileIOConfig.from(sqlConf)
+  private val fileIOConfig = RapidsConf.fileIOConfig(sqlConf)
   @transient private lazy val fileIO = fileIOConfig.load(broadcastedConf.value.value)
 
   def filterStripes(
@@ -1625,10 +1623,10 @@ private case class GpuOrcFileFilterHandler(
         sargApp, sargColumns, OrcConf.IGNORE_NON_UTF8_BLOOM_FILTERS.getBoolean(conf),
         orcReader.getWriterVersion, updatedReadSchema,
         resolveMemFileIncluded(fileIncluded, requestedMapping))
-      OrcPartitionReaderContext(filePath, inputFile, conf, orcReader.getSchema, updatedReadSchema,
-        evolution, orcReader.getFileTail, orcReader.getCompressionSize,
-        orcReader.getCompressionKind, readerOpts, stripes.iterator.buffered, requestedMapping,
-        writerTz, writerUsedProlepticGregorian)
+      OrcPartitionReaderContext(filePath, conf, orcReader.getSchema, updatedReadSchema, evolution,
+        orcReader.getFileTail, orcReader.getCompressionSize, orcReader.getCompressionKind,
+        readerOpts, stripes.iterator.buffered, requestedMapping, writerTz,
+        writerUsedProlepticGregorian, inputFile)
     }
 
     /**
@@ -2156,10 +2154,6 @@ private object GpuOrcFileFilterHandler {
       inputFile: RapidsInputFile,
       filePath: Path,
       length: Int): Array[Byte] = {
-    val scheme = filePath.toUri.getScheme
-    if (scheme != null && scheme.startsWith("s3")) {
-      GpuTaskMetrics.get.recordPerfioS3BackendOnce()
-    }
     try {
       withResource(HostMemoryBuffer.allocate(length, false)) { hmb =>
         inputFile.readTail(length, hmb)

@@ -20,12 +20,14 @@ import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, PerfIO, RapidsConf}
-import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, PerfIOConf, RapidsConf}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
+
+import org.apache.spark.SparkEnv
 
 /**
  * Shared helpers for reading and caching Parquet footer bytes.
@@ -79,7 +81,43 @@ object ParquetFooterUtils {
       inputFile: RapidsInputFile,
       filePath: Path): HostMemoryBuffer = {
     NvtxRegistry.PARQUET_READ_FOOTER_BYTES {
-      PerfIO.readParquetFooterBuffer(inputFile, filePath, verifyParquetMagic)
+      val fileLength = inputFile.getLength
+      val trailerSize = FooterLengthSize + MAGIC.length
+      if (fileLength < MAGIC.length + trailerSize) {
+        throw new RuntimeException(
+          s"$filePath is not a Parquet file (too small length: $fileLength)")
+      }
+      val setting = PerfIOConf.S3PERF_SUFFIX_PREFETCH_SIZE
+      val prefetch = Option(SparkEnv.get).flatMap(_.conf.getOption(setting.key))
+        .map(setting.converter).getOrElse(setting.defaultValue)
+      val tailSize = fileLength.min(prefetch.max(trailerSize))
+      withResource(HostMemoryBuffer.allocate(tailSize)) { tail =>
+        inputFile.readTail(tailSize, tail)
+        val magic = readBytesFromBuffer(tail, tailSize - MAGIC.length, MAGIC.length)
+        verifyParquetMagic(filePath, magic)
+        val footerLength = tail.getInt(tailSize - trailerSize)
+        val start = footerIndex(filePath, fileLength, footerLength, FooterLengthSize)
+        val suffixSize = fileLength - start
+        val framedSize = MAGIC.length + suffixSize
+        val framed = if (framedSize <= tailSize) {
+          tail.slice(tailSize - framedSize, framedSize)
+        } else {
+          closeOnExcept(HostMemoryBuffer.allocate(framedSize)) { buf =>
+            val reused = tailSize.min(suffixSize)
+            buf.copyFromHostBuffer(framedSize - reused, tail, tailSize - reused, reused)
+            val missing = suffixSize - reused
+            if (missing > 0) {
+              val range = new RapidsInputFile.CopyRange(start, missing, MAGIC.length)
+              inputFile.readVectored(buf, java.util.Collections.singletonList(range))
+            }
+            buf
+          }
+        }
+        closeOnExcept(framed) { buf =>
+          buf.setBytes(0, MAGIC, 0, MAGIC.length)
+          buf
+        }
+      }
     }
   }
 

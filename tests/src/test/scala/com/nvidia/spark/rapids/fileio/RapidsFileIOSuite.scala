@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.fileio
 
 import java.io.File
 import java.net.URI
+import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 import java.util.{Map => JMap}
@@ -25,11 +26,14 @@ import java.util.{Map => JMap}
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile, RapidsOutputFile}
+import com.nvidia.spark.rapids.parquet.ParquetFooterUtils
+import org.apache.commons.lang3.SerializationUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FSDataInputStream, FileSystem, Path, RawLocalFileSystem}
+import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.internal.SQLConf
@@ -72,7 +76,7 @@ class RapidsFileIOSuite extends SparkQueryCompareTestSuite {
     conf.setConfString(prefix + "Mixed.Key", "  01 TRUE  ")
     conf.setConfString(prefix + "empty", "")
     conf.setConfString("spark.sql.other.key", "unrelated")
-    val config = FileIOConfig.from(conf)
+    val config = RapidsConf.fileIOConfig(conf)
     conf.setConfString(prefix + "Mixed.Key", "changed")
 
     val options = config.load(new Configuration()).asInstanceOf[RecordingFileIO].options
@@ -97,7 +101,7 @@ class RapidsFileIOSuite extends SparkQueryCompareTestSuite {
       FileSystem.setDefaultUri(hadoop, "s3://default-bucket")
       hadoop.setClass("fs.hdfs.impl", classOf[LocalTestHdfs], classOf[FileSystem])
       hadoop.setBoolean("fs.hdfs.impl.disable.cache", true)
-      val io = FileIOConfig.from(conf).load(hadoop).asInstanceOf[ResolvingRapidsFileIO]
+      val io = RapidsConf.fileIOConfig(conf).load(hadoop).asInstanceOf[ResolvingRapidsFileIO]
       val s3 = io.delegateFor(new Path("s3://bucket/a")).asInstanceOf[RecordingFileIO]
       assert(s3.options.asScala.toMap == Map("key1" -> " S3 ", "recordDir" -> root.getPath,
         "target" -> new File(root, "object").toURI.toString))
@@ -120,19 +124,85 @@ class RapidsFileIOSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("the registered default and explicit HadoopFileIO use the job configuration") {
+    val conf = new SQLConf()
+    val name = classOf[HadoopFileIO].getName
+    assert(RapidsConf.FILE_IO_IMPL.get(conf) == name)
+    withTempPath { root =>
+      Files.createDirectories(root.toPath)
+      val hadoop = new Configuration(false)
+      hadoop.set("fs.hdfs.impl", classOf[LocalTestHdfs].getName)
+      hadoop.setBoolean("fs.hdfs.impl.disable.cache", true)
+      for (explicit <- Seq(false, true)) {
+        if (explicit) {
+          conf.setConfString(prefix + "impl", name)
+        }
+        val io = RapidsConf.fileIOConfig(conf).load(hadoop)
+        assert(io.isInstanceOf[HadoopFileIO])
+        val file = new Path("hdfs", "test-nn", new File(root, explicit.toString).getPath)
+        withResource(io.newOutputFile(file).create())(_.write(7))
+        withResource(io.newInputFile(file).open())(in => assert(in.read() == 7))
+      }
+    }
+  }
+
+  test("the public resolver constructor snapshots options and restores delegates after shipping") {
+    val options = new java.util.HashMap[String, String]()
+    options.put("s3.impl", recording)
+    options.put("s3.option", "  original  ")
+    val resolver = new ResolvingRapidsFileIO(options)
+    val path = new Path("s3://bucket/object")
+    val first = resolver.delegateFor(path)
+    options.put("s3.option", "changed")
+    val shipped = SerializationUtils.clone(resolver)
+    val restored = shipped.delegateFor(path).asInstanceOf[RecordingFileIO]
+    assert(restored ne first)
+    assert(shipped.delegateFor(new Path("s3://other/key")) eq restored)
+    assert(restored.options.asScala.toMap == Map("option" -> "  original  "))
+    assert(shipped.delegateFor(new Path("file:///fallback")).isInstanceOf[HadoopFileIO])
+  }
+
+  test("Parquet frames small and large footers and rejects corrupt trailer lengths") {
+    withTempPath { file =>
+      val path = new Path(file.toURI)
+      val io = new HadoopFileIO(new Configuration())
+      val padding = Array.fill[Byte](32)(42)
+      for (size <- Seq(25, 64 * 1024)) {
+        val footer = Array.tabulate[Byte](size)(_.toByte)
+        val length = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(size).array()
+        Files.write(file.toPath, MAGIC ++ padding ++ footer ++ length ++ MAGIC)
+        val expected = MAGIC ++ footer ++ length ++ MAGIC
+        withResource(ParquetFooterUtils.readFooterBufferFromInputFile(
+            io.newInputFile(path), path)) { framed =>
+          assert(framed.getLength == expected.length)
+          val actual = ParquetFooterUtils.readBytesFromBuffer(framed, 0, expected.length)
+          assert(actual.sameElements(expected))
+        }
+      }
+      for (invalid <- Seq(-1, 0, Int.MaxValue)) {
+        val length = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(invalid).array()
+        Files.write(file.toPath, MAGIC ++ padding ++ length ++ MAGIC)
+        val error = intercept[RuntimeException] {
+          withResource(ParquetFooterUtils.readFooterBufferFromInputFile(
+            io.newInputFile(path), path))(_ => ())
+        }
+        assert(error.getMessage.contains("the footer index is not within the file"))
+      }
+    }
+  }
+
   test("invalid explicit implementations identify the setting that selected them") {
     val conf = new SQLConf()
-    assert(FileIOConfig.from(conf).load(new Configuration()).isInstanceOf[HadoopFileIO])
     for (name <- Seq("missing.TestFileIO", classOf[String].getName,
         classOf[FileIOWithoutMapConstructor].getName)) {
       conf.setConfString(prefix + "impl", name)
-      val error = intercept[IllegalArgumentException] { FileIOConfig.from(conf) }
+      val error = intercept[IllegalArgumentException] { RapidsConf.fileIOConfig(conf) }
       assert(error.getMessage.contains(prefix + "impl=" + name))
       assert(error.getCause != null)
     }
     conf.setConfString(prefix + "impl", classOf[ResolvingRapidsFileIO].getName)
     conf.setConfString(prefix + "s3.impl", "missing.TestFileIO")
-    val io = FileIOConfig.from(conf).load(new Configuration())
+    val io = RapidsConf.fileIOConfig(conf).load(new Configuration())
     val error = intercept[IllegalArgumentException] { io.newOutputFile("s3://bucket/file") }
     assert(error.getMessage.contains(prefix + "s3.impl=missing.TestFileIO"))
   }

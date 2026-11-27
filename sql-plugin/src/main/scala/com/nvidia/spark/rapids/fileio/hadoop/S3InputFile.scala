@@ -38,9 +38,9 @@ import org.apache.spark.sql.rapids.GpuTaskMetrics
  */
 class S3InputFile private (
     delegate: HadoopInputFile,
-    uri: URI,
-    conf: Configuration)
-  extends PerfIOInputFile(uri, conf) {
+    fileUri: URI,
+    hadoopConf: Configuration)
+  extends RapidsInputFile {
 
   private val taskMetrics = GpuTaskMetrics.get
 

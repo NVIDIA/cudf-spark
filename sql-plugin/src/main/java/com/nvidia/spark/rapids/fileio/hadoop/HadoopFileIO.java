@@ -21,8 +21,8 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsOutputFile;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.spark.sql.rapids.GpuTaskMetrics;
 import org.apache.spark.util.SerializableConfiguration;
 
 import java.io.IOException;
@@ -48,8 +48,11 @@ public class HadoopFileIO implements RapidsFileIO {
     @Override
     public RapidsInputFile newInputFile(Path path) throws IOException {
         String scheme = path.toUri().getScheme();
-        if (scheme != null && scheme.startsWith("s3") && RapidsInputFiles.isS3PerfEnabled()) {
-            return S3InputFile.create(path, hadoopConf.value());
+        if (scheme != null && scheme.startsWith("s3")) {
+            GpuTaskMetrics.get().recordPerfioS3BackendOnce();
+            if (RapidsInputFiles.isS3PerfEnabled()) {
+                return S3InputFile.create(path, hadoopConf.value());
+            }
         }
         if (scheme != null && (scheme.equals("gs") || scheme.equals("gcs")) &&
                 RapidsInputFiles.isGCSPerfEnabled()) {
