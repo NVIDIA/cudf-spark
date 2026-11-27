@@ -43,6 +43,7 @@ class IcebergS3InputFileSuite extends AnyFunSuite with Matchers {
   private def newInputFile(readBytes: Counter): IcebergS3InputFile = {
     val constructor = classOf[IcebergS3InputFile].getDeclaredConstructor(
       classOf[InputFile],
+      java.lang.Long.TYPE,
       classOf[String],
       classOf[String],
       classOf[IcebergS3Client],
@@ -50,6 +51,7 @@ class IcebergS3InputFileSuite extends AnyFunSuite with Matchers {
     constructor.setAccessible(true)
     constructor.newInstance(
       mock(classOf[InputFile]),
+      Long.box(-1L),
       "bucket",
       "key",
       mock(classOf[IcebergS3Client]),
