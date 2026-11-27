@@ -25,14 +25,14 @@ import java.util.{Map => JMap}
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile, RapidsOutputFile}
 import com.nvidia.spark.rapids.parquet.ParquetFooterUtils
 import org.apache.commons.lang3.SerializationUtils
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FSDataInputStream, FileSystem, Path, RawLocalFileSystem}
+import org.apache.hadoop.fs.{FileSystem, FSDataInputStream, Path, RawLocalFileSystem}
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
 
 import org.apache.spark.SparkConf

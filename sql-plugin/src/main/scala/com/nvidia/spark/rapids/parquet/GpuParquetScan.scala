@@ -82,8 +82,8 @@ import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedF
 import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.isTimestampNTZ
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.isTimestampNTZ
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
