@@ -18,13 +18,14 @@ package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
 
-import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
 trait GpuBatchScanExecMetrics extends GpuExec {
   import GpuMetric._
 
-  def scan: Scan
+  def scan: GpuScan
+
+  override def coalesceAfter: Boolean = scan.coalesceAfter
 
   override def supportsColumnar = true
 

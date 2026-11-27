@@ -14,9 +14,9 @@ Change Data Feed (CDF), and targets with persistent deletion vectors (DVs).
 
 ## Supported environment
 
-Use open-source Delta Lake 4.3.0 with Scala 2.13 and Apache Spark 4.0.1 or 4.1.1
-for path-based and Spark session-catalog tables. This support does not extend to
-similarly named Databricks APIs.
+Use open-source Delta Lake 4.3.0, 4.3.1, or 4.3.2.2 with Scala 2.13 and Apache Spark 4.0.1,
+4.0.5, 4.1.1, or 4.1.4 for path-based and Spark session-catalog tables. This support does not
+extend to similarly named Databricks APIs.
 
 Enable the plugin and configure Delta Lake:
 

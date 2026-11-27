@@ -127,7 +127,6 @@ restored data to console.
    - Spark 3.4.3 (`343`)
    - Spark 3.4.4 (`344`)
    - Spark 3.5.0 (`350`)
-   - Spark 3.5.0 Databricks 14.3 (`350db143`)
    - Spark 3.5.1 (`351`)
    - Spark 3.5.2 (`352`)
    - Spark 3.5.3 (`353`)

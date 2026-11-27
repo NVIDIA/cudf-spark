@@ -33,7 +33,7 @@ class PromotePlatformsTest(unittest.TestCase):
         for arch, digit in (("amd64", "a"), ("arm64", "b")):
             digest = "sha256:" + digit * 64
             record = dict(image=IMAGE, tag=TAG, platform="linux/" + arch,
-                          source=self.env["GITHUB_SHA"], digest=digest)
+                          source=self.env["GITHUB_SHA"], run=self.env["GITHUB_RUN_ID"], digest=digest)
             (self.root / (arch + ".json")).write_text(json.dumps(record))
             self.sources.append(IMAGE + "@" + digest)
         self.descriptors = [
@@ -154,3 +154,45 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("two different native image digests", result.stderr)
         self.assertEqual(calls, [])
+
+    def test_retry_combines_only_verified_receipts_from_the_same_run(self):
+        self.env.update(GITHUB_RUN_ATTEMPT="2", PLATFORM_RECORDS=str(self.root / "baselines"))
+        # publish-tag's separate tests cover the registry and ownership decision.
+        guard = self.root / ".github/workflows/ci-images/tag-baseline.py"
+        guard.write_text("import json, sys\nfrom pathlib import Path\n"
+                         "Path('guard-args').write_text(json.dumps(sys.argv[1:]))\n")
+        arches = ("amd64", "arm64")
+        originals = {arch: (self.root / f"{arch}.json").read_text() for arch in arches}
+        for rebuilt in ((), ("amd64",), ("arm64",), arches):
+            with self.subTest(rebuilt=rebuilt):
+                expected = []
+                for arch in arches:
+                    record = json.loads(originals[arch])
+                    if arch in rebuilt:
+                        record["digest"] = "sha256:" + ("7" if arch == "amd64" else "8") * 64
+                    (self.root / f"{arch}.json").write_text(json.dumps(record))
+                    expected.append(IMAGE + "@" + record["digest"])
+                (self.root / "calls").write_text("")
+                (self.root / "guard-args").unlink(missing_ok=True)
+                result, calls = self.promote()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls[0][-2:], expected)
+                self.assertEqual(calls[1][-3:], [f"{IMAGE}:build-{TAG}-15-2", *expected])
+                self.assertEqual(json.loads((self.root / "guard-args").read_text()),
+                                 ["check", IMAGE, TAG, INDEX_DIGEST, self.env["PLATFORM_RECORDS"]])
+                self.assertEqual(calls[-1][-3:], ["--tag", IMAGE + ":" + TAG, IMAGE + "@" + INDEX_DIGEST])
+
+    def test_missing_or_foreign_native_receipt_prevents_any_registry_write(self):
+        self.env.update(GITHUB_RUN_ATTEMPT="2", PLATFORM_RECORDS=str(self.root / "baselines"))
+        path = self.root / "arm64.json"
+        record = json.loads(path.read_text())
+        for changes in (None, {"run": "16"}, {"run": 15}, {"source": "9" * 40}):
+            with self.subTest(changes=changes):
+                if changes is None:
+                    path.unlink()
+                else:
+                    path.write_text(json.dumps({**record, **changes}))
+                result, calls = self.promote()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("arm64", result.stderr)
+                self.assertEqual(calls, [])

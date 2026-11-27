@@ -17,10 +17,14 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
+
+import java.util.Optional
+
+import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf
 import ai.rapids.cudf.{BinaryOp, ColumnView, CudfColumnSizeOverflowException, CudfException, DType}
@@ -42,8 +46,10 @@ import org.apache.spark.sql.types._
  * supported.
  *
  * The schema uses the JNI flattened representation: nested message fields follow their parent
- * entry and point to it through parentIndices. The planner decodes and returns every field, so
- * every entry has isOutput == true.
+ * entry and point to it through parentIndices. Fields with isOutput == false are validated by
+ * the decoder but returned as nulls: either the query does not read them, or Spark cannot
+ * represent them at all. The planner appends the latter after the Spark fields of their level,
+ * so this expression drops those trailing columns to match the Spark schema.
  *
  * @param decodedSchema Spark output schema
  * @param schema Flattened JNI schema; callers must not mutate its arrays after construction.
@@ -82,7 +88,79 @@ case class GpuFromProtobuf(
       case e: CudfException if failOnErrors =>
         throw QueryExecutionErrors.malformedProtobufMessageDetectedInMessageParsingError(e)
     }
-    if (malformedRowsAsNullFields) restoreInputValidity(decoded, input.getBase) else decoded
+    val visible = dropHiddenColumns(decoded)
+    if (malformedRowsAsNullFields) restoreInputValidity(visible, input.getBase) else visible
+  }
+
+  // The decoder returns one column per schema entry, including the fields a query does not
+  // read. Entries beyond the Spark schema are the fields Spark cannot represent, so only
+  // those require trimming.
+  @transient private lazy val hasOmittedFields =
+    schema.fieldNumbers.length > countEntries(decodedSchema)
+
+  private def countEntries(dataType: DataType): Int = dataType match {
+    case st: StructType => st.fields.map(f => 1 + countEntries(f.dataType)).sum
+    case ArrayType(elementType, _) => countEntries(elementType)
+    case _ => 0
+  }
+
+  /**
+   * The decoder returns an all-null column for every hidden field, and the planner appends those
+   * fields after the Spark fields at each level, so the trailing columns have to be dropped here.
+   * Takes ownership of the decoded column.
+   */
+  private def dropHiddenColumns(decoded: cudf.ColumnVector): cudf.ColumnVector = {
+    if (!hasOmittedFields) {
+      decoded
+    } else {
+      withResource(decoded) { _ =>
+        withResource(new ArrayBuffer[ColumnView]) { toClose =>
+          val trimmed = trimHiddenColumns(decoded, decodedSchema, toClose)
+          if (trimmed == decoded) {
+            decoded.incRefCount()
+          } else {
+            toClose += trimmed
+            trimmed.copyToColumnVector()
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Returns a view of the column without its trailing hidden children, or the column itself when
+   * the type has none. Views are zero-copy, so the caller owns the ones added to toClose.
+   */
+  private def trimHiddenColumns(
+      col: ColumnView,
+      dataType: DataType,
+      toClose: ArrayBuffer[ColumnView]): ColumnView = {
+    def addToClose(view: ColumnView): ColumnView = {
+      toClose += view
+      view
+    }
+    dataType match {
+      case st: StructType =>
+        val children = (0 until st.length).map(i => addToClose(col.getChildColumnView(i)))
+        val trimmed = children.zipWithIndex.map { case (child, i) =>
+          val newChild = trimHiddenColumns(child, st(i).dataType, toClose)
+          if (newChild eq child) newChild else addToClose(newChild)
+        }
+        val changed = col.getNumChildren != st.length ||
+          trimmed.zip(children).exists { case (newChild, child) => newChild ne child }
+        if (changed) {
+          new ColumnView(col.getType, col.getRowCount,
+            Optional.of(col.getNullCount.asInstanceOf[java.lang.Long]), col.getValid,
+            col.getOffsets, trimmed.toArray)
+        } else {
+          col
+        }
+      case ArrayType(elementType, _) =>
+        val child = addToClose(col.getChildColumnView(0))
+        val newChild = trimHiddenColumns(child, elementType, toClose)
+        if (newChild eq child) col else col.replaceListChild(addToClose(newChild))
+      case _ => col
+    }
   }
 
   // Building a struct null mask nulls its fields too, so malformed rows already have only null

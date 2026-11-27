@@ -16,15 +16,18 @@
 
 package com.nvidia.spark.rapids.delta
 
-import java.lang.reflect.Field
+import java.lang.reflect.{Field, InvocationTargetException}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.util.Try
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids._
 import org.apache.hadoop.fs.Path
 
+import org.apache.spark.SPARK_VERSION
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
@@ -329,9 +332,64 @@ class DeltaProbeImpl extends DeltaProbe {
     val hasDeltaJar = UnshimmedTrampolineUtil.classIsLoadable(cpuClassName) &&
         Try(ShimReflectionUtils.loadClass(cpuClassName)).isSuccess
     if (hasDeltaJar) {
-      DeltaRuntimeShim.getDeltaProvider
+      DeltaProbeImpl.providerOrNoDelta(DeltaRuntimeShim.getDeltaProvider)
     } else {
       NoDeltaProvider
     }
+  }
+}
+
+object DeltaProbeImpl extends Logging {
+  /**
+   * The provider is resolved while planning every query, so a Delta Lake runtime without a
+   * usable shim must only disable Delta acceleration instead of failing queries that do not
+   * touch Delta. LinkageError is included because an incompatible Delta jar surfaces as
+   * NoClassDefFoundError when the shim is linked.
+   */
+  private[delta] def providerOrNoDelta(
+      provider: => Option[DeltaProvider],
+      deltaVersion: => String = _root_.io.delta.VERSION): DeltaProvider = {
+    try {
+      provider match {
+        case Some(p) =>
+          validateForPlanning(p)
+          p
+        case None =>
+          logWarning(s"Disabling GPU acceleration for Delta Lake $deltaVersion on Spark " +
+            s"$SPARK_VERSION because no runtime shim supports this combination")
+          NoDeltaProvider
+      }
+    } catch {
+      case e: Throwable if isRecoverable(e) =>
+        // A Delta jar that cannot link the shim may not load io.delta.VERSION either, and
+        // Try would rethrow that LinkageError.
+        val version = try deltaVersion catch { case v: Throwable if isRecoverable(v) => "unknown" }
+        logWarning(s"Disabling GPU acceleration for Delta Lake $version on Spark $SPARK_VERSION", e)
+        NoDeltaProvider
+    }
+  }
+
+  // Non-Delta queries touch these shared registration and probe hooks during planning, so link
+  // them up front while failures can still fall back to NoDeltaProvider.
+  private def validateForPlanning(provider: DeltaProvider): Unit = {
+    provider.getScans
+    provider.getCreatableRelationRules
+    provider.getExecRules
+    provider.getRunnableCommandRules
+    provider.getDataWritingCommandRules
+    provider.getStrategyRules
+    provider.getExprs
+    provider.isSupportedFormat(classOf[FileFormat])
+    provider.isSupportedWrite(classOf[SupportsWrite])
+    provider.isSupportedCatalog(classOf[StagingTableCatalog])
+    provider.isPushDVPredicateDownEnabled(new RapidsConf(Map.empty[String, String]))
+  }
+
+  // The shim is created reflectively, which wraps anything its constructor throws, including
+  // fatal errors, in a non-fatal InvocationTargetException.
+  private def isRecoverable(e: Throwable): Boolean = e match {
+    case ite: InvocationTargetException if ite.getCause != null => isRecoverable(ite.getCause)
+    case _: LinkageError => true
+    case _ => NonFatal(e)
   }
 }

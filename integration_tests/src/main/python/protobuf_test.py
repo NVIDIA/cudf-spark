@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import inspect
+import json
 import os
 import struct
 
 import pytest
 
 from asserts import (
+    assert_cpu_and_gpu_are_equal_collect_with_capture,
     assert_gpu_and_cpu_are_equal_collect,
     assert_gpu_and_cpu_error,
     assert_gpu_fallback_collect,
@@ -32,9 +34,12 @@ from protobuf_data_gen import call_protobuf_function, materialize_protobuf_data
 from spark_session import (
     is_before_spark_340,
     is_databricks_runtime,
+    is_databricks_version_or_later,
+    is_spark_420_or_later,
     is_spark_protobuf_available,
     spark_version,
     with_cpu_session,
+    with_gpu_session,
 )
 import pyspark.sql.functions as f
 from pyspark.sql.types import StringType
@@ -133,6 +138,86 @@ def _select_paths(decoded, paths):
             for path in paths]
 
 
+def _gpu_output_paths(df):
+    """The field paths each GpuFromProtobuf in df's executed plan outputs, as one set per
+    decode. Fields that are not output are validated but returned as nulls."""
+    decodes = []
+
+    def struct_paths(struct_type, prefix=""):
+        # Flattened order: every field, followed by the fields of its message.
+        for field in struct_type["fields"]:
+            path = prefix + field["name"]
+            yield path
+            field_type = field["type"]
+            if isinstance(field_type, dict) and field_type.get("type") == "array":
+                field_type = field_type["elementType"]
+            if isinstance(field_type, dict) and field_type.get("type") == "struct":
+                yield from struct_paths(field_type, path + ".")
+
+    def visit_expr(expr):
+        if expr.getClass().getSimpleName() == "GpuFromProtobuf":
+            paths = list(struct_paths(json.loads(expr.dataType().json())))
+            is_output = list(expr.schema().isOutput())
+            assert len(paths) == len(is_output)
+            decodes.append(frozenset(p for p, out in zip(paths, is_output) if out))
+        children = expr.children().iterator()
+        while children.hasNext():
+            visit_expr(children.next())
+
+    def visit_plan(plan):
+        exprs = plan.expressions().iterator()
+        while exprs.hasNext():
+            visit_expr(exprs.next())
+        children = plan.children().iterator()
+        while children.hasNext():
+            visit_plan(children.next())
+
+    visit_plan(df._jdf.queryExecution().executedPlan())
+    return set(decodes)
+
+
+def _assert_gpu_output_paths(run_on_spark, expected):
+    """Equal results cannot show which fields the GPU skipped, so check the plan."""
+    # AQE plans stages lazily, so inspect a fully planned query instead.
+    actual = with_gpu_session(lambda spark: _gpu_output_paths(run_on_spark(spark)),
+                              conf={"spark.sql.adaptive.enabled": "false"})
+    assert actual == {frozenset(paths) for paths in expected}
+
+
+def _tiered_gpu_decode_count(spark, df):
+    """Count GpuFromProtobuf expressions remaining after GpuTieredProject CSE."""
+    def count_in_expr(expr):
+        total = 1 if expr.getClass().getSimpleName() == "GpuFromProtobuf" else 0
+        children = expr.children().iterator()
+        while children.hasNext():
+            total += count_in_expr(children.next())
+        return total
+
+    def count_in_plan(plan):
+        total = 0
+        if plan.getClass().getSimpleName() == "GpuProjectExec":
+            planner_cls = plan.getClass().getClassLoader().loadClass(
+                "com.nvidia.spark.rapids.GpuProjectAstPlanner$")
+            planner = planner_cls.getField("MODULE$").get(None)
+            tiers = planner.buildExprTiers(
+                plan.projectList(), spark._jsparkSession.sessionState().conf(), False, False)
+            tier_iter = tiers.iterator()
+            while tier_iter.hasNext():
+                expr_iter = tier_iter.next().iterator()
+                while expr_iter.hasNext():
+                    total += count_in_expr(expr_iter.next())
+        else:
+            exprs = plan.expressions().iterator()
+            while exprs.hasNext():
+                total += count_in_expr(exprs.next())
+        children = plan.children().iterator()
+        while children.hasNext():
+            total += count_in_plan(children.next())
+        return total
+
+    return count_in_plan(df._jdf.queryExecution().executedPlan())
+
+
 def _encode_varint(value):
     """Encode a non-negative integer as a protobuf varint (for hand-crafting test bytes)."""
     if value < 0:
@@ -189,13 +274,14 @@ def _field(name, number, ftype, label="optional", default=None,
     }
 
 
-def _msg(name, fields, enums=None, oneofs=None):
+def _msg(name, fields, enums=None, oneofs=None, extension_ranges=None):
     """Declarative message spec for `_build_proto2_descriptor`."""
     return {
         "name": name,
         "fields": fields,
         "enums": enums or [],
         "oneofs": oneofs or [],
+        "extension_ranges": extension_ranges or [],
     }
 
 
@@ -205,7 +291,8 @@ def _enum(name, values, allow_alias=False):
 
 
 def _build_proto2_descriptor(
-        spark, filename, messages, file_enums=None, java_string_check_utf8=False):
+        spark, filename, messages, file_enums=None, java_string_check_utf8=False,
+        file_extensions=None):
     """Build FileDescriptorSet bytes from declarative message and enum specs."""
     fd = _new_proto2_file(spark, filename)
     if java_string_check_utf8:
@@ -241,6 +328,8 @@ def _build_proto2_descriptor(
 
     for message_spec in messages:
         message_proto = fd.message_type.add(name=message_spec["name"])
+        for range_start, range_end in message_spec.get("extension_ranges", []):
+            message_proto.extension_range.add(start=range_start, end=range_end)
         for oneof_name in message_spec.get("oneofs", []):
             message_proto.oneof_decl.add(name=oneof_name)
         for enum_spec in message_spec["enums"]:
@@ -259,6 +348,18 @@ def _build_proto2_descriptor(
                 field_proto.options.packed = True
             if field_spec.get("oneof_index") is not None:
                 field_proto.oneof_index = field_spec["oneof_index"]
+
+    # File-level `extend` declarations: Spark reads them through its extension registry,
+    # so they never appear among the extended message's own fields.
+    for extendee, field_spec in file_extensions or []:
+        extension_proto = fd.extension.add(
+            name=field_spec["name"],
+            number=field_spec["number"],
+            label=label_map[field_spec["label"]],
+            type=type_map[field_spec["type"]],
+            extendee=extendee)
+        if field_spec["type_name"] is not None:
+            extension_proto.type_name = field_spec["type_name"]
 
     fds = descriptor_pb2.FileDescriptorSet()
     fds.file.add().CopyFrom(fd)
@@ -879,6 +980,225 @@ def test_from_protobuf_max_nesting_depth(local_tmp_path, from_protobuf_fn):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def _build_empty_message_field_descriptor_set_bytes(spark, label):
+    return _build_proto2_descriptor(spark, f"empty_field_{label}.proto", [
+        _msg("Empty", []),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", label=label, type_name=".test.Empty"),
+        ]),
+    ])
+
+
+def _build_wrapper_empty_message_descriptor_set_bytes(spark):
+    """Wrapper only holds an empty message, so Spark cannot represent Wrapper either."""
+    return _build_proto2_descriptor(spark, "wrapper_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Wrapper", [
+            _field("empty", 1, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("wrapper", 2, "MESSAGE", type_name=".test.Wrapper"),
+        ]),
+    ])
+
+
+def _build_nested_empty_message_field_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", type_name=".test.Child"),
+        ]),
+    ])
+
+
+def _build_extension_empty_message_descriptor_set_bytes(spark):
+    """`extend Empty { optional Ext ext = 100; }`: Spark still reads Empty as an empty schema
+    and drops Root's field, but validates the extension through its registry. The extension
+    is a separate empty message because extending Empty with itself is a recursive schema,
+    which Spark rejects during analysis."""
+    return _build_proto2_descriptor(spark, "extension_empty_field.proto", [
+        _msg("Empty", [], extension_ranges=[(100, 200)]),
+        _msg("Ext", []),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+    ], file_extensions=[
+        (".test.Empty", _field("ext", 100, "MESSAGE", type_name=".test.Ext")),
+    ])
+
+
+def _build_empty_root_descriptor_set_bytes(spark):
+    """Roots Spark turns into an empty schema, either directly or after dropping every field."""
+    return _build_proto2_descriptor(spark, "empty_root.proto", [
+        _msg("Empty", []),
+        _msg("OnlyEmpty", [
+            _field("e", 1, "MESSAGE", type_name=".test.Empty"),
+        ]),
+    ])
+
+
+def _build_wrapper_required_empty_descriptor_set_bytes(spark):
+    """Wrapper only holds a required empty message, so an absent one is malformed."""
+    return _build_proto2_descriptor(spark, "wrapper_required_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Wrapper", [
+            _field("empty", 1, "MESSAGE", label="required", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("wrapper", 2, "MESSAGE", type_name=".test.Wrapper"),
+        ]),
+    ])
+
+
+def _build_nested_required_empty_descriptor_set_bytes(spark):
+    """A visible Child with a required empty message field Spark drops from its schema."""
+    return _build_proto2_descriptor(spark, "nested_required_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", label="required", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", type_name=".test.Child"),
+        ]),
+    ])
+
+
+def _build_projection_hidden_descriptor_set_bytes(spark, label):
+    """Child holds an unread scalar before the selected one, plus an empty message."""
+    return _build_proto2_descriptor(spark, f"projection_hidden_{label}.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("unread", 1, "INT32"),
+            _field("selected", 2, "INT32"),
+            _field("empty", 3, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", label=label, type_name=".test.Child"),
+        ]),
+    ])
+
+
+def _build_repeated_nested_empty_message_descriptor_set_bytes(spark):
+    """A repeated message whose element hides an empty message, so the list child is trimmed."""
+    return _build_proto2_descriptor(spark, "repeated_nested_empty_field.proto", [
+        _msg("Empty", []),
+        _msg("Child", [
+            _field("x", 1, "INT32"),
+            _field("empty", 2, "MESSAGE", type_name=".test.Empty"),
+        ]),
+        _msg("Root", [
+            _field("id", 1, "INT32"),
+            _field("child", 2, "MESSAGE", label="repeated", type_name=".test.Child"),
+        ]),
+    ])
+
+
+def _one_partition_df(spark, rows):
+    """Build the rows in a single partition, so the decoder sees them in one batch.
+    `coalesce(1)` is not enough: it merges partitions after the rows are already columnar,
+    which leaves the existing batches separate."""
+    return spark.createDataFrame(spark.sparkContext.parallelize(rows, 1),
+                                 schema="idx int, bin binary")
+
+
+def _empty_label(label):
+    return lambda spark: _build_empty_message_field_descriptor_set_bytes(spark, label)
+
+
+_empty_nested_child = _encode_varint_field(1, 9) + _encode_length_delimited_field(2, b"")
+_empty_nested_row = _encode_length_delimited_field(2, _empty_nested_child)
+_repeated_nested_row = _encode_length_delimited_field(2, _empty_nested_child) * 2
+_wrapper_row = _encode_length_delimited_field(2, _encode_length_delimited_field(1, b""))
+
+# Shapes of empty-message fields Spark omits from its schema, with a row that carries them.
+_empty_message_cases = [
+    pytest.param(_empty_label("optional"), _encode_length_delimited_field(2, b""),
+                 id="optional_present"),
+    pytest.param(_empty_label("optional"), b"", id="optional_absent"),
+    pytest.param(_empty_label("required"), _encode_length_delimited_field(2, b""),
+                 id="required_present"),
+    pytest.param(_empty_label("repeated"),
+                 _encode_length_delimited_field(2, b"") * 2, id="repeated_two"),
+    pytest.param(_empty_label("repeated"), b"", id="repeated_empty"),
+    pytest.param(_build_nested_empty_message_field_descriptor_set_bytes, _empty_nested_row,
+                 id="nested"),
+    pytest.param(_build_wrapper_empty_message_descriptor_set_bytes,
+                 _encode_length_delimited_field(2, _encode_length_delimited_field(1, b"")),
+                 id="recursively_empty_wrapper"),
+    # A nested field with the wrong wire type is an unknown field, which protobuf skips
+    # instead of rejecting, so CPU and GPU both decode the row.
+    pytest.param(_build_nested_empty_message_field_descriptor_set_bytes,
+                 _encode_length_delimited_field(
+                     2, _encode_varint_field(1, 9) + _encode_varint_field(2, 1)),
+                 id="nested_wrong_wire_type"),
+    # A repeated message element hides a field, so the trimming walks into the list child.
+    pytest.param(_build_repeated_nested_empty_message_descriptor_set_bytes,
+                 _repeated_nested_row, id="repeated_nested_two"),
+    pytest.param(_build_repeated_nested_empty_message_descriptor_set_bytes, b"",
+                 id="repeated_nested_empty"),
+]
+
+
+_projection_child = (_encode_varint_field(1, 11) + _encode_varint_field(2, 22) +
+                     _encode_length_delimited_field(3, b""))
+
+
+@pytest.mark.parametrize("label", ["optional", "repeated"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_projection_with_hidden_fields(
+        local_tmp_path, from_protobuf_fn, label):
+    """Both kinds of hidden field in one decode: the unread scalar keeps its null placeholder
+    inside the Spark schema while the omitted empty message is trimmed after it, so the
+    selected field has to keep its ordinal."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, f"projection_hidden_{label}.desc",
+        lambda spark: _build_projection_hidden_descriptor_set_bytes(spark, label))
+    child = _encode_length_delimited_field(2, _projection_child)
+    row = _encode_varint_field(1, 7) + (child * 2 if label == "repeated" else child)
+
+    def run_on_spark(spark):
+        df = _one_partition_df(spark, [(0, row), (1, None)])
+        decoded = _decode(from_protobuf_fn, desc, "Root")
+        return df.select("idx",
+                         decoded.getField("child").getField("selected").alias("selected"))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuFromProtobuf",
+        non_exist_classes="ProtobufDataToCatalyst")
+
+
+@pytest.mark.parametrize("build_fn,tail", _empty_message_cases, ids=idfn)
+@pytest.mark.parametrize("mode", _modes, ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_empty_message_field(
+        request, local_tmp_path, from_protobuf_fn, build_fn, tail, mode):
+    """Spark drops empty-message fields from its schema, but the decoder still parses them."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, f"{request.node.callspec.id}.desc", build_fn)
+    row = _encode_varint_field(1, 7) + tail
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame([(0, row), (1, None)], schema="idx int, bin binary")
+        decoded = _decode(from_protobuf_fn, desc, "Root", {"mode": mode})
+        return df.select("idx", decoded.alias("decoded"))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuFromProtobuf",
+        non_exist_classes="ProtobufDataToCatalyst")
+
+
 @ignore_order(local=True)
 def test_from_protobuf_all_null_input(local_tmp_path, from_protobuf_fn):
     desc = _setup_protobuf_desc(
@@ -1001,6 +1321,256 @@ def test_from_protobuf_smoke_nested(nested_smoke_desc, from_protobuf_fn):
 
 
 # ===========================================================================
+# Fields the query does not read are validated but returned as nulls
+# ===========================================================================
+
+_nested_smoke_all_paths = ["top", "child", "child.a", "child.b", "items", "items.a", "items.b"]
+
+
+def _read_top_and_leaves(decoded, df):
+    return df.select(decoded.getField("top").alias("top"),
+                     decoded.getField("child").getField("a").alias("child_a"),
+                     f.get(decoded.getField("items"), 0).getField("b").alias("first_item_b"))
+
+
+def _read_leaf_of_every_item(decoded, df):
+    return df.select(decoded.getField("items").getField("a").alias("item_a"))
+
+
+def _read_mixed_case_fields(decoded, df):
+    return df.select(decoded.getField("CHILD").getField("A").alias("child_a"),
+                     decoded.getField("ITEMS").getField("A").alias("item_a"))
+
+
+def _read_through_alias(decoded, df):
+    # Two references to the aliased struct keep CollapseProject from folding the projections.
+    return df.select(decoded.alias("d")).select(f.col("d.top"), f.col("d.child.b"))
+
+
+def _read_element_at(decoded, df):
+    return df.select(decoded.alias("d")).select(f.expr("try_element_at(d.items, 1).b"))
+
+
+def _filter_then_read(decoded, df):
+    return df.select(decoded.alias("d")).where(f.col("d.top") > 0).select(f.col("d.child.a"))
+
+
+def _filter_carried_then_read(decoded, df):
+    # Referencing mid blocks predicate pushdown so FilterExec carries d to the outer project.
+    return df.select(decoded.alias("d"), f.monotonically_increasing_id().alias("mid")) \
+        .where(f.when(f.col("mid") >= 0, f.col("d.top")) > 0) \
+        .select(f.col("d.child.a"))
+
+
+def _sort_then_read(decoded, df):
+    return df.select(decoded.alias("d")).orderBy(f.col("d.top")).select(f.col("d.items"))
+
+
+def _aggregate_one_field(decoded, df):
+    return df.select(decoded.alias("d")).groupBy(f.col("d.child.a")).count()
+
+
+def _read_whole_struct(decoded, df):
+    return df.select(decoded.alias("d"))
+
+
+def _read_whole_child(decoded, df):
+    return df.select(decoded.getField("child").alias("child"))
+
+
+def _read_whole_struct_in_null_check(decoded, df):
+    return df.select(decoded.getField("top").alias("top"),
+                     decoded.isNotNull().alias("present"))
+
+
+# Each case lists the output paths of every decode in the plan.
+_field_read_cases = [
+    pytest.param(_read_top_and_leaves, [["top", "child", "child.a", "items", "items.b"]],
+                 id="top_and_leaves"),
+    pytest.param(_read_leaf_of_every_item, [["items", "items.a"]], id="leaf_of_every_item"),
+    pytest.param(_read_mixed_case_fields, [["child", "child.a", "items", "items.a"]],
+                 id="mixed_case_fields"),
+    pytest.param(_read_through_alias, [["top", "child", "child.b"]], id="through_alias"),
+    pytest.param(_read_element_at, [["items", "items.b"]], id="element_at"),
+    # Spark pushes the filter below the projection, so the filter decodes on its own.
+    pytest.param(_filter_then_read, [["top"], ["child", "child.a"]], id="filter"),
+    pytest.param(_filter_carried_then_read, [["top", "child", "child.a"]], id="filter_carried"),
+    pytest.param(_sort_then_read, [["top", "items", "items.a", "items.b"]], id="sort"),
+    pytest.param(_aggregate_one_field, [["child", "child.a"]], id="aggregate"),
+    pytest.param(_read_whole_struct, [_nested_smoke_all_paths], id="whole_struct"),
+    pytest.param(_read_whole_child, [["child", "child.a", "child.b"]], id="whole_child"),
+    pytest.param(_read_whole_struct_in_null_check, [_nested_smoke_all_paths],
+                 id="whole_struct_in_null_check"),
+]
+
+
+@pytest.mark.parametrize("query,decodes", _field_read_cases)
+@ignore_order(local=True)
+def test_from_protobuf_outputs_only_fields_read(
+        nested_smoke_desc, from_protobuf_fn, query, decodes):
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc)
+    encoded = [(row[-1],) for row in fixture_rows]
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, nested_smoke_desc, "Root")
+        return query(decoded, spark.createDataFrame(encoded, ["bin"]))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_output_paths(run_on_spark, decodes)
+
+
+@pytest.mark.parametrize("api", ["descriptor_file", "binary_descriptor_set"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_independent_calls_share_one_gpu_decode(
+        nested_smoke_desc, from_protobuf_fn, api):
+    desc_path, desc_bytes = nested_smoke_desc
+    if api == "binary_descriptor_set" and \
+            "binaryDescriptorSet" not in inspect.signature(from_protobuf_fn).parameters:
+        pytest.skip("binaryDescriptorSet kwarg is Spark 3.5+ only")
+
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc)
+    encoded = [(row[-1],) for row in fixture_rows]
+
+    def make_decode():
+        if api == "descriptor_file":
+            return from_protobuf_fn(f.col("bin"), "test.Root", desc_path)
+        return from_protobuf_fn(
+            f.col("bin"), "test.Root", binaryDescriptorSet=bytearray(desc_bytes))
+
+    def run_on_spark(spark):
+        # Two separate from_protobuf calls load distinct descriptor byte arrays on Spark 3.5+.
+        p1 = make_decode()
+        p2 = make_decode()
+        return spark.createDataFrame(encoded, ["bin"]).select(
+            p1.getField("top").alias("top"),
+            p2.getField("child").getField("a").alias("child_a"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_output_paths(run_on_spark, [["top", "child", "child.a"]])
+    tiered_decodes = with_gpu_session(
+        lambda spark: _tiered_gpu_decode_count(spark, run_on_spark(spark)),
+        conf={"spark.sql.adaptive.enabled": "false"})
+    assert tiered_decodes == 1
+
+
+@pytest.mark.parametrize("select_fn,expected", [
+    pytest.param(lambda d, df: df.select(d.alias("d")), [_nested_smoke_all_paths],
+                 id="whole_struct"),
+    pytest.param(lambda d, df: df.select(d.getField("top").alias("top")), [["top"]],
+                 id="single_field"),
+])
+@ignore_order(local=True)
+def test_from_protobuf_non_deterministic_input(
+        nested_smoke_desc, from_protobuf_fn, select_fn, expected):
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc)
+    encoded = [(row[-1],) for row in fixture_rows]
+    desc_path, desc_bytes = nested_smoke_desc
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(encoded, ["bin"])
+        non_det_bin = f.when(f.monotonically_increasing_id() >= 0, f.col("bin"))
+        decoded = _call_from_protobuf(
+            from_protobuf_fn, non_det_bin, "test.Root", desc_path, desc_bytes)
+        return select_fn(decoded, df)
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_output_paths(run_on_spark, expected)
+
+
+def _build_required_nested_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "required_nested.proto", [
+        _msg("ReqInner", [
+            _field("s", 1, "STRING", label="required"),
+            _field("k", 2, "INT32"),
+        ]),
+        _msg("WithRequiredNested", [
+            _field("req_str", 1, "STRING", label="required"),
+            _field("req_inner", 2, "MESSAGE", label="required", type_name=".test.ReqInner"),
+            _field("opt_inner", 3, "MESSAGE", type_name=".test.ReqInner"),
+            _field("a", 4, "INT32"),
+            _field("b", 5, "INT32"),
+        ]),
+    ])
+
+
+def _required_nested_rows():
+    inner = _encode_length_delimited_field(1, "inner") + _encode_varint_field(2, 9)
+    row_with_opt = (
+        _encode_length_delimited_field(1, "req") +
+        _encode_length_delimited_field(2, inner) +
+        _encode_length_delimited_field(3, inner) +
+        _encode_varint_field(4, 10) +
+        _encode_varint_field(5, 20))
+    row_without_opt = (
+        _encode_length_delimited_field(1, "req2") +
+        _encode_length_delimited_field(2, inner) +
+        _encode_varint_field(4, 30) +
+        _encode_varint_field(5, 40))
+    return [(row_with_opt,), (row_without_opt,), (None,)]
+
+
+@ignore_order(local=True)
+def test_from_protobuf_keeps_required_fields_under_visible_parents(
+        local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "required_nested.desc", _build_required_nested_descriptor_set_bytes)
+    rows = _required_nested_rows()
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, desc, "WithRequiredNested")
+        return spark.createDataFrame(rows, schema="bin binary") \
+            .select(decoded.alias("d")) \
+            .select(f.col("d.a"), f.col("d.b"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    # Non-nullable required fields under visible parents stay output; optional children and
+    # required fields inside hidden optional messages are still skipped.
+    _assert_gpu_output_paths(run_on_spark, [["req_str", "req_inner", "req_inner.s", "a", "b"]])
+
+
+@allow_non_gpu("Add", "GetStructField")
+@ignore_order(local=True)
+def test_from_protobuf_required_fields_with_cpu_bridge(local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "required_nested.desc", _build_required_nested_descriptor_set_bytes)
+    rows = _required_nested_rows()
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, desc, "WithRequiredNested")
+        return spark.createDataFrame(rows, schema="bin binary") \
+            .select(decoded.alias("d")) \
+            .select((f.col("d.a") + f.col("d.b")).alias("sum_ab"))
+
+    conf = {
+        "spark.rapids.sql.expression.Add": "false",
+        "spark.rapids.sql.expression.cpuBridge.enabled": "true",
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuFromProtobuf,GpuCpuBridgeExpression", conf=conf)
+
+
+@allow_non_gpu("FilterExec", "GreaterThan", "CaseWhen", "GreaterThanOrEqual", "GetStructField")
+@ignore_order(local=True)
+def test_from_protobuf_required_fields_with_cpu_filter_fallback(local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "required_nested.desc", _build_required_nested_descriptor_set_bytes)
+    rows = _required_nested_rows()
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, desc, "WithRequiredNested")
+        return spark.createDataFrame(rows, schema="bin binary") \
+            .select(decoded.alias("d"), f.monotonically_increasing_id().alias("mid")) \
+            .where(f.when(f.col("mid") >= 0, f.col("d.a")) > 0) \
+            .select(f.col("d.a"))
+
+    assert_gpu_fallback_collect(
+        run_on_spark, "FilterExec", conf={"spark.rapids.sql.exec.FilterExec": "false"})
+
+
+# ===========================================================================
 # Malformed input: PERMISSIVE nulls the row and FAILFAST fails, as on the CPU
 #
 # The CPU parses the whole payload, so cases that select fields also check that the GPU
@@ -1050,6 +1620,17 @@ def _build_nested_packed_descriptor_set_bytes(spark):
         _msg("OuterPacked", [
             _field("inner", 1, "MESSAGE", type_name=".test.InnerPacked"),
         ]),
+    ])
+
+
+def _build_nested_repeated_required_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_repeated_required.proto", [
+        _msg("Leaf", [_field("x", 1, "INT32", label="required")]),
+        _msg("Middle", [
+            _field("keep", 1, "INT32"),
+            _field("leaves", 2, "MESSAGE", label="repeated", type_name=".test.Leaf"),
+        ]),
+        _msg("WithMiddle", [_field("middle", 1, "MESSAGE", type_name=".test.Middle")]),
     ])
 
 
@@ -1149,6 +1730,15 @@ _malformed_cases = [
                         1, _encode_varint_field(1, 7) +
                         _encode_length_delimited_field(2, b"\x80")),
                     ["inner.keep"]),
+    # The unread repeated message sits next to a read field of the same message.
+    _malformed_case("missing_required_in_unselected_repeated_sibling",
+                    _build_nested_repeated_required_descriptor_set_bytes, "WithMiddle",
+                    _encode_length_delimited_field(1, _encode_varint_field(1, 7) +
+                                                   _encode_length_delimited_field(
+                                                       2, _encode_varint_field(1, 1))),
+                    _encode_length_delimited_field(1, _encode_varint_field(1, 7) +
+                                                   _encode_length_delimited_field(2, b"")),
+                    ["middle.keep"]),
     _malformed_case("unterminated_varint_in_unselected_message",
                     _build_nested_descriptor_set_bytes, "WithNested", _with_nested_scalars,
                     _with_nested_scalars + _encode_length_delimited_field(
@@ -1159,6 +1749,83 @@ _malformed_cases = [
                     _with_nested_scalars + _encode_length_delimited_field(
                         3, _encode_tag(50, 2) + _encode_varint(100) + b"x"),
                     ["simple_int", "simple_str"]),
+    # Hidden empty-message fields are validated like visible ones, so malformed bytes inside
+    # them and a missing required one must still fail, and must not disturb the null rows.
+    _malformed_case("missing_required_empty_message", _empty_label("required"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8)),
+    _malformed_case("truncated_varint_in_empty_message", _empty_label("optional"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 0) + _MALFORMED_VARINT)),
+    _malformed_case("wrong_wire_type_for_empty_message", _empty_label("optional"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8) + _encode_varint_field(2, 1)),
+    _malformed_case("truncated_varint_in_nested_empty_message",
+                    _build_nested_empty_message_field_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _empty_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 0) + _MALFORMED_VARINT))),
+    # Wire type 7 does not exist, so the tag itself is invalid inside the hidden message.
+    _malformed_case("invalid_wire_type_in_empty_message", _empty_label("optional"), "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b""),
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 7))),
+    _malformed_case("invalid_wire_type_in_repeated_empty_message", _empty_label("repeated"),
+                    "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"") * 2,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(2, b"") +
+                    _encode_length_delimited_field(2, _encode_tag(1, 7))),
+    _malformed_case("truncated_varint_in_repeated_empty_message", _empty_label("repeated"),
+                    "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"") * 2,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 0) + _MALFORMED_VARINT)),
+    _malformed_case("wrong_wire_type_for_repeated_empty_message", _empty_label("repeated"),
+                    "Root",
+                    _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"") * 2,
+                    _encode_varint_field(1, 8) + _encode_varint_field(2, 1)),
+    _malformed_case("invalid_wire_type_in_nested_empty_message",
+                    _build_nested_empty_message_field_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _empty_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 7)))),
+    _malformed_case("truncated_varint_in_repeated_nested_empty_message",
+                    _build_repeated_nested_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _repeated_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 0) + _MALFORMED_VARINT))),
+    _malformed_case("invalid_wire_type_in_repeated_nested_empty_message",
+                    _build_repeated_nested_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _repeated_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9) + _encode_length_delimited_field(
+                            2, _encode_tag(1, 7)))),
+    # Bytes inside the hidden Wrapper itself, and inside the Empty nested below it. The second
+    # one only fails when the whole omitted subtree is registered with the decoder.
+    _malformed_case("invalid_wire_type_in_wrapper",
+                    _build_wrapper_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _wrapper_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_tag(1, 7))),
+    _malformed_case("invalid_wire_type_in_wrapper_empty",
+                    _build_wrapper_empty_message_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _wrapper_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_length_delimited_field(1, _encode_tag(1, 7)))),
+    # A required empty message below a hidden parent and below a visible one.
+    _malformed_case("missing_required_empty_in_wrapper",
+                    _build_wrapper_required_empty_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _wrapper_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(2, b"")),
+    _malformed_case("missing_required_empty_in_child",
+                    _build_nested_required_empty_descriptor_set_bytes, "Root",
+                    _encode_varint_field(1, 7) + _empty_nested_row,
+                    _encode_varint_field(1, 8) + _encode_length_delimited_field(
+                        2, _encode_varint_field(1, 9))),
 ]
 
 
@@ -1172,7 +1839,9 @@ def test_from_protobuf_malformed_input(
     rows = [(i, row) for i, row in enumerate(valid + [malformed, None])]
 
     def run_on_spark(spark):
-        df = spark.createDataFrame(rows, schema="idx int, bin binary")
+        # Keep the valid, malformed and null rows in one batch, so that hidden-field
+        # validation and the column trimming see them together.
+        df = _one_partition_df(spark, rows)
         decoded = _decode(from_protobuf_fn, desc, message, dict(options, mode=mode))
         return df.select("idx", *_select_paths(decoded, paths))
 
@@ -1316,18 +1985,17 @@ def _build_group_descriptor_set_bytes(spark):
     ])
 
 
-def _build_empty_message_field_descriptor_set_bytes(spark, label):
-    return _build_proto2_descriptor(spark, f"empty_field_{label}.proto", [
-        _msg("Empty", []),
-        _msg("Root", [
-            _field("id", 1, "INT32"),
-            _field("empty", 2, "MESSAGE", label=label, type_name=".test.Empty"),
-        ]),
-    ])
+# Spark 4.2 added the protobuf extension registry, and DBR 18.3 backports it on Spark 4.1,
+# which is the runtime the spark410db183 shim reads it on.
+_requires_extension_registry = pytest.mark.skipif(
+    not (is_spark_420_or_later() or is_databricks_version_or_later(18, 3)),
+    reason="protobuf extension registry requires Spark 4.2 or Databricks 18.3")
 
 
-def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None):
-    return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id)
+def _fallback_case(case_id, build_fn, message, row, paths=None, options=None, conf=None,
+                   marks=()):
+    return pytest.param(build_fn, message, row, paths, options, conf or {}, id=case_id,
+                        marks=marks)
 
 
 _oneof_child = _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"x")
@@ -1353,15 +2021,11 @@ _fallback_cases = [
     _fallback_case("nested_oneof_member", _build_oneof_descriptor_set_bytes, "OuterChoice",
                    _encode_length_delimited_field(1, _oneof_child) + _encode_varint_field(2, 9),
                    ["child.int_value", "sibling"]),
-    # Spark drops empty-message fields from its schema but still validates them.
-    _fallback_case("empty_message_field_optional",
-                   lambda spark: _build_empty_message_field_descriptor_set_bytes(
-                       spark, "optional"),
-                   "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"")),
-    _fallback_case("empty_message_field_required",
-                   lambda spark: _build_empty_message_field_descriptor_set_bytes(
-                       spark, "required"),
-                   "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"")),
+    # The decoder cannot build a struct without children, so a message Spark reads as an
+    # empty schema stays on the CPU.
+    _fallback_case("empty_root_message", _build_empty_root_descriptor_set_bytes, "Empty", b""),
+    _fallback_case("root_with_only_empty_message", _build_empty_root_descriptor_set_bytes,
+                   "OnlyEmpty", _encode_length_delimited_field(1, b"")),
     # Groups decode to structs like messages, but use their own wire types.
     _fallback_case("group_field", _build_group_descriptor_set_bytes, "WithGroup",
                    _encode_varint_field(1, 7) + _encode_tag(2, 3) + _encode_varint_field(1, 9) +
@@ -1369,6 +2033,25 @@ _fallback_cases = [
     _fallback_case("nesting_too_deep",
                    lambda spark: _build_nested_depth_descriptor_set_bytes(spark, 12),
                    "Level1", _encode_nested_depth_message(1, 12)),
+    # Spark validates registered extension fields through its registry, which is absent from
+    # the descriptor fields the GPU decoder reads, so the message they target stays on the CPU.
+    _fallback_case("registered_extension_on_empty_message",
+                   _build_extension_empty_message_descriptor_set_bytes, "Root",
+                   _encode_length_delimited_field(
+                       2, _encode_length_delimited_field(100, b"")),
+                   conf={"spark.sql.function.protobufExtensions.enabled": "true"},
+                   marks=_requires_extension_registry),
+    # The same descriptor with a malformed payload inside the extension: on Spark 4.2 the CPU
+    # returns a null row in PERMISSIVE, so a GPU decode that skipped the extension would
+    # return a decoded row instead.
+    _fallback_case("malformed_registered_extension",
+                   _build_extension_empty_message_descriptor_set_bytes, "Root",
+                   _encode_length_delimited_field(
+                       2, _encode_length_delimited_field(
+                           100, _encode_tag(1, 0) + _MALFORMED_VARINT)),
+                   options={"mode": "PERMISSIVE"},
+                   conf={"spark.sql.function.protobufExtensions.enabled": "true"},
+                   marks=_requires_extension_registry),
     _fallback_case("unsupported_option", _build_simple_descriptor_set_bytes, "Simple",
                    _simple_valid, options={"emit.default.values": "true"}),
     _fallback_case("disabled_by_expression_config", _build_simple_descriptor_set_bytes, "Simple",

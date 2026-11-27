@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import lru_cache
 import json
 import os.path
 import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks143, is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
     is_spark_400_or_later, is_spark_local_mode, \
     with_cpu_session, with_gpu_session
 from asserts import assert_equal, collect_plan_nodes
@@ -56,8 +57,8 @@ delta_meta_allow = [
     "JsonToStructs"
 ]
 
-if is_databricks143() or is_databricks173_or_later():
-    # DBR 14.3 and 17.3 DV write/update paths can serialize Delta stats JSON on the CPU bridge.
+if is_databricks173_or_later():
+    # Databricks DV write/update paths can serialize Delta stats JSON on the CPU bridge.
     delta_meta_allow += ["StructsToJson", "CreateNamedStruct"]
 
 delta_write = ["RapidsDeltaWrite"]
@@ -90,6 +91,10 @@ def set_delta_num_records(spark, target_path, num_records, log_version=0):
     jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
 
 
+_SUPPORTED_OSS_DELTA_43_VERSIONS = ("4.3.0", "4.3.1", "4.3.2.2")
+
+
+@lru_cache(maxsize=1)
 def _loaded_delta_lake_version():
     try:
         context_class_loader = (
@@ -138,31 +143,28 @@ def is_oss_delta_lake_41_or_42():
 
 
 def is_oss_delta_lake_42_or_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.2.0", "4.3.0"))
+    return is_oss_delta_lake_42() or is_supported_oss_delta_lake_43()
 
 
-def is_oss_delta_lake_43():
+def is_supported_oss_delta_lake_43():
     return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() == "4.3.0")
+            and _loaded_delta_lake_version() in _SUPPORTED_OSS_DELTA_43_VERSIONS)
 
 
 def is_oss_delta_lake_40_to_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.0.0", "4.0.1", "4.1.0", "4.2.0", "4.3.0"))
+    return is_oss_delta_lake_40() or is_oss_delta_lake_41_to_43()
 
 
 def is_oss_delta_lake_41_to_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))
+    return is_oss_delta_lake_41_or_42() or is_supported_oss_delta_lake_43()
 
 
 delta_reorg_xfail = pytest.mark.xfail(
     not is_databricks_runtime()
-    and _loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0", "4.3.0")
-    and not is_spark_local_mode(),
-    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and 4.3.0 calls SparkSession.active on "
-           "executors in distributed mode: "
+    and not is_spark_local_mode()
+    and (_loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0") or is_supported_oss_delta_lake_43()),
+    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and supported 4.3 releases calls "
+           "SparkSession.active on executors in distributed mode: "
            "https://github.com/delta-io/delta/issues/7776")
 
 
@@ -186,30 +188,12 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
     return enable_deletion_vector
 
 
-def dml_deletion_vector_values_with_xfail_reasons(
-        enabled_xfail_reason=None, disabled_xfail_reason=None):
-    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+ and DBR 17.3+. Keep the DV-enabled
-    # xfail only for Databricks runtimes before 17.3, without suppressing OSS or DBR 17.3 coverage.
-    if is_databricks_runtime() and disabled_xfail_reason is not None:
-        enable_deletion_vector = [
-            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
-    else:
-        enable_deletion_vector = [False]
-
-    if supports_delta_lake_deletion_vectors() and (
-            is_databricks_runtime() or is_spark_353_or_later()):
-        if is_databricks_runtime() and not is_databricks173_or_later() \
-                and enabled_xfail_reason is not None:
-            enable_deletion_vector.append(
-                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
-        else:
-            enable_deletion_vector.append(True)
-
-    return enable_deletion_vector
-
-
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
-dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
+# Persistent-DV DML coverage needs DBR 17.3+ or OSS Delta on Spark 3.5.3+.
+dml_deletion_vector_values = [False]
+if supports_delta_lake_deletion_vectors() and (
+        is_databricks_runtime() or is_spark_353_or_later()):
+    dml_deletion_vector_values.append(True)
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 
@@ -424,7 +408,8 @@ def assert_delta_add_file_stats_present(spark, path):
         assert {"minValues", "maxValues", "nullCount"}.issubset(stats), \
             f"Incomplete AddFile statistics in {path}: {stats}"
 
-def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
+def assert_gpu_and_cpu_latest_delta_log_equivalent(
+        spark, data_path, ignore_random_add_file_prefix=False):
     cpu_logs = read_delta_logs(spark, data_path + "/CPU/_delta_log/*.json")
     gpu_logs = read_delta_logs(spark, data_path + "/GPU/_delta_log/*.json")
     assert len(cpu_logs) == len(gpu_logs), "Different number of Delta log JSON files:\nCPU: {}\nGPU: {}".format(
@@ -439,6 +424,11 @@ def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
         latest_file, cpu_jsons, gpu_jsons)
     liquid_metadata_id_maps = ({}, {})
     for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
+        if ignore_random_add_file_prefix:
+            for action in (cpu_json, gpu_json):
+                if "add" in action:
+                    assert not action["add"]["partitionValues"]
+                    action["add"]["path"] = os.path.basename(action["add"]["path"])
         assert_delta_log_json_equivalent(
             latest_file, cpu_json, gpu_json, liquid_metadata_id_maps)
 
@@ -511,21 +501,21 @@ def setup_delta_dest_tables(spark, data_path, dest_table_func, use_cdf, enable_d
         setup_delta_dest_table(spark, path, dest_table_func, use_cdf, partition_columns, enable_deletion_vectors)
 
 def setup_delta_row_tracking_dest_table(spark, path, dest_table_func,
-                                        enable_deletion_vectors=False):
+                                        enable_deletion_vectors=False, partition_columns=None):
     dest_df = dest_table_func(spark)
     ddl = schema_to_ddl(spark, dest_df.schema)
-    spark.sql("CREATE TABLE delta.`{}` ({}) USING DELTA "
+    partitioning = f"PARTITIONED BY ({', '.join(partition_columns)}) " if partition_columns else ""
+    spark.sql(f"CREATE TABLE delta.`{path}` ({ddl}) USING DELTA {partitioning}"
               "TBLPROPERTIES (delta.enableRowTracking = true, "
-              "delta.enableDeletionVectors = {})".format(
-                  path, ddl, str(enable_deletion_vectors).lower()))
+              f"delta.enableDeletionVectors = {str(enable_deletion_vectors).lower()})")
     dest_df.write.format("delta").mode("append").save(path)
 
 def setup_delta_row_tracking_dest_tables(spark, data_path, dest_table_func,
-                                         enable_deletion_vectors=False):
+                                         enable_deletion_vectors=False, partition_columns=None):
     for name in ["CPU", "GPU"]:
         path = "{}/{}".format(data_path, name)
         setup_delta_row_tracking_dest_table(
-            spark, path, dest_table_func, enable_deletion_vectors)
+            spark, path, dest_table_func, enable_deletion_vectors, partition_columns)
 
 def row_tracking_dml_test_df(spark):
     return spark.createDataFrame(

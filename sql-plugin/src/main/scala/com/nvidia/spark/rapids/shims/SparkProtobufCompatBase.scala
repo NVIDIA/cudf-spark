@@ -41,6 +41,12 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private val ProtobufDataToCatalystClassName =
     "org.apache.spark.sql.protobuf.ProtobufDataToCatalyst"
 
+  private[this] val proto2Syntax = "PROTO2"
+
+  // The decoder rejects entries at depth 10 or beyond, so stop before flattening such a
+  // subtree. NVIDIA/cudf-spark-jni#5561 tracks exposing this limit from the JNI descriptor.
+  private[this] val maxNestingDepth = 10
+
   /** Option keys whose semantics the GPU decoder handles. */
   val SupportedOptions: Set[String] = Set("enums.as.ints", "mode")
 
@@ -112,15 +118,68 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
   /**
    * Spark drops empty-message fields from its schema but still checks their presence and
-   * encoding, which the GPU decoder cannot do without them.
+   * encoding, which the GPU decoder cannot do without them. Returns those fields so the planner
+   * can decode them without returning them; any other omission falls back to the CPU.
+   * The caller passes the absolute depth of this message's fields, so that an omitted subtree
+   * is rejected here rather than by the decoder after it has been flattened.
    */
-  def checkNoFieldsMissingFromSchema(
+  def hiddenFieldsMissingFromSchema(
       schema: StructType,
       desc: ProtobufMessageDescriptor,
-      location: String): Either[String, Unit] = {
-    val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
-    Either.cond(omitted.isEmpty, (),
-      s"$location has fields missing from the Spark schema: ${omitted.mkString(", ")}")
+      location: String,
+      depth: Int): Either[String, Seq[ProtobufFieldDescriptor]] =
+    Try {
+      val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
+        .map(name => name -> emptyMessageField(desc, name, depth))
+      val (hidden, unsupported) = omitted.partition(_._2.isDefined)
+      for {
+        // Spark validates extension fields through its registry, but they are absent from the
+        // descriptor's own fields, so the GPU decoder would never check them.
+        _ <- Either.cond(!desc.hasExtensions, (),
+          s"$location has registered protobuf extensions, " +
+            "which the GPU decoder does not validate")
+        fields <- Either.cond(unsupported.isEmpty, hidden.flatMap(_._2),
+          s"$location has fields missing from the Spark schema: " +
+            unsupported.map(_._1).mkString(", "))
+      } yield fields
+    }.toEither.left.map { t =>
+      s"Failed to read protobuf metadata for $location: ${t.getMessage}"
+    }.flatMap(identity)
+
+  /** A proto2 message field with no field Spark can represent, so its schema omits it. */
+  private def emptyMessageField(
+      desc: ProtobufMessageDescriptor,
+      name: String,
+      depth: Int): Option[ProtobufFieldDescriptor] =
+    desc.findField(name).filter(isEmptyMessageField(_, Set.empty, depth))
+
+  /** The field occupies the entry at `depth`, and its own fields sit one level below it. */
+  private def isEmptyMessageField(
+      field: ProtobufFieldDescriptor,
+      visited: Set[String],
+      depth: Int): Boolean =
+    depth < maxNestingDepth &&
+      field.protoTypeName == "MESSAGE" && !field.isInOneof && !field.isMapField &&
+      field.messageDescriptor.exists(isEmptyMessageType(_, visited, depth + 1))
+
+  /**
+   * A message type is empty for Spark when every field is itself such a message, so an empty
+   * message is the base case. A recursive type keeps nesting, so it is reported as
+   * representable and the planner falls back for it.
+   */
+  private def isEmptyMessageType(
+      desc: ProtobufMessageDescriptor,
+      visited: Set[String],
+      depth: Int): Boolean = {
+    if (desc.syntax != proto2Syntax || desc.hasExtensions ||
+        visited.contains(desc.fullName)) {
+      false
+    } else {
+      val nested = visited + desc.fullName
+      desc.fieldNames.forall { name =>
+        desc.findField(name).exists(isEmptyMessageField(_, nested, depth))
+      }
+    }
   }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */
@@ -137,7 +196,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
         s"Failed to resolve protobuf descriptor for message '${exprInfo.messageName}': " +
           s"${cause.getMessage}"
       }
-      .map(new ReflectiveMessageDescriptor(_))
+      .map { case (desc, extensionOwners) =>
+        new ReflectiveMessageDescriptor(desc, extensionOwners)
+      }
   }
 
   private def reflectMessageName(e: Expression): Either[String, String] =
@@ -158,7 +219,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
   private def buildMessageDescriptor(
       messageName: String,
-      descriptorSource: ProtobufDescriptorSource): AnyRef = {
+      descriptorSource: ProtobufDescriptorSource): (AnyRef, Set[String]) = {
     val cls = ShimReflectionUtils.loadClass(sparkProtobufUtilsObjectClassName)
     val module = cls.getField("MODULE$").get(null)
     val buildMethod = cls.getMethod("buildDescriptor", classOf[String], classOf[scala.Option[_]])
@@ -169,11 +230,25 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       messageName,
       descriptorSource,
       filePath => Files.readAllBytes(Paths.get(filePath)))
-    unwrapMessageDescriptor(built)
+    (unwrapMessageDescriptor(built), messagesWithExtensions(built))
   }
 
   /** Shims override this when Spark wraps the descriptor together with extension metadata. */
   private[shims] def unwrapMessageDescriptor(raw: AnyRef): AnyRef = raw
+
+  /**
+   * Full names of the message types a registered extension targets, empty when this Spark
+   * version has no extension registry. Shims that read the wrapper override this.
+   */
+  private[shims] def messagesWithExtensions(raw: AnyRef): Set[String] = Set.empty
+
+  /**
+   * Reads the extension registry Spark built for this descriptor. Throws when the member
+   * cannot be read, so unreadable metadata falls back instead of hiding unvalidated fields.
+   */
+  private[shims] def readExtensionOwners(raw: AnyRef): Set[String] =
+    ProtobufReflection.invoke0[scala.collection.Map[String, Seq[AnyRef]]](
+      raw, "fullNamesToExtensions").iterator.filter(_._2.nonEmpty).map(_._1).toSet
 
   /** Supplies the path or bytes expected by Spark; readDescriptorFile is only needed for paths. */
   private[shims] def invokeBuildDescriptor(
@@ -193,7 +268,9 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private[shims] def readDescriptorSyntax(desc: AnyRef): String =
     Try(readFileSyntax(ProtobufReflection.getFile(desc))).getOrElse("")
 
-  private final class ReflectiveMessageDescriptor(raw: AnyRef) extends ProtobufMessageDescriptor {
+  private final class ReflectiveMessageDescriptor(
+      raw: AnyRef,
+      extensionOwners: Set[String]) extends ProtobufMessageDescriptor {
     override lazy val syntax: String = readDescriptorSyntax(raw)
     override lazy val javaStringCheckUtf8: Boolean = Try {
       val fileOptions =
@@ -203,18 +280,28 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     }.getOrElse(true)
 
     override def findField(name: String): Option[ProtobufFieldDescriptor] =
-      Option(ProtobufReflection.findFieldByName(raw, name)).map(new ReflectiveFieldDescriptor(_))
+      Option(ProtobufReflection.findFieldByName(raw, name))
+        .map(new ReflectiveFieldDescriptor(_, extensionOwners))
 
     override lazy val fieldNames: Seq[String] = ProtobufReflection.getFieldNames(raw)
+
+    override lazy val fullName: String =
+      ProtobufReflection.invoke0[String](raw, "getFullName")
+
+    override lazy val hasExtensions: Boolean = extensionOwners.contains(fullName)
   }
 
-  private final class ReflectiveFieldDescriptor(raw: AnyRef) extends ProtobufFieldDescriptor {
+  private final class ReflectiveFieldDescriptor(
+      raw: AnyRef,
+      extensionOwners: Set[String]) extends ProtobufFieldDescriptor {
     override lazy val name: String = ProtobufReflection.invoke0[String](raw, "getName")
     override lazy val fieldNumber: Int = ProtobufReflection.getFieldNumber(raw)
     override lazy val protoTypeName: String = typeName(ProtobufReflection.getFieldType(raw))
     override lazy val isRepeated: Boolean = ProtobufReflection.isRepeated(raw)
     override lazy val isRequired: Boolean = ProtobufReflection.isRequired(raw)
     override lazy val isInOneof: Boolean = ProtobufReflection.getRealContainingOneof(raw) != null
+    override lazy val isMapField: Boolean =
+      ProtobufReflection.invoke0[java.lang.Boolean](raw, "isMapField").booleanValue()
     override lazy val enumMetadata: Option[ProtobufEnumMetadata] =
       if (protoTypeName == "ENUM") {
         Some(ProtobufEnumMetadata(
@@ -239,7 +326,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       }.flatMap(identity)
     override lazy val messageDescriptor: Option[ProtobufMessageDescriptor] =
       if (protoTypeName == "MESSAGE" || protoTypeName == "GROUP") {
-        Some(new ReflectiveMessageDescriptor(ProtobufReflection.getMessageType(raw)))
+        Some(new ReflectiveMessageDescriptor(
+          ProtobufReflection.getMessageType(raw), extensionOwners))
       } else {
         None
       }

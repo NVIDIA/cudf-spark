@@ -22,7 +22,7 @@ from data_gen import *
 from delta_lake_utils import *
 from marks import *
 from spark_session import with_cpu_session, with_gpu_session, with_spark_session, is_before_spark_353, \
-    supports_delta_lake_deletion_vectors, is_databricks_runtime, is_databricks143, \
+    supports_delta_lake_deletion_vectors, is_databricks_runtime, \
     is_databricks173_or_later
 from pyspark.sql.types import IntegerType, StringType
 
@@ -70,8 +70,6 @@ def _with_gpu_session_no_test(func, conf):
 @delta_lake
 @allow_non_gpu('ExecutedCommandExec', *delta_meta_allow)
 @pytest.mark.skipif(is_before_spark_353(), reason="OPTIMIZE table command is supported in Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="OPTIMIZE table command is supported for Databricks 17.3+")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), reason="Deletion vectors aren't supported")
 def test_delta_optimize_fallback_with_deletion_vectors(spark_tmp_path):
     _assert_optimize_fallback(True, spark_tmp_path)
@@ -576,8 +574,6 @@ def _assert_native_optimize_gpu_write_parity(spark_tmp_path, enable_deletion_vec
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_353(), reason="OPTIMIZE table command is supported in Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="OPTIMIZE table command is supported for Databricks 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", _optimize_deletion_vector_values, ids=idfn)
 def test_delta_optimize_unpartitioned_table(spark_tmp_path, enable_deletion_vectors):
     _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=None)
@@ -585,8 +581,8 @@ def test_delta_optimize_unpartitioned_table(spark_tmp_path, enable_deletion_vect
 
 @allow_non_gpu('ExecutedCommandExec', 'HashAggregateExec', *delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not (is_databricks143() or is_databricks173_or_later()),
-                    reason="Native DBR OPTIMIZE write coverage is for DBR 14.3 and 17.3+")
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Native DBR OPTIMIZE write coverage requires DBR 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_native_optimize_gpu_write(spark_tmp_path, enable_deletion_vectors):
     _assert_native_optimize_gpu_write_parity(spark_tmp_path, enable_deletion_vectors)
@@ -596,8 +592,6 @@ def test_delta_native_optimize_gpu_write(spark_tmp_path, enable_deletion_vectors
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_353(), reason="OPTIMIZE table command is supported in Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="OPTIMIZE table command is supported for Databricks 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", _optimize_deletion_vector_values, ids=idfn)
 def test_delta_optimize_partitioned_table(spark_tmp_path, enable_deletion_vectors):
     _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=["a"])
@@ -606,7 +600,7 @@ def test_delta_optimize_partitioned_table(spark_tmp_path, enable_deletion_vector
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
 @pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
 def test_delta_optimize_normalized_timestamp_partitions(
@@ -651,8 +645,6 @@ def test_delta_optimize_row_tracking_table(spark_tmp_path):
 @delta_lake
 @allow_non_gpu('ExecutedCommandExec', *delta_meta_allow)
 @pytest.mark.skipif(is_before_spark_353(), reason="Liquid clustering requires Delta 3.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
-                    reason="OPTIMIZE table command is supported for Databricks 17.3+")
 @pytest.mark.parametrize("enable_deletion_vectors", _optimize_clustered_deletion_vector_values, ids=idfn)
 def test_delta_optimize_clustered_table(spark_tmp_path, enable_deletion_vectors):
     _assert_optimize_parity(
@@ -832,7 +824,7 @@ def test_delta_optimize_zorder_with_deletion_vectors(spark_tmp_path, partition_c
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_43(),
+@pytest.mark.skipif(not is_supported_oss_delta_lake_43(),
                     reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
 @pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
 def test_delta_optimize_zorder_normalized_timestamp_partitions(

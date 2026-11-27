@@ -239,6 +239,61 @@ def test_delta_append_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
     assert_liquid_clustering_delta_logs_equivalent(data_path)
 
 
+@allow_non_gpu(*delta_meta_allow, "CreateTableExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Databricks plans a clustered INSERT's query a second time")
+def test_delta_repeated_clustered_insert_with_broadcast(spark_tmp_path, spark_tmp_table_factory):
+    # https://github.com/NVIDIA/cudf-spark/issues/17133
+    # Databricks plans a clustered INSERT's query a second time and rewrites that plan on its
+    # own. While an earlier plan with an equal broadcast was alive, the INSERT failed with
+    # "key not found: GpuBroadcastExchange".
+    inserts = 2
+    src_path = spark_tmp_path + "/DELTA_CLUSTERED_INSERT_SRC"
+    empty_path = spark_tmp_path + "/DELTA_CLUSTERED_INSERT_EMPTY"
+    query = f"""
+        SELECT t.a + m.n AS a, t.b, t.c, t.d, t.e, t.uniq_int
+        FROM {delta_path_identifier(src_path)} t
+        CROSS JOIN (SELECT coalesce(max(n), 0) AS n
+                    FROM {delta_path_identifier(empty_path)}) m
+    """
+    conf = copy_and_update(delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": "true",
+        "spark.sql.exchange.reuse": "true"})
+
+    def setup(spark):
+        view_name = spark_tmp_table_factory.get()
+        gen_df_and_replace_view(spark, view_name)
+        spark.table(view_name).write.format("delta").save(src_path)
+        spark.sql(f"CREATE TABLE {delta_path_identifier(empty_path)} (n long) USING DELTA")
+
+    with_cpu_session(setup, conf=conf)
+
+    def write_func(spark, path):
+        # The plugin tracks a planned GPU broadcast only while its plan is alive. This DataFrame
+        # is planned without AQE, as Databricks plans the INSERT's query the second time, and
+        # holding it keeps an equal broadcast alive while the INSERTs are planned.
+        spark.conf.set("spark.sql.adaptive.enabled", "false")
+        earlier = spark.sql(query)
+        earlier.collect()
+        spark.conf.set("spark.sql.adaptive.enabled", "true")
+        for i in range(inserts):
+            table_name = spark_tmp_table_factory.get()
+            create_clustered_table_sql(spark, table_name, f"{path}/{i}")
+            spark.sql(f"INSERT INTO {table_name} {query}")
+        assert earlier is not None
+
+    def read_func(spark, path):
+        df = spark.read.format("delta").load(f"{path}/0")
+        for i in range(1, inserts):
+            df = df.union(spark.read.format("delta").load(f"{path}/{i}"))
+        return df
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        write_func, read_func, spark_tmp_path + "/DELTA_CLUSTERED_INSERT_BROADCAST", conf=conf)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order

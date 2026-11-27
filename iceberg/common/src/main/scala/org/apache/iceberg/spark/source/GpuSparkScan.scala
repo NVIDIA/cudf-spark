@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatV
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
 import com.nvidia.spark.rapids.perf.{ExecutionEndCallbacks, PlanKey, ScanContext, ScanHistoryKey,
   ScanSplitHeuristic, SplitTotals}
-import org.apache.iceberg.ScanTaskGroup
+import org.apache.iceberg.{MetadataColumns, ScanTaskGroup}
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
@@ -46,6 +46,27 @@ abstract class GpuSparkScan(val cpuScan: Scan,
   def readTimestampWithoutZone: Boolean = readConf.handleTimestampWithoutZone()
 
   override def readSchema(): StructType = cpuScan.readSchema()
+
+  // Spark input-file expressions use the current split's path and offsets for the whole batch.
+  override lazy val coalesceAfter: Boolean = !queryUsesInputFile && projectsMetadataOrIdentityColumn
+
+  private def projectsMetadataOrIdentityColumn: Boolean = {
+    val schema = GpuSparkScanAccess.expectedSchema(cpuScan)
+    val columns = schema.columns().asScala
+    if (columns.isEmpty) {
+      false
+    } else if (columns.exists(field => MetadataColumns.isMetadataColumn(field.fieldId()))) {
+      true
+    } else {
+      // Older files can still supply an identity value after the table's partition spec changes.
+      val specs = GpuSparkScanAccess.table(cpuScan).specs().values().asScala
+      specs.exists { spec =>
+        spec.fields().asScala.exists { field =>
+          field.transform().isIdentity() && schema.findField(field.sourceId()) != null
+        }
+      }
+    }
+  }
 
   override def estimateStatistics(): Statistics = GpuSparkScanAccess.estimateStatistics(cpuScan)
 
@@ -146,7 +167,7 @@ object GpuSparkScan {
     }
 
     Try {
-      IcebergFormatVersionSupport.tagForFormatVersion(
+      IcebergFormatVersionSupport.tagForScan(
         GpuSparkScanAccess.table(meta.wrapped), meta)
     } match {
       case Failure(e) => meta.willNotWorkOnGpu(s"error examining Iceberg table version: $e")

@@ -17,7 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark":["340"],"carryForward":"sameMinor"}
 {"spark":["350","400","420"],"carryForward":"all"}
-{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -30,8 +30,9 @@ import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
-import org.apache.spark.sql.rapids.protobuf.{FlattenedFieldDescriptor, FlattenedSchemaArrays,
-  ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
+import org.apache.spark.sql.rapids.protobuf.{FieldReads, FlattenedFieldDescriptor,
+  FlattenedSchemaArrays, ProtobufExprInfo, ProtobufFieldDescriptor, ProtobufFieldInfo,
+  ProtobufMessageDescriptor, ProtobufPlannerOptions, ProtobufSchemaExtractor,
   ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
@@ -85,14 +86,23 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
         }
 
         private def planGpuDecode(schema: StructType): Either[String, Unit] = for {
+          // Spark returns an empty schema when it cannot represent any field of the message,
+          // and the decoder cannot build a struct column without children.
+          _ <- Either.cond(schema.fields.nonEmpty, (),
+            "from_protobuf without any field in the Spark schema is not supported on GPU")
           exprInfo <- SparkProtobufCompat.extractExprInfo(e)
           plannerOptions <- SparkProtobufCompat.parsePlannerOptions(exprInfo.options)
           _ <- checkSupportedOptions(exprInfo.options)
           msgDesc <- SparkProtobufCompat.resolveMessageDescriptor(exprInfo)
-          // Every field is decoded and returned until schema projection is supported.
+          // Fields the query does not read are still validated, like Spark does, but are
+          // returned as nulls. Equivalent deterministic decodes in the same plan read the union
+          // so GpuTieredProject CSE still decodes the message once; reference identity still
+          // matches non-deterministic inputs where semanticEquals returns false.
+          reads = FieldReads.analyze(this,
+            equivalentDecode(e, exprInfo, plannerOptions, SparkProtobufCompat.extractExprInfo, _))
           flatFields <- flattenMessage(schema, msgDesc, exprInfo.messageName,
-            plannerOptions.enumsAsInts, parentIdx = -1, depth = 0, pathPrefix = "",
-            Vector.empty)
+            plannerOptions.enumsAsInts, reads, parentVisible = true, parentIdx = -1, depth = 0,
+            pathPrefix = "", Vector.empty)
           arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields.toArray)
           // The JNI constructor validates the schema; fail here rather than on executors.
           _ <- Try(arrays.toJniDescriptor).toEither.left.map { t =>
@@ -132,6 +142,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             msgDesc: ProtobufMessageDescriptor,
             messageName: String,
             enumsAsInts: Boolean,
+            reads: FieldReads,
+            parentVisible: Boolean,
             parentIdx: Int,
             depth: Int,
             pathPrefix: String,
@@ -143,16 +155,58 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             if (pathPrefix.isEmpty) "root message" else s"protobuf field '$pathPrefix'"
           val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
           for {
-            _ <- SparkProtobufCompat.checkNoFieldsMissingFromSchema(schema, msgDesc, location)
+            hidden <- SparkProtobufCompat.hiddenFieldsMissingFromSchema(schema, msgDesc,
+              location, depth)
             fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
               schema, msgDesc, enumsAsInts, messageName)
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
-            result <- schema.fields.foldLeft(empty) { (fields, sf) =>
+            outputFields <- schema.fields.foldLeft(empty) { (fields, sf) =>
               fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
-                enumsAsInts, parentIdx, depth, pathOf(sf.name), _))
+                enumsAsInts, reads.child(sf.name), parentVisible, parentIdx, depth,
+                pathOf(sf.name), _))
             }
+            result <- flattenHiddenFields(hidden, parentIdx, depth, outputFields)
           } yield result
         }
+
+        /**
+         * Appends the message fields Spark leaves out of its schema, each followed by its own
+         * fields, so that the decoder parses and validates the whole omitted subtree. They go
+         * last at every level, because GpuFromProtobuf drops the trailing columns the decoder
+         * returns for them.
+         */
+        private def flattenHiddenFields(
+            hidden: Seq[ProtobufFieldDescriptor],
+            parentIdx: Int,
+            depth: Int,
+            flatFields: Vector[FlattenedFieldDescriptor])
+            : Either[String, Vector[FlattenedFieldDescriptor]] = {
+          val start: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
+          hidden.foldLeft(start) { (fields, fieldDesc) =>
+            fields.flatMap { current =>
+              for {
+                hiddenField <- ProtobufSchemaValidator.toHiddenMessageFieldDescriptor(fieldDesc,
+                  parentIdx = parentIdx, depth = depth,
+                  outputTypeId = DType.STRUCT.getTypeId.getNativeId)
+                children <- hiddenFieldsOf(fieldDesc)
+                result <- flattenHiddenFields(children, parentIdx = current.size, depth + 1,
+                  current :+ hiddenField)
+              } yield result
+            }
+          }
+        }
+
+        /** The declared fields of a hidden message, which are hidden messages themselves. */
+        private def hiddenFieldsOf(
+            fieldDesc: ProtobufFieldDescriptor): Either[String, Seq[ProtobufFieldDescriptor]] =
+          Try {
+            fieldDesc.messageDescriptor
+              .map(msg => msg.fieldNames.flatMap(msg.findField))
+              .getOrElse(Seq.empty)
+          }.toEither.left.map { t =>
+            s"Failed to read the message type of protobuf field '${fieldDesc.name}': " +
+              s"${t.getMessage}"
+          }
 
         private def flattenField(
             sf: StructField,
@@ -160,6 +214,8 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             msgDesc: ProtobufMessageDescriptor,
             messageName: String,
             enumsAsInts: Boolean,
+            reads: Option[FieldReads],
+            parentVisible: Boolean,
             parentIdx: Int,
             depth: Int,
             path: String,
@@ -175,11 +231,14 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             case ArrayType(elemType, _) => GpuFromProtobuf.sparkTypeToCudfIdOpt(elemType)
             case other => GpuFromProtobuf.sparkTypeToCudfIdOpt(other)
           }
+          // Non-nullable fields (proto2 required) stay output under a visible parent so
+          // UnsafeProjection never dereferences nulls in nullable=false struct slots.
+          val isVisible = reads.isDefined || (parentVisible && !sf.nullable)
           for {
             outputType <- outputTypeOpt.toRight(
               s"Unsupported Spark type for protobuf field '$path': ${sf.dataType}")
             flatField <- ProtobufSchemaValidator.toFlattenedFieldDescriptor(
-              path, sf, info, parentIdx, depth, outputType, isOutput = true)
+              path, sf, info, parentIdx, depth, outputType, isOutput = isVisible)
             withField = flatFields :+ flatField
             result <- nestedSchema match {
               case Some(st) =>
@@ -187,8 +246,10 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
                   childDesc <- Try(msgDesc.findField(sf.name).flatMap(_.messageDescriptor))
                     .toOption.flatten.toRight(
                       s"Failed to resolve the message type of protobuf field '$path'")
+                  // The children of a field that is not read are not read either.
                   fields <- flattenMessage(st, childDesc, s"$messageName.${sf.name}",
-                    enumsAsInts, parentIdx = flatFields.size, depth + 1, path, withField)
+                    enumsAsInts, reads.getOrElse(FieldReads.Unread), parentVisible = isVisible,
+                    parentIdx = flatFields.size, depth + 1, path, withField)
                 } yield fields
               case None => Right(withField)
             }
@@ -200,6 +261,37 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             malformedRowsAsNullFields, child)
       }
     )
+  }
+
+  /**
+   * Spark loads identical descriptor files into distinct byte arrays, so two independent
+   * `from_protobuf` calls fail Catalyst `semanticEquals` even though they convert to identical
+   * `GpuFromProtobuf` nodes when given the same output mask. Compare deterministic decodes by
+   * descriptor content and normalized planner options so GPU tiered projection CSE stays intact.
+   */
+  private[shims] def equivalentDecode(
+      target: UnaryExpression,
+      targetInfo: ProtobufExprInfo,
+      targetOptions: ProtobufPlannerOptions,
+      extractInfo: Expression => Either[String, ProtobufExprInfo],
+      candidate: Expression): Boolean = {
+    if ((candidate eq target) || candidate.semanticEquals(target)) {
+      true
+    } else if (target.deterministic && candidate.getClass == target.getClass &&
+        candidate.deterministic && candidate.dataType == target.dataType &&
+        candidate.asInstanceOf[UnaryExpression].child.semanticEquals(target.child)) {
+      (for {
+        info <- extractInfo(candidate)
+        opts <- SparkProtobufCompat.parsePlannerOptions(info.options)
+      } yield {
+        SparkProtobufCompat.unsupportedOptions(info.options).isEmpty &&
+          info.messageName == targetInfo.messageName &&
+          info.descriptorSource == targetInfo.descriptorSource &&
+          opts == targetOptions
+      }).getOrElse(false)
+    } else {
+      false
+    }
   }
 
 }

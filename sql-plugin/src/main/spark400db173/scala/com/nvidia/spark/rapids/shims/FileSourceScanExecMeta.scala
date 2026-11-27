@@ -22,7 +22,6 @@ package com.nvidia.spark.rapids.shims
 import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.execution.FileSourceScanExec
-import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.rapids.ExternalSource
 
 class FileSourceScanExecMeta(plan: FileSourceScanExec,
@@ -33,15 +32,8 @@ class FileSourceScanExecMeta(plan: FileSourceScanExec,
 
   override def tagPlanForGpu(): Unit = {
     super.tagPlanForGpu()
-    // DB-17.3 has no Delta provider. If the file format is a ParquetFileFormat subclass
-    // (e.g. DeltaParquetFileFormat) not handled by ExternalSource, fall back the scan
-    // to CPU so the subclass can handle format-specific features like deletion vectors
-    // and skip_row columns.
-    val fmtCls = wrapped.relation.fileFormat.getClass
-    if (classOf[ParquetFileFormat].isAssignableFrom(fmtCls) &&
-        fmtCls != classOf[ParquetFileFormat] &&
-        !ExternalSource.isSupportedFormat(fmtCls)) {
-      willNotWorkOnGpu(s"unsupported file format: ${fmtCls.getCanonicalName}")
-    }
+    // Keeps unclaimed formats such as DeltaParquetFileFormat on the CPU so they can handle
+    // format-specific features like deletion vectors and skip_row columns.
+    ExternalSource.tagUnclaimedParquetSubclass(this)
   }
 }

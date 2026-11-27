@@ -23,9 +23,10 @@
 # Options:
 #   --port N          client port, the server binds its REST API at N+1 (default 18080)
 #   --uc-version V    Unity Catalog version; this suite is pinned to 0.6.0 (default 0.6.0)
-#   --delta-version V Delta Lake version, either 4.2.0 or 4.3.0 (default 4.2.0)
+#   --delta-version V Delta Lake version: 4.2.0, 4.3.0, 4.3.1, or 4.3.2.2 (default 4.2.0)
 #   --run-dir DIR     parent for the server's scratch directory (default $TMPDIR or /tmp)
 #   --refresh         re-resolve the cached classpaths before starting
+#   --resolve-only    resolve Maven classpaths and exit before starting the server
 #
 # Without a command the server runs in the foreground and prints an env file to source from
 # another terminal, which keeps one server alive across repeated test runs. With a command the
@@ -44,6 +45,7 @@ DELTA_VERSION=${DELTA_VERSION:-'4.2.0'}
 UC_PORT=${UNITY_CATALOG_PORT:-'18080'}
 RUN_DIR_BASE=${TMPDIR:-/tmp}
 REFRESH=0
+RESOLVE_ONLY=0
 COMMAND=()
 
 # The fake credentials the server vends and CredentialTestFileSystem asserts on.
@@ -87,9 +89,10 @@ Usage:
 Options:
   --port N          client port, the server binds its REST API at N+1 (default 18080)
   --uc-version V    Unity Catalog version; this suite is pinned to 0.6.0 (default 0.6.0)
-  --delta-version V Delta Lake version, either 4.2.0 or 4.3.0 (default 4.2.0)
+  --delta-version V Delta Lake version: 4.2.0, 4.3.0, 4.3.1, or 4.3.2.2 (default 4.2.0)
   --run-dir DIR     parent for the server's scratch directory (default $TMPDIR or /tmp)
   --refresh         re-resolve the cached classpaths before starting
+  --resolve-only    resolve Maven classpaths and exit before starting the server
 EOF
 }
 
@@ -100,17 +103,22 @@ while [[ $# -gt 0 ]]; do
     --delta-version) DELTA_VERSION="$2"; shift 2 ;;
     --run-dir) RUN_DIR_BASE="$2"; shift 2 ;;
     --refresh) REFRESH=1; shift ;;
+    --resolve-only) RESOLVE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; COMMAND=("$@"); break ;;
     *) die "unknown option '$1', see --help" ;;
   esac
 done
 
+if (( RESOLVE_ONLY && ${#COMMAND[@]} )); then
+  die "--resolve-only cannot run a server command"
+fi
+
 if command -v curl >/dev/null 2>&1; then
   HTTP_CLIENT='curl'
 elif command -v wget >/dev/null 2>&1; then
   HTTP_CLIENT='wget'
-else
+elif (( ! RESOLVE_ONLY )); then
   die "curl or wget is required to check Unity Catalog server readiness"
 fi
 
@@ -137,8 +145,8 @@ SPARK_LINE=${SPARK_VER%.*}
 [[ "$SCALA_BINARY_VER" == "2.13" ]] ||
   die "Delta Lake $DELTA_VERSION requires Scala 2.13, found $SCALA_BINARY_VER"
 case "$DELTA_VERSION" in
-  4.2.0|4.3.0) ;;
-  *) die "Unity Catalog tests support Delta Lake 4.2.0 and 4.3.0, found $DELTA_VERSION" ;;
+  4.2.0|4.3.0|4.3.1|4.3.2.2) ;;
+  *) die "Unity Catalog tests support Delta Lake 4.2.0, 4.3.0, 4.3.1, and 4.3.2.2, found $DELTA_VERSION" ;;
 esac
 case "$SPARK_VER" in
   4.0.1|4.0.5|4.1.1|4.1.4) ;;
@@ -243,6 +251,10 @@ spark_excludes="com.fasterxml.jackson.core,com.fasterxml.jackson.module"
 spark_excludes+=",com.fasterxml.jackson.dataformat,com.fasterxml.jackson.datatype"
 spark_excludes+=",org.apache.hadoop,com.google.cloud.bigdataoss"
 resolve_classpath "$SPARK_CP_FILE" "$spark_coordinates" "$spark_excludes"
+
+if (( RESOLVE_ONLY )); then
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Server
