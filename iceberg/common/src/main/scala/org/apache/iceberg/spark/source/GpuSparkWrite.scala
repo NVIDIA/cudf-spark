@@ -603,7 +603,7 @@ class GpuPartitionedDataWriter(
     typeId == TypeID.FLOAT || typeId == TypeID.DOUBLE
   }
 
-  private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
+  protected def createDelegate(): PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {
       new GpuFanoutDataWriter(writerFactory, fileFactory, io,
         targetFileSize)
@@ -618,6 +618,9 @@ class GpuPartitionedDataWriter(
       new GpuClusteredDataWriter(writerFactory, fileFactory, io,
         targetFileSize)
     }
+
+  private lazy val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
+    createDelegate()
 
   private val partitioner = new GpuIcebergSpecPartitioner(spec, dataSchema.asStruct())
 

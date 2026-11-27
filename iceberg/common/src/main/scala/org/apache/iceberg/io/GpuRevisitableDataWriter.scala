@@ -18,6 +18,7 @@ package org.apache.iceberg.io
 
 import java.util.ArrayList
 
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.SpillableColumnarBatch
 import org.apache.iceberg.{DataFile, PartitionData, PartitionSpec, StructLike}
 import org.apache.iceberg.spark.source.GpuSparkFileWriterFactory
@@ -46,15 +47,17 @@ class GpuRevisitableDataWriter(
       batch: SpillableColumnarBatch,
       spec: PartitionSpec,
       partition: StructLike): Unit = {
-    require(!closed, "Cannot write to a closed writer")
-    if (currentWriter == null || currentSpecId != spec.specId() ||
-        currentPartition != currentPartition.copyFor(partition)) {
-      closeCurrentWriter()
-      currentSpecId = spec.specId()
-      // Keep a snapshot: callers may reuse their partition object for the next batch.
-      currentPartition = StructLikeWrapper.forType(spec.partitionType())
-        .set(new PartitionData(spec.partitionType()).copyFor(partition))
-      currentWriter = newWriter(spec, currentPartition.get())
+    closeOnExcept(batch) { _ =>
+      require(!closed, "Cannot write to a closed writer")
+      if (currentWriter == null || currentSpecId != spec.specId() ||
+          currentPartition != currentPartition.copyFor(partition)) {
+        closeCurrentWriter()
+        currentSpecId = spec.specId()
+        // Keep a snapshot: callers may reuse their partition object for the next batch.
+        currentPartition = StructLikeWrapper.forType(spec.partitionType())
+          .set(new PartitionData(spec.partitionType()).copyFor(partition))
+        currentWriter = newWriter(spec, currentPartition.get())
+      }
     }
     currentWriter.write(batch)
   }

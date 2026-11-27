@@ -33,10 +33,20 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 class GpuRevisitableDataWriterSuite extends AnyFunSuite {
+  private class CountingBatch(numRows: Int) extends JustRowsColumnarBatch(numRows) {
+    var closeCount = 0
+
+    override def close(): Unit = {
+      closeCount += 1
+      super.close()
+    }
+  }
+
   private class RecordingWriter extends GpuRevisitableDataWriter(null, null, null, 1024) {
     val opened = ArrayBuffer.empty[RecordingFileWriter]
     var active = 0
     var peakOpen = 0
+    var newWriterFailure: Option[IOException] = None
 
     class RecordingFileWriter(val specId: Int, val partition: StructLike)
       extends FileWriter[SpillableColumnarBatch, DataWriteResult] {
@@ -71,6 +81,10 @@ class GpuRevisitableDataWriterSuite extends AnyFunSuite {
     override protected def newWriter(spec: PartitionSpec, partition: StructLike):
         FileWriter[SpillableColumnarBatch, DataWriteResult] = {
       assert(active == 0, "The preceding partition writer must close before opening another")
+      newWriterFailure.foreach { failure =>
+        newWriterFailure = None
+        throw failure
+      }
       val writer = new RecordingFileWriter(spec.specId(), partition)
       opened += writer
       active += 1
@@ -158,11 +172,11 @@ class GpuRevisitableDataWriterSuite extends AnyFunSuite {
     val partition = GenericRecord.create(partitionSpec.partitionType())
     val writer = new RecordingWriter
     writer.close()
-    withResource(new JustRowsColumnarBatch(1)) { batch =>
-      intercept[IllegalArgumentException] {
-        writer.write(batch, partitionSpec, partition)
-      }
+    val batch = new CountingBatch(1)
+    intercept[IllegalArgumentException] {
+      writer.write(batch, partitionSpec, partition)
     }
+    assert(batch.closeCount == 1)
     assert(writer.opened.isEmpty)
   }
 
@@ -176,16 +190,35 @@ class GpuRevisitableDataWriterSuite extends AnyFunSuite {
       val failure = new IOException("failed to close partition writer")
       writer.opened.head.closeFailure = Some(failure)
       partition.set(0, Double.box(0.0d))
-      withResource(new JustRowsColumnarBatch(1)) { batch =>
-        val thrown = intercept[IOException] {
-          writer.write(batch, partitionSpec, partition)
-        }
-        assert(thrown eq failure)
+      val batch = new CountingBatch(1)
+      val thrown = intercept[IOException] {
+        writer.write(batch, partitionSpec, partition)
       }
+      assert(thrown eq failure)
+      assert(batch.closeCount == 1)
       assert(writer.opened.size == 1)
       assert(writer.active == 1)
     }
     assert(writer.active == 0)
     assert(writer.result().dataFiles().size() == 1)
+  }
+
+  test("a failed newWriter closes the incoming batch") {
+    val partitionSpec = spec(Types.DoubleType.get())
+    val partition = GenericRecord.create(partitionSpec.partitionType())
+    val writer = new RecordingWriter
+    withResource(writer) { _ =>
+      partition.set(0, Double.box(-0.0d))
+      val failure = new IOException("failed to open partition writer")
+      writer.newWriterFailure = Some(failure)
+      val batch = new CountingBatch(1)
+      val thrown = intercept[IOException] {
+        writer.write(batch, partitionSpec, partition)
+      }
+      assert(thrown eq failure)
+      assert(batch.closeCount == 1)
+      assert(writer.opened.isEmpty)
+      assert(writer.active == 0)
+    }
   }
 }

@@ -596,80 +596,93 @@ class GpuDynamicPartitionDataSingleWriter(
         }
       }
     }
-    withResource(combined) { _ =>
+    val ordered = withResource(combined) { _ =>
       withResource(GpuColumnVector.from(combined)) { table =>
-        // Spark considers signed zeros equal, including before secondary partition/bucket keys.
-        // Only batches containing negative zero need their input ordering refined.
-        val needsSort = keyTypes.indices.exists { i =>
-          keyTypes(i) match {
-            case FloatType => withResource(Scalar.fromInt(-1))(table.getColumn(i).contains)
-            case DoubleType => withResource(Scalar.fromLong(-1L))(table.getColumn(i).contains)
-            case _ => false
-          }
-        }
-        val ordered = if (needsSort) {
-          // Preserve upstream ordering within each partition/bucket, including bucket sort keys.
-          val columns = (0 until table.getNumberOfColumns).map(table.getColumn)
-          val ordering = keyTypes.indices.map(OrderByArg.asc(_, nullsSmallest)) :+
-            OrderByArg.asc(columns.size)
-          withResource(Scalar.fromInt(0)) { zero =>
-            withResource(CudfColumnVector.sequence(zero, table.getRowCount.toInt)) { rowIds =>
-              withResource(new Table((columns :+ rowIds): _*)) { indexed =>
-                withResource(indexed.orderBy(ordering: _*)) { sorted =>
-                  new Table(columns.indices.map(sorted.getColumn): _*)
-                }
-              }
+        orderFloatingPartitionTable(table, keyTypes)
+      }
+    }
+    withResource(ordered) { sorted =>
+      buildFloatingSplitPacks(sorted, keyTypes, dataTypes)
+    }
+  }
+
+  private def orderFloatingPartitionTable(table: Table, keyTypes: Array[DataType]): Table = {
+    // Spark considers signed zeros equal, including before secondary partition/bucket keys.
+    // Only batches containing negative zero need their input ordering refined.
+    val needsSort = keyTypes.indices.exists { i =>
+      keyTypes(i) match {
+        case FloatType => withResource(Scalar.fromInt(-1))(table.getColumn(i).contains)
+        case DoubleType => withResource(Scalar.fromLong(-1L))(table.getColumn(i).contains)
+        case _ => false
+      }
+    }
+    if (needsSort) {
+      // Preserve upstream ordering within each partition/bucket, including bucket sort keys.
+      val columns = (0 until table.getNumberOfColumns).map(table.getColumn)
+      val ordering = keyTypes.indices.map(OrderByArg.asc(_, nullsSmallest)) :+
+        OrderByArg.asc(columns.size)
+      withResource(Scalar.fromInt(0)) { zero =>
+        withResource(CudfColumnVector.sequence(zero, table.getRowCount.toInt)) { rowIds =>
+          withResource(new Table((columns :+ rowIds): _*)) { indexed =>
+            withResource(indexed.orderBy(ordering: _*)) { sorted =>
+              new Table(columns.indices.map(sorted.getColumn): _*)
             }
           }
-        } else {
-          new Table((0 until table.getNumberOfColumns).map(table.getColumn): _*)
         }
-        withResource(ordered) { sorted =>
-          withResource(new Table(keyTypes.indices.map(sorted.getColumn): _*)) { keys =>
-            withResource(distinctAndSort(keys)) { distinct =>
-              val splitIds = splitIndexes(keys, distinct)
-              val hostBatch = withResource(
-                  GpuFloatingPointKeyUtils.decode(distinct, keyTypes, orderPreserving = true)) {
-                decoded =>
-                  withResource(GpuColumnVector.from(decoded)) { decodedTable =>
-                    copyToHostAsBatch(decodedTable, keyTypes)
-                  }
+      }
+    } else {
+      new Table((0 until table.getNumberOfColumns).map(table.getColumn): _*)
+    }
+  }
+
+  private def buildFloatingSplitPacks(
+      sorted: Table,
+      keyTypes: Array[DataType],
+      dataTypes: Array[DataType]): Array[SplitPack] = {
+    val (splitIds, hostBatch) =
+      withResource(new Table(keyTypes.indices.map(sorted.getColumn): _*)) { keys =>
+        withResource(distinctAndSort(keys)) { distinct =>
+          val ids = splitIndexes(keys, distinct)
+          val host = withResource(
+              GpuFloatingPointKeyUtils.decode(distinct, keyTypes, orderPreserving = true)) {
+            decoded =>
+              withResource(GpuColumnVector.from(decoded)) { decodedTable =>
+                copyToHostAsBatch(decodedTable, keyTypes)
               }
-              withResource(hostBatch) { host =>
-                val getPart = genGetPartValuesFunc(host)
-                val getBucket = genGetBucketIdFunc(host)
-                if (dataTypes.isEmpty) {
-                  (0 until host.numRows()).safeMap { i =>
-                    val part = getPart(i)
-                    val bucket = getBucket(i)
-                    val rows = splitIds(i) - (if (i == 0) 0 else splitIds(i - 1))
-                    val data = new ColumnarBatch(
-                      Array.empty[org.apache.spark.sql.vectorized.ColumnVector], rows)
-                    closeOnExcept(data) { _ =>
-                      SplitPack(SpillableColumnarBatch(data,
-                        SpillPriorities.ACTIVE_BATCHING_PRIORITY), part, bucket)
-                    }
-                  }.toArray
-                } else {
-                  val dataColumns = (keyTypes.length until sorted.getNumberOfColumns)
-                    .map(sorted.getColumn)
-                  withResource(new Table(dataColumns: _*)) { data =>
-                    withResource(data.contiguousSplit(splitIds: _*)) { splits =>
-                      (0 until host.numRows()).safeMap { i =>
-                        val split = splits(i)
-                        splits(i) = null
-                        closeOnExcept(split) { _ =>
-                          val part = getPart(i)
-                          val bucket = getBucket(i)
-                          SplitPack(SpillableColumnarBatch(split, dataTypes,
-                            SpillPriorities.ACTIVE_BATCHING_PRIORITY), part, bucket)
-                        }
-                      }.toArray
-                    }
-                  }
-                }
+          }
+          (ids, host)
+        }
+      }
+    withResource(hostBatch) { host =>
+      val getPart = genGetPartValuesFunc(host)
+      val getBucket = genGetBucketIdFunc(host)
+      if (dataTypes.isEmpty) {
+        (0 until host.numRows()).safeMap { i =>
+          val part = getPart(i)
+          val bucket = getBucket(i)
+          val rows = splitIds(i) - (if (i == 0) 0 else splitIds(i - 1))
+          val data = new ColumnarBatch(
+            Array.empty[org.apache.spark.sql.vectorized.ColumnVector], rows)
+          closeOnExcept(data) { _ =>
+            SplitPack(SpillableColumnarBatch(data,
+              SpillPriorities.ACTIVE_BATCHING_PRIORITY), part, bucket)
+          }
+        }.toArray
+      } else {
+        val dataColumns = (keyTypes.length until sorted.getNumberOfColumns)
+          .map(sorted.getColumn)
+        withResource(new Table(dataColumns: _*)) { data =>
+          withResource(data.contiguousSplit(splitIds: _*)) { splits =>
+            (0 until host.numRows()).safeMap { i =>
+              val split = splits(i)
+              splits(i) = null
+              closeOnExcept(split) { _ =>
+                val part = getPart(i)
+                val bucket = getBucket(i)
+                SplitPack(SpillableColumnarBatch(split, dataTypes,
+                  SpillPriorities.ACTIVE_BATCHING_PRIORITY), part, bucket)
               }
-            }
+            }.toArray
           }
         }
       }
@@ -1039,8 +1052,9 @@ class GpuDynamicPartitionDataConcurrentWriter(
           val gps = keysAndGroups.getGroups.safeMap { gp =>
             withResource(gp.getTable) { gpTable =>
               withResource(new Table(allColsIds.map(gpTable.getColumn): _*)) { allTable =>
-                SpillableColumnarBatch(GpuColumnVector.from(allTable, allTypes),
-                  SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+                closeOnExcept(GpuColumnVector.from(allTable, allTypes)) { batch =>
+                  SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+                }
               }
             }
           }

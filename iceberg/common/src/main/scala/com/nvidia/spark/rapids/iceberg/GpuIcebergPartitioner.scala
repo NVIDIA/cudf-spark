@@ -24,6 +24,7 @@ import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import org.apache.iceberg.{PartitionField, PartitionSpec, Schema, StructLike}
 import org.apache.iceberg.spark.{GpuTypeToSparkType, SparkStructLike}
 import org.apache.iceberg.spark.functions._
@@ -102,12 +103,12 @@ class GpuIcebergPartitioner(
       val partitions = splitRet.getGroups
 
       // Combine the partition keys and partitioned tables
-      partitionKeys.zip(partitions).map { case (partKey, partition) =>
+      partitionKeys.zip(partitions).toSeq.safeMap { case (partKey, partition) =>
         ColumnarBatchWithPartition(SpillableColumnarBatch(partition,
           valueSparkType,
           SpillPriorities.ACTIVE_BATCHING_PRIORITY),
           partKey)
-      }.toSeq
+      }
     }
   }
 }
@@ -142,19 +143,24 @@ class GpuIcebergSpecPartitioner(val spec: PartitionSpec,
    */
   def partition(input: ColumnarBatch): Seq[ColumnarBatchWithPartition] = {
     if (input.numRows() == 0) {
-      return Seq.empty
+      return withResource(input)(_ => Seq.empty)
     }
 
-    withResource(input) { _ =>
-      val keyBatch = {
-        val keyCols = partitionExprs.safeMap(_.columnarEval(input))
-        closeOnExcept(keyCols) { _ =>
-          new ColumnarBatch(keyCols.toArray, input.numRows())
+    val spillableInput = closeOnExcept(input) { _ =>
+      SpillableColumnarBatch(input, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+    }
+    withRetryNoSplit(spillableInput) { scb =>
+      withResource(scb.getColumnarBatch()) { batch =>
+        val keyBatch = {
+          val keyCols = partitionExprs.safeMap(_.columnarEval(batch))
+          closeOnExcept(keyCols) { _ =>
+            new ColumnarBatch(keyCols.toArray, batch.numRows())
+          }
         }
-      }
 
-      withResource(keyBatch) { _ =>
-        partitioner.partition(keyBatch, input)
+        withResource(keyBatch) { _ =>
+          partitioner.partition(keyBatch, batch)
+        }
       }
     }
   }
