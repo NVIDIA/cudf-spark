@@ -339,6 +339,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       "input order, as first(), last() or row_number() over ties can. Its fetch failure can " +
       "also make Spark drop every map output on that executor, so a concurrent query that reads " +
       "a GPU round-robin shuffle there can fail. Keep this key off for such workloads.")
+    .internal()
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
