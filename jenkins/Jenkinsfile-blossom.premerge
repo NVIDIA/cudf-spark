@@ -16,9 +16,11 @@
  */
 
 /**
+ * Builds the Spark plugin in Blossom premerge.
  *
- * Jenkinsfile for building rapids-plugin on blossom
- *
+ * DEPRECATION NOTICE
+ * This Blossom premerge pipeline and its hardcoded Spark and Skills image
+ * references will be retired in release 27.02.
  */
 import hudson.model.Result
 import hudson.model.Run
@@ -32,14 +34,11 @@ def githubHelper // blossom github helper
 def TEMP_IMAGE_BUILD = true
 def CUDA_NAME = 'cuda12.0.1' // hardcode cuda version for docker build part
 def PREMERGE_DOCKERFILE = 'jenkins/Dockerfile-blossom.ubuntu'
-def IMAGE_PREMERGE // temp image for premerge test
+def IMAGE_PREMERGE
 def IMAGE_DB = pod.getCPUYAML("${common.ARTIFACTORY_NAME}/sw-spark-docker/spark:rapids-databricks-ubuntu22")
-// Skills uses a separate Rocky 8 toolchain. Keep this in sync with the Skills Dockerfile
-// and the Docker Manager stable image tag.
 def SKILLS_CUDA_VERSION = '12.9.1'
 def SKILLS_PREMERGE_DOCKERFILE = 'skills/ci/Dockerfile.pre-merge'
-def IMAGE_SKILLS = "${common.ARTIFACTORY_NAME}/sw-spark-docker/plugin:" +
-    "skills-premerge-rockylinux8-cuda${SKILLS_CUDA_VERSION}-blossom-dev"
+def IMAGE_SKILLS = "${common.ARTIFACTORY_NAME}/sw-spark-docker/nvidia/cudf-spark/skills-build:main"
 def PREMERGE_TAG
 def SKILLS_PREMERGE_TAG
 def skipped = false
@@ -184,8 +183,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             docker.build(IMAGE_PREMERGE, "--network=host -f ${PREMERGE_DOCKERFILE} --build-arg CUDA_VER=$CUDA_VER -t $IMAGE_PREMERGE .")
                             uploadDocker(IMAGE_PREMERGE)
                         } else {
-                            // if no pre-merge dockerfile change, use nightly image
-                            IMAGE_PREMERGE = "$ARTIFACTORY_NAME/sw-spark-docker-local/plugin:dev-ubuntu22-$CUDA_NAME-blossom-dev"
+                            IMAGE_PREMERGE = "$ARTIFACTORY_NAME/sw-spark-docker/nvidia/cudf-spark/spark-build:main-ubuntu22.04"
                         }
                     }
                 }
@@ -607,7 +605,7 @@ boolean databricksTestNeeded() {
             # get merge BASE from merged pull request. Log message e.g. "Merge HEAD into BASE"
             BASE_REF=$(git --no-pager log --oneline -1 | awk '{ print $NF }')
             # Search for Databricks/Delta-related paths, including:
-            # - numbered shim directories such as spark350db143/ and spark400db173/
+            # - numbered shim directories such as spark400db173/ and spark410db183/
             # - all Delta Lake paths such as delta-lake/delta-33x/ and scala2.13/delta-lake/
             # - any path containing "databricks", such as jenkins/databricks/
             git --no-pager diff --name-only ${BASE_REF} HEAD | grep -E 'sql-plugin/src/main/.*[0-9x-]db[0-9]*/|(^|/)delta-lake/|databricks' || true

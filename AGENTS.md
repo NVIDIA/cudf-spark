@@ -198,12 +198,12 @@ spark-rapids-shim-json-lines ***/
 - When modifying a shim, update ALL related Spark version shims
   (the same logical change may need different adaptations per
   version — do not blindly copy-paste).
-- `db` suffix (e.g., `350db143`, `400db173`) = Databricks-specific shim.
+- `db` suffix (e.g., `400db173`, `410db183`) = Databricks-specific shim.
 - **Scala 2.12 vs 2.13**: `sql-plugin` shims work identically for
   both Scala versions. After modifying any `pom.xml`, run
   `./build/make-scala-version-build-files.sh 2.13` to sync.
 - **Delta Lake** uses version-specific Maven modules instead of the
-  JSON annotation (e.g., `delta-20x/`, `delta-spark350db143/`). Each
+  JSON annotation (e.g., `delta-20x/`, `delta-spark400db173/`). Each
   module compiles only for its target Spark+Delta combination.
 
 #### Required shim compatibility preflight

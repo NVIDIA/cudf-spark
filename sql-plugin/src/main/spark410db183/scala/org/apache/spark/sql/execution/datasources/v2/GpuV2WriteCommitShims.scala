@@ -20,6 +20,8 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
+import com.nvidia.spark.rapids.shims.GpuMergeRowMetricsShims
+
 import org.apache.spark.sql.connector.write.{BatchWrite, MergeSummaryImpl, WriterCommitMessage,
   WriteSummary}
 import org.apache.spark.sql.execution.SparkPlan
@@ -74,6 +76,6 @@ object GpuV2WriteCommitShims extends AdaptiveSparkPlanHelper {
   }
 
   private def getMetricValue(metrics: Map[String, SQLMetric], name: String): Long = {
-    metrics.get(name).map(_.value).getOrElse(-1L)
+    metrics.get(name).map(GpuMergeRowMetricsShims.metricValue).getOrElse(-1L)
   }
 }

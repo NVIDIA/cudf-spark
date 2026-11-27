@@ -17,18 +17,18 @@
 
 # This script sets the  environment to run tests of RAPIDS Accelerator for Apache Spark on DB.
 # All the environments can be overwritten by shell variables:
-#   LOCAL_JAR_PATH: Location of the RAPIDS jars
+#   LOCAL_JAR_PATH: Directory containing the prebuilt RAPIDS jars and pytest bundle
 #   SPARK_CONF: Spark configuration parameters
-#   BASE_SPARK_VERSION: Spark version [3.2.1, 3.3.0]. Default is pulled from current instance.
+#   BASE_SPARK_VERSION: Spark version. Default is read from the current instance.
 #   SHUFFLE_SPARK_SHIM: Set the default value for the shuffle shim. For Databricks
-#                       versions, use the matching buildver, such as spark350db143
+#                       versions, use the matching buildver, such as spark400db173
 #   TEST_MODE: Can be one of the following (`DEFAULT` is the default value):
 #       - DEFAULT: all tests except cudf_udf tests
 #       - DELTA_LAKE_ONLY: delta_lake tests only
 #       - MULTITHREADED_SHUFFLE: shuffle tests only
 # Usage:
-# - Running tests on DB10.4/Spark 3.2.1:
-#       `BASE_SPARK_VERSION=3.2.1 ./jenkins/databricks/test.sh`
+# - Running tests on DBR 17.3/Spark 4.0.0:
+#       `BASE_SPARK_VERSION=4.0.0 ./jenkins/databricks/test.sh`
 # To add support of a new runtime:
 #   1. Check if any more dependencies need to be added to the apt/pip install commands.
 #   2. If you had to go beyond the above steps to support the new runtime, then update the
@@ -48,20 +48,37 @@ set -ex
 # - CI_PART1 or CI_PART2 : part1 or part2 of the tests run in parallel from CI.
 #   CI_PART2 includes nightly resource-consuming tests to keep the split runtimes closer.
 TEST_MODE=${TEST_MODE:-'DEFAULT'}
+case "$TEST_MODE" in
+    DEFAULT|CI_PART1|CI_PART2|DELTA_LAKE_ONLY|MULTITHREADED_SHUFFLE|PYARROW_ONLY) ;;
+    *) echo "Unsupported TEST_MODE=$TEST_MODE" >&2; exit 1 ;;
+esac
 
-# CI_PART2 untars the spark-rapids tgz built by C1_PART1 instead of rebuilding it
+# CI_PART2 untars the spark-rapids tgz built by CI_PART1 instead of rebuilding it.
 PLUGIN_BUILT_TGZ=${PLUGIN_BUILT_TGZ:-"$1"}
 if [[ "$TEST_MODE" == "CI_PART2"  && -z "$LOCAL_JAR_PATH" && -f "$PLUGIN_BUILT_TGZ" ]]; then
-    tar -zxf $PLUGIN_BUILT_TGZ
+    tar -zxf "$PLUGIN_BUILT_TGZ"
 fi
 
 SOURCE_PATH="/home/ubuntu/spark-rapids"
-[[ -d "$LOCAL_JAR_PATH" ]] && cd $LOCAL_JAR_PATH || cd $SOURCE_PATH
+if [[ -n "$LOCAL_JAR_PATH" ]]; then
+    if [[ ! -d "$LOCAL_JAR_PATH" ]]; then
+        echo "Prebuilt jar directory does not exist: $LOCAL_JAR_PATH" >&2
+        exit 1
+    fi
+    cd -- "$LOCAL_JAR_PATH"
+else
+    cd "$SOURCE_PATH"
+fi
 
 # Install python packages for integration tests
 source jenkins/databricks/setup.sh
 # Init common variables like SPARK_HOME, spark configs
 source jenkins/databricks/common_vars.sh
+
+# common_vars.sh reimports EXTRA_ENVS. Use the directory selected above for jar lookup.
+if [[ -n "$LOCAL_JAR_PATH" ]]; then
+    export LOCAL_JAR_PATH="$PWD"
+fi
 
 SPARK_READINESS_ONLY=${SPARK_READINESS_ONLY:-0}
 if [[ "$SPARK_READINESS_ONLY" == "1" ]]; then
@@ -127,6 +144,43 @@ rapids_shuffle_smoke_test() {
 run_pyarrow_tests() {
     SPARK_SUBMIT_FLAGS="$SPARK_CONF" \
         bash integration_tests/run_pyspark_from_build.sh -m pyarrow_test --pyarrow_test --runtime_env="databricks" --test_type=$TEST_TYPE
+}
+
+run_delta_tests() {
+    local -a delta_env=(DRIVER_MEMORY=4g)
+    local delta_run_dir
+    if [[ -n "$LOCAL_JAR_PATH" ]]; then
+        # Isolate this pass from other pytest reports and keep it discoverable by Jenkins.
+        mkdir -p integration_tests/target
+        while true; do
+            delta_run_dir=$(mktemp -d "$PWD/integration_tests/target/run_dir-delta-XXXXXX")
+            # Reject generated names that can trigger SPARK-44242.
+            if [[ ! "${delta_run_dir##*/}" =~ [xX][mM][xXsS] ]]; then
+                break
+            fi
+            rmdir "$delta_run_dir"
+        done
+        delta_env+=("RUN_DIR=$delta_run_dir")
+    fi
+
+    env "${delta_env[@]}" bash integration_tests/run_pyspark_from_build.sh \
+        --runtime_env=databricks -m delta_lake --delta_lake --test_type="$TEST_TYPE"
+
+    if [[ -n "$LOCAL_JAR_PATH" ]]; then
+        # Pytest can return zero when every selected test is skipped or xfailed.
+        "${PYSPARK_PYTHON:-python3}" - "$delta_run_dir" <<'PY'
+import sys
+from pathlib import Path
+from xml.etree import ElementTree
+
+report_dir = Path(sys.argv[1])
+for report in report_dir.glob("TEST-pytest-*.xml"):
+    if any(all(case.find(outcome) is None for outcome in ("skipped", "failure", "error"))
+           for case in ElementTree.parse(report).iter("testcase")):
+        sys.exit(0)
+sys.exit(f"No passing Delta Lake tests found in {report_dir}")
+PY
+    fi
 }
 
 # Move selected tests to CI_PART2 so the split CI jobs finish closer together.
@@ -208,34 +262,26 @@ if [[ $TEST_MODE == "DEFAULT" || $TEST_MODE == "CI_PART1" ]]; then
     fi
 fi
 
-## Run tests with jars building from the spark-rapids source code
-if [[ "$(pwd)" == "$SOURCE_PATH" ]]; then
-    if [[ "$TEST_MODE" == "CI_PART2" ]]; then
-        ## Run the balanced integration tests moved out of CI_PART1
-        TESTS="${CI_PART2_BALANCED_TESTS// /.py }.py" \
-            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
-                --test_type=$TEST_TYPE
-    fi
+if [[ "$TEST_MODE" == "CI_PART2" ]]; then
+    ## Run the balanced integration tests moved out of CI_PART1
+    TESTS="${CI_PART2_BALANCED_TESTS// /.py }.py" \
+        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+            --test_type=$TEST_TYPE
+fi
 
-    ## Run cache tests
-    if [[ "$IS_SPARK_321_OR_LATER" -eq "1" && ("$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2") ]]; then
-        PYSP_TEST_spark_sql_cache_serializer=${PCBS_CONF} \
-            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE -k cache_test
-    fi
+## Run cache tests
+if [[ "$IS_SPARK_321_OR_LATER" -eq "1" && ("$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "CI_PART2") ]]; then
+    PYSP_TEST_spark_sql_cache_serializer=${PCBS_CONF} \
+        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE -k cache_test
+fi
 
-    if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
-        ## Run Delta Lake tests
-        DRIVER_MEMORY="4g" \
-            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
-                -m "delta_lake" --delta_lake --test_type=$TEST_TYPE
-    fi
+if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "CI_PART2" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
+    run_delta_tests
+fi
 
-    if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; then
-        ## Mutithreaded Shuffle test
-        rapids_shuffle_smoke_test
-    fi
-    if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "PYARROW_ONLY" ]]; then
-      # Pyarrow tests
-      run_pyarrow_tests
-    fi
+if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "CI_PART2" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; then
+    rapids_shuffle_smoke_test
+fi
+if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "CI_PART2" || "$TEST_MODE" == "PYARROW_ONLY" ]]; then
+    run_pyarrow_tests
 fi

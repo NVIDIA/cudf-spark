@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,20 @@ import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.LongType
 
 class GpuBringBackToHostSuite extends SparkQueryCompareTestSuite {
+  test("GpuBringBackToHost preserves child partitioning and ordering") {
+    val child = GpuRangeExec(
+      start = 0,
+      end = 10,
+      step = 1,
+      numSlices = 2,
+      output = Seq(AttributeReference("id", LongType)()),
+      targetSizeBytes = 1024)
+    val transition = GpuBringBackToHost(child)
+
+    assertResult(child.outputPartitioning)(transition.outputPartitioning)
+    assertResult(child.outputOrdering)(transition.outputOrdering)
+  }
+
   test("doExecute") {
     val numRows = 1024 * 1024
     val rows = withGpuSparkSession { _ =>

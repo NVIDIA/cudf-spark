@@ -97,7 +97,7 @@ pipeline {
                         // 'name' and 'value' only supprt literal string in the declarative Jenkins
                         // Refer to Jenkins issue https://issues.jenkins.io/browse/JENKINS-62127
                         name 'DB_RUNTIME'
-                        values '14.3', '17.3', '18.3'
+                        values '17.3', '18.3'
                     }
                 }
                 stages {

@@ -103,7 +103,6 @@ object ConfVersionInfo {
     "spark.rapids.shuffle.transport.earlyStart.heartbeatInterval" -> V21_06_0,
     "spark.rapids.shuffle.transport.earlyStart.heartbeatTimeout" -> V21_08_0,
     "spark.rapids.shuffle.transport.maxReceiveInflightBytes" -> V21_06_0,
-    "spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled" -> UNRELEASED_VERSION,
     "spark.rapids.shuffle.ucx.useWakeup" -> V0_1_0,
     "spark.rapids.sql.acceleratedColumnarToRow.enabled" -> "v26.08.0",
     "spark.rapids.sql.allowMultipleJars" -> V24_02_0,

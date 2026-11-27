@@ -112,6 +112,22 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .booleanConf
       .createWithDefault(true)
 
+  val RANGE_PARTITIONING_PRUNE_THROUGH_OPERATORS =
+    conf("spark.rapids.sql.rangePartitioning.pruneThroughOperators")
+      .doc("Disabled by default. When enabled along with sampleKeysOnly, range boundary " +
+        "collection may also step through row-boundary islands (columnar-to-row, batch or " +
+        "arrow Python, row-to-columnar), GPU shuffle exchanges of any partitioning and their " +
+        "post-shuffle coalesce, materialized GPU shuffle stages and AQE custom shuffle " +
+        "readers over them, and asymmetric shuffled-hash LeftOuter joins whose required keys " +
+        "all resolve from the left leg. Stepping through an island skips Python UDF execution " +
+        "while collecting boundaries when nothing above it reads a UDF output; a key or " +
+        "filter that depends on one still falls back to full-width collection. This extends " +
+        "sampleKeysOnly, which still applies its project, filter, batch-coalesce, and scan " +
+        "pruning; disabling this leaves that behavior unchanged.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val SQL_MODE = conf("spark.rapids.sql.mode")
     .doc("Set the mode for the cuDF plugin. The supported modes are explainOnly and " +
          "executeOnGPU. This config can not be changed at runtime, you must restart the " +
@@ -609,6 +625,19 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .transform(_.toUpperCase(java.util.Locale.ROOT))
       .checkValues(Set("OFF", "ON", "AUTO"))
       .createWithDefault("OFF")
+
+  val READER_KVIKIO_NUM_THREADS =
+    conf("spark.rapids.sql.reader.kvikio.numThreads")
+      .doc("The number of threads in each executor's KvikIO thread pool, which the Parquet " +
+          s"hybrid scan reader (${PARQUET_HYBRID_SCAN_ENABLED.key}) splits each read of a " +
+          "local file across. Set once per executor at startup. If unset, KvikIO's own " +
+          "KVIKIO_NTHREADS or KVIKIO_NUM_THREADS environment variable applies if set, else " +
+          s"${MULTITHREAD_READ_NUM_THREADS.key}.")
+      .startupOnly()
+      .internal()
+      .integerConf
+      .checkValue(v => v > 0, "KvikIO needs at least 1 thread.")
+      .createOptional
 
   val PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE =
     conf("spark.rapids.sql.format.parquet.hybridScan.maxH2DPackSize")
