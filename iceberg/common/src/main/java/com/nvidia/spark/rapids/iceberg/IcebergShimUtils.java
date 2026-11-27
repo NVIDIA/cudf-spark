@@ -86,6 +86,16 @@ public interface IcebergShimUtils {
         throw new UnsupportedOperationException("Iceberg initial defaults are not supported");
     }
 
+    /** Returns whether this field has an Iceberg v3 write default. */
+    default boolean hasWriteDefault(Types.NestedField field) {
+        return false;
+    }
+
+    /** Creates an accessor for defaults present in the data writer schema. */
+    default IcebergDefaultAccessor newDefaultAccessor() {
+        return (field, sparkField) -> sparkField;
+    }
+
     /**
      * Prunes a Parquet schema while preserving the validity of default-only containers.
      *
