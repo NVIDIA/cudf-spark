@@ -28,7 +28,14 @@ import tempfile
 DEFAULT_ARCHIVE = "/dbfs/cached_jars/cudf-spark-ci/maven-releases-v1.tar"
 BUDGET = 512 * 1024 * 1024
 MAX_ARCHIVE = BUDGET + 48 * 1024 * 1024
-SOURCES = {"central", "google-maven-central"}
+CENTRAL = {"central": "https://repo.maven.apache.org/maven2",
+           "google-maven-central": "https://maven-central.storage-download.googleapis.com/maven2"}
+SOURCES = {repo: repo for repo in CENTRAL}
+# Newer Resolver records the URL as well as the ID. Accept only the known mirror URLs,
+# and write the bare IDs understood by the older Maven on the Databricks driver.
+for repo, url in CENTRAL.items():
+    for exact in (url, url + "/"):
+        SOURCES[repo + "-" + hashlib.sha1(exact.encode(), usedforsecurity=False).hexdigest()] = repo
 EXCLUDED = ("com/nvidia/", "com/databricks/", "ai/rapids/")
 
 
@@ -68,7 +75,7 @@ def pack(repository, archive):
             item = marker.parent / filename
             name = item.relative_to(root).as_posix()
             if release(name) and regular_under(root, item):
-                candidates[name] = repos
+                candidates[name] = {SOURCES[key] for key in repos}
     # Prefer POMs and small dependencies; one large classifier must not crowd out the toolchain.
     ranked = sorted(candidates, key=lambda n: (not n.endswith(".pom"), (root / n).stat().st_size, n))
     selected, size = [], 0

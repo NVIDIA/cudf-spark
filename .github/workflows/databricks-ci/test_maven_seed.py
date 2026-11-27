@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import json
 from pathlib import Path
 import sys
 import tarfile
@@ -16,13 +17,28 @@ import maven_seed_v2 as seed
 
 
 class MavenSeedTests(unittest.TestCase):
+    def test_dbfs_path_on_actual_transport(self):
+        api = publisher.workspace_api("https://workspace.cloud.databricks.com", "fixture")
+        with patch("http.client.HTTPSConnection") as connect:
+            conn = connect.return_value
+            reply = conn.getresponse.return_value
+            reply.status = 200
+            reply.read.return_value = b""
+            self.assertEqual(api("POST", "/api/2.0/dbfs/mkdirs", path="/seed"), {})
+            self.assertEqual(json.loads(conn.request.call_args.kwargs["body"]), {"path": "/seed"})
+            reply.read.return_value = b'{"is_dir":false,"file_size":1}'
+            self.assertEqual(api("GET", "/api/2.0/dbfs/get-status", path="/seed")["file_size"], 1)
+            self.assertIn("path=%2Fseed", conn.request.call_args.args[1])
+
     def test_release_only_and_fresh_driver(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
             repo, tar, driver = root/"repo", root/"seed.tar", root/"driver"
             for path, sources in [
-                ("org/example/foo/1", {"foo-1.jar": "central", "foo-1.pom": "google-maven-central",
-                                       "foo-1-local.jar": "", "foo-1-private.jar": "private-repo"}),
+                ("org/example/foo/1", {"foo-1.jar": "central",
+                                       "foo-1.pom": "google-maven-central-eaf2145231eaedc6e6f9ee5f8620b09aa3de7485",
+                                       "foo-1-local.jar": "", "foo-1-private.jar": "private-repo",
+                                       "foo-1-other.jar": "google-maven-central-" + "0" * 40}),
                 ("org/example/foo/2-SNAPSHOT", {"foo-2-SNAPSHOT.jar": "central"}),
                 ("org/example/foo/2-20261127.013759-1", {"foo-2-20261127.013759-1.jar": "central"}),
                 ("com/nvidia/private/1", {"private-1.jar": "central"}),
@@ -53,6 +69,8 @@ class MavenSeedTests(unittest.TestCase):
             self.assertEqual(seed.restore(driver, tar, sha), 1)
             jar = driver/"org/example/foo/1/foo-1.jar"
             self.assertEqual(jar.read_bytes(), b"public test fixture")
+            self.assertEqual((jar.parent/"_remote.repositories").read_text(),
+                             "foo-1.jar>central=\nfoo-1.pom>google-maven-central=\n")
             jar.write_bytes(b"previous download")
             self.assertEqual(seed.restore(driver, tar, sha), 0)
             self.assertEqual(jar.read_bytes(), b"previous download")

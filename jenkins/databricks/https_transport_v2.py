@@ -52,7 +52,7 @@ def workspace_api(host, token):
     if not origin or not token or not token.isascii() or not token.isprintable():
         raise RuntimeError("Expected one HTTPS Databricks workspace and a token")
 
-    def request(method, path, **fields):
+    def request(method, path, /, **fields):
         # Connect directly to the configured origin; never follow a redirect with the token.
         conn = http.client.HTTPSConnection(origin[1], timeout=15)
         try:
@@ -82,7 +82,8 @@ def workspace_api(host, token):
             if len(raw) > 1024 * 1024:
                 raise ValueError("Oversized API response")
             if not raw and method == "POST" and path in (
-                    COMMANDS + "/contexts/destroy", CLUSTERS + "/delete", CLUSTERS + "/permanent-delete"):
+                    COMMANDS + "/contexts/destroy", CLUSTERS + "/delete", CLUSTERS + "/permanent-delete",
+                    "/api/2.0/dbfs/mkdirs"):
                 return {}
             response = json.loads(raw)
             if not isinstance(response, dict):
@@ -95,7 +96,7 @@ def workspace_api(host, token):
         finally:
             conn.close()
 
-    def call(method, path, **fields):
+    def call(method, path, /, **fields):
         # Never repeat cluster creation or a command submission after an ambiguous response.
         if method == "GET":
             return observe(lambda: request(method, path, **fields))
