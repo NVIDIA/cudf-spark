@@ -37,15 +37,17 @@ reconciliation before retrying it.
   `creator_user_name`; aws2 also needs `jump_host` and `jump_user`.
 - Use isolated CI Databricks workspaces and compute identities: PR code runs
   on the driver. Do not expose shared production storage, credentials or
-  instance permissions there. The runner needs HTTPS access to the configured
-  workspaces and SSH to their drivers, directly or via the pinned bastion.
+  instance permissions there. Give PR compute read-only access to shared
+  archives; only the protected cache job needs write access. The runner needs
+  HTTPS access to the configured workspaces and SSH to their drivers, directly
+  or via the pinned bastion.
 - Set `DATABRICKS_CI_RUNNER_GROUP` to a dedicated ephemeral Linux runner
-  group restricted to [the DB cell](../databricks-ci-cell.yml) and
-  [hourly cleanup](../databricks-cleanup.yml) on `main`. Install
-  Git, GitHub CLI, OpenSSH, Bash, Python 3.9+ and Requests. Set
+  group restricted to [the DB cell](../databricks-ci-cell.yml),
+  [hourly cleanup](../databricks-cleanup.yml) and [cache preparation](../cache.yml)
+  on `main`. Install Git, GitHub CLI, OpenSSH, Bash, curl, Python 3.9+ and Requests. Set
   `DATABRICKS_CI_ENABLED=true` only after these controls are in place.
   Missing configuration fails a required Databricks selection before allocation.
 
-Public logs report the failing phase, provider attempt and test totals without
-printing tokens, private endpoints or raw driver output. No cloud credentials
-are passed to the source under test.
+After each phase, the Actions console shows stdout and stderr tails. Failed
+phases also show bounded diagnostic excerpts. No cloud credentials are passed
+to the source under test.

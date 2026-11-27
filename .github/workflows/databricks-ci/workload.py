@@ -3,15 +3,18 @@
 
 """Prepare immutable build inputs locally; run the product only on the allocated DB driver."""
 
+import base64
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import subprocess
 import tarfile
 from urllib.parse import urlsplit
 
+from console_filter import public_lines
 from runtimes import SPARK_VERSION, runtime_label
 
 
@@ -195,6 +198,78 @@ print(total, skipped, failed)
     return 0 if total > skipped and failed == 0 else 1
 
 
+def report_console(ssh, directory, receipt, phase, rc):
+    # The driver runs PR code. Limit bytes and time on THIS side of SSH, and never trust
+    # the driver to sanitize output, supply a local path or change the workload status.
+    cap = 512 * 1024
+    with subprocess.Popen(ssh + ["cat " + shlex.quote(receipt)], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=directory, env=CLEAN_ENV) as proc:
+        try:
+            data = subprocess.run(["head", "-c", str(cap)], stdin=proc.stdout, capture_output=True,
+                                  env=CLEAN_ENV, timeout=30, check=True).stdout
+            if len(data) >= cap or proc.wait(timeout=5):
+                raise ValueError("Incomplete driver console")
+        finally:
+            proc.kill()
+    chunks = json.loads(data)
+    if not isinstance(chunks, list) or len(chunks) != 4 or not all(isinstance(x, str) for x in chunks):
+        raise ValueError("Invalid driver console")
+    hidden = [s for k, v in os.environ.items() if k.startswith("DATABRICKS_") and
+              k.endswith(("_TOKEN", "_PRIVATE_KEY", "_KNOWN_HOSTS")) for s in v.splitlines() if s]
+    sections = []
+    for chunk, max_bytes in zip(chunks, (129, 129, 33, 33)):
+        raw = base64.b64decode(chunk, validate=True)
+        if len(raw) > max_bytes * 1024:
+            raise ValueError("Oversized driver console section")
+        records = re.sub(rb"\x1b\[[0-9;:]*m", b"", raw).split(b"\n")
+        sections.append(public_lines(records, hidden))
+    limit = 10 if rc else 1000
+    channels = [("stdout", sections[0][-limit:]), ("stderr", sections[1][-limit:])]
+    if rc:
+        diagnostics = sections[2] + sections[3] or (sections[1] or sections[0])[-80:]
+        channels.append(("diagnostics", diagnostics))
+    for channel, lines in channels:
+        if not lines:
+            continue
+        marker = secrets.token_hex(24)
+        if not rc:
+            print(f"::group::Databricks {phase} {channel}", flush=True)
+        print(f"::stop-commands::{marker}", flush=True)
+        try:
+            for line in lines:
+                print(f"driver {channel} | {line}", flush=True)
+        finally:
+            print(f"::{marker}::", flush=True)
+            if not rc:
+                print("::endgroup::", flush=True)
+
+
+def stage_archive(remote, phase, name, entry, local_cache):
+    stage = shlex.join(["/usr/bin/python3", "-I", "-", name, json.dumps(entry), local_cache, "--receipt"])
+    # An honest helper writes one label. A local pipe bounds buffering even if the driver is compromised.
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb", buffering=0) as reader:
+        helper_path = Path(__file__).with_name("driver_archive.py")
+        with os.fdopen(write_fd, "wb", buffering=0) as writer, helper_path.open("rb") as helper:
+            rc = remote(stage, helper, timeout=(10 if phase == "build" else 70) * 60, stdout=writer)
+        os.set_blocking(reader.fileno(), False)
+        label = reader.read(64)
+    if rc:
+        reasons = {b"download-error\n": "upstream download failed", b"download-timeout\n": "download timed out",
+                   b"verification-error\n": "archive or metadata failed verification",
+                   b"local-error\n": "driver cache path, filesystem or tool error"}
+        reason = reasons.get(label, "no confirmed driver result")
+        print(f"Databricks {phase}: failed to stage {name}: {reason} (exit {rc})", flush=True)
+        return rc
+    sources = {b"driver\n": "driver-local cache", b"dbfs\n": "DBFS cache", b"legacy-dbfs\n": "legacy DBFS cache",
+               b"primary\n": "primary download", b"fallback\n": "fallback download"}
+    if label not in sources:
+        print(f"Databricks {phase}: missing or invalid verified staging receipt for {name}", flush=True)
+        return 1
+    print(f"Databricks {phase}: staged {name} from {sources[label]} (size and SHA-512 verified)", flush=True)
+    return 0
+
+
 def run_workload(phase, env, cluster_id, directory, archive):
     """Send trusted launchers and source to the remote driver. No credentials enter the workload environment."""
     address = env["DATABRICKS_DRIVER_ADDRESS"]
@@ -212,10 +287,10 @@ def run_workload(phase, env, cluster_id, directory, archive):
     ssh = ["ssh", "-F", env["DATABRICKS_SSH_CONFIG"], "-o", "ClearAllForwardings=yes",
            "-o", "ForwardAgent=no", "ubuntu@" + address]
 
-    def remote(command, source=None, timeout=30 * 60):
+    def remote(command, source=None, timeout=30 * 60, stdout=subprocess.DEVNULL):
         try:
             return subprocess.run(ssh + [command], stdin=source or subprocess.DEVNULL, env=CLEAN_ENV,
-                                  cwd=directory, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  cwd=directory, stdout=stdout, stderr=subprocess.DEVNULL,
                                   timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             return 124
@@ -227,31 +302,58 @@ def run_workload(phase, env, cluster_id, directory, archive):
     # Each cell builds its own artifact.
     home = "/home/ubuntu/"
     remote_env = ["env", "BASE_SPARK_VERSION=" + version, "EXTRA_ENVS=" + options]
+    name = None
+    if phase == "build":
+        name = "apache-maven-3.8.1-bin.tar.gz"
+    elif phase == "test" and options.startswith("TEST_MODE=CI_PART1,"):
+        # Matches the upstream two-shim smoke in jenkins/databricks/test.sh.
+        name = "spark-3.5.0-bin-hadoop3-scala2.13.tgz" if version.startswith("4.") else "spark-3.3.0-bin-hadoop3.tgz"
+    if name:
+        catalog = json.loads(Path(__file__).with_name("archives.json").read_text())
+        if name not in catalog:
+            raise ValueError(f"No trusted archive metadata for {name}")
+        local_cache = home + ".cache/spark-ci"
+        rc = stage_archive(remote, phase, name, catalog[name], local_cache)
+        if rc:
+            return rc
+        remote_env.append("DBFS_CACHE_DIR=" + local_cache)
+
     if phase == "build":
         rc = upload(archive, home + "spark-rapids-ci.tgz") or upload(DB / "build.sh", home + "build.sh")
-        command = remote_env + ["DBFS_CACHE_DIR=" + home + ".cache/spark-ci",
-                                "SPARKSRCTGZ=" + home + "spark-rapids-ci.tgz", "MVN_OPT=",
+        command = remote_env + ["SPARKSRCTGZ=" + home + "spark-rapids-ci.tgz", "MVN_OPT=",
                                 "BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=" + version, "bash", home + "build.sh"]
     elif phase == "test":
         rc = (upload(DB / "test.sh", home + "test.sh")
               or upload(DB / "run-test-command.sh", home + "run-test-command.sh"))
-        command = ["bash", home + "run-test-command.sh", *remote_env,
-                   "TEST_TYPE=pre-commit", "LOCAL_JAR_PATH=", "SPARK_CONF=", "bash", home + "test.sh"]
+        command = remote_env + ["TEST_TYPE=pre-commit", "LOCAL_JAR_PATH=", "SPARK_CONF=", "bash", home + "test.sh"]
     else:
         raise ValueError("Unknown Databricks workload phase")
-    redirection = ">buildout 2>&1" if phase == "build" else ">/dev/null 2>&1"
     # DBR 18.3 part 2 has successful test commands longer than three hours.
     limit = (270 if phase == "test" else 75) * 60
     if rc:
         return rc
-    rc = remote("umask 077; cd /home/ubuntu && " + shlex.join(command) + " " + redirection, timeout=limit)
-    if phase != "test" or rc < 0 or rc in (124, 255):
+    logdir = "/tmp/db-ci-console-" + secrets.token_hex(16)
+    receipt = logdir + "/console.json"
+    wrapper = shlex.join(["/usr/bin/python3", "-I", logdir + "/capture.py", receipt])
+    supervisor = "bash /home/ubuntu/run-test-command.sh " if phase == "test" else ""
+    with Path(__file__).with_name("capture_console.py").open("rb") as capture:
+        # Keep the original umask and supervisor even when optional capture setup fails.
+        rc = remote(f"umask 077; cd /home/ubuntu || exit 1; set -- {shlex.join(command)}; "
+                    f"if mkdir {logdir} && cat > {logdir}/capture.py; then "
+                    f'set -- {wrapper} "$@"; fi; exec {supervisor}"$@" </dev/null', source=capture, timeout=limit)
+    if rc < 0 or rc in (124, 255):
         return rc
-    # Collect counts even when pytest failed, without masking the original exit.
+    if phase == "test":
+        # Collect counts even when pytest failed, without masking the original exit.
+        try:
+            summary_rc = check_pytest(ssh, directory)
+        except (OSError, subprocess.SubprocessError):
+            summary_rc = 1
+        if summary_rc and not rc:
+            print(f"No complete passing pytest JUnit summary (check exit={summary_rc})", flush=True)
+        rc = rc or summary_rc
     try:
-        summary_rc = check_pytest(ssh, directory)
-    except (OSError, subprocess.SubprocessError):
-        summary_rc = 1
-    if summary_rc and not rc:
-        print(f"No complete passing pytest JUnit summary (check exit={summary_rc})", flush=True)
-    return rc or summary_rc
+        report_console(ssh, directory, receipt, phase, rc)
+    except (OSError, ValueError, RecursionError, subprocess.SubprocessError):
+        print(f"Databricks {phase} console unavailable (phase exit={rc})", flush=True)
+    return rc
