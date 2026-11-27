@@ -102,11 +102,11 @@ class GpuShuffleAsyncCoalesceIterator(iter: Iterator[CoalescedHostResult],
         // or not, because the downstream tasks expect the `GpuShuffleCoalesceIterator`
         // to acquire the semaphore and may generate GPU data from batches that are empty.
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
-        GpuMetric.ns(opTimeMetric)(hostConcatedRet.toGpuBatch(dataTypes))
+        opTimeMetric.ns(hostConcatedRet.toGpuBatch(dataTypes))
       }
       closeOnExcept(gpuCB) { _ =>
         val hasNextCB = GpuMetric.ns(asyncReadTimeMetric, opTimeMetric)(iter.hasNext)
-        GpuMetric.ns(opTimeMetric) {
+        opTimeMetric.ns {
           // No need synchronization here since the async read is already done.
           if (hasNextCB) {
             // Prefetch and concatenate the next one asynchronously.

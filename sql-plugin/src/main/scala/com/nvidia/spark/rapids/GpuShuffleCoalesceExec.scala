@@ -869,7 +869,7 @@ abstract class GpuMetricIteratorBase[T](
     val inputBatch = GpuMetric.ns(readTimeMetric, opTimeMetric) {
       iter.next()
     }
-    GpuMetric.ns(opTimeMetric) {
+    opTimeMetric.ns {
       NvtxRegistry.SHUFFLE_CONCAT_LOAD_BATCH {
         val batch = convertToOutputBatch(inputBatch)
         outputBatchesMetric += 1
