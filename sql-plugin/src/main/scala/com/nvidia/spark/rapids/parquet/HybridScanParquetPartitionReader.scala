@@ -72,8 +72,8 @@ private[parquet] case class DeviceFetch(source: HybridScanByteSource, ranges: Ar
 
 /**
  * The row groups that survive pruning. `releaseSemaphoreBeforeHostFetch` when pruning took the GPU
- * semaphore only to compare dictionary pages, so the semaphore is released if the column chunks
- * then go to host memory, and kept if they are read straight to the device.
+ * semaphore to compare dictionary pages, so the semaphore is released if the column chunks then go
+ * to host memory, and kept if they are read straight to the device.
  */
 private[parquet] case class SelectedRowGroups(
     rowGroups: Array[Int],
@@ -251,14 +251,41 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
           filterRowGroupsWithDictionaries(reader, afterStats, { dictRanges =>
             addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(dictRanges))
-            val afterDict = withResource(split.source.fetch(dictRanges)) { hostPages =>
-              compareDictionaryPages(reader, afterStats, hostPages)
-            }
-            // The GPU semaphore was taken only for the compare.
-            SelectedRowGroups(afterDict, releaseSemaphoreBeforeHostFetch = true)
+            compareDictionaryPagesFromFile(split.source, reader, afterStats, dictRanges)
           })
         }
       }
+    }
+  }
+
+  /**
+   * Read the dictionary pages from the file and compare them, straight on the device where the
+   * source can read them there and through host memory otherwise.
+   */
+  private def compareDictionaryPagesFromFile(
+      source: HybridScanByteSource,
+      reader: HybridScanReader,
+      rowGroups: Array[Int],
+      dictRanges: Array[ByteRange]): SelectedRowGroups = {
+    if (useDeviceRead(source, dictRanges)) {
+      // The column chunks are read to the device under the semaphore next, so it is taken here
+      // and held, rather than released for the planning in between.
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      // The device pages do not outlive an attempt, so a retry reads them from the file again.
+      val afterDict = withRetryNoSplit[Array[Int]] {
+        withResource(source.fetchToDevice(dictRanges)) { dictPages =>
+          reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
+        }
+      }
+      // Pruning can leave only chunks too small to read to the device, so these may still go
+      // to host memory. If not we won't release because it won't be a host fetch anyway. 
+      SelectedRowGroups(afterDict, releaseSemaphoreBeforeHostFetch = true)
+    } else {
+      val afterDict = withResource(source.fetch(dictRanges)) { hostPages =>
+        compareDictionaryPages(reader, rowGroups, hostPages)
+      }
+      // The GPU semaphore was acquired only for the compare: release it for chunk read to host.
+      SelectedRowGroups(afterDict, releaseSemaphoreBeforeHostFetch = true)
     }
   }
 
@@ -886,6 +913,12 @@ object HybridScanPipeline extends Logging {
       useFieldId: Boolean): Option[HybridScanConfig] = {
     val failOnFallback = rapidsConf.testParquetHybridScanFailOnFallback
     if (!rapidsConf.isParquetHybridScanEnabled) {
+      if (rapidsConf.isReaderGdsEnabled) {
+        logWarning(s"${RapidsConf.READER_GPU_DIRECT_STORAGE_MODE.key} is " +
+          s"${rapidsConf.readerGdsMode} but the hybrid scan reader, the only reader that uses " +
+          s"GPUDirect Storage, is disabled (${RapidsConf.PARQUET_HYBRID_SCAN_ENABLED.key}), so " +
+          "this read does not use it.")
+      }
       None
     } else if (!hybridScanAllowed) {
       reportFallback(failOnFallback, "the hybrid scan is not supported for this read in this " +
@@ -1131,7 +1164,9 @@ case class HybridScanConfig(
     filterKeepThreshold: Double,
     maxH2DPackSize: Long,
     minH2DPackSize: Long,
-    gdsMode: RapidsConf.GpuDirectStorageMode.Value)
+    gdsMode: RapidsConf.GpuDirectStorageMode.Value) {
+  def gdsEnabled: Boolean = gdsMode != RapidsConf.GpuDirectStorageMode.OFF
+}
 
 object HybridScanConfig {
   def apply(rapidsConf: RapidsConf, filters: HybridScanFilters): HybridScanConfig = {

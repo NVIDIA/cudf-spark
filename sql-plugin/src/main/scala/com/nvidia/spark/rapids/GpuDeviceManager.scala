@@ -766,18 +766,38 @@ object GpuDeviceManager extends Logging {
     if (!kvikioInitialized) {
       synchronized {
         if (!kvikioInitialized) {
-          val numThreads = kvikioNumThreads(conf)
-          val compatMode = NativeFileSource.CompatMode.ON
-          logInfo(s"KvikIO reads with compatibility mode $compatMode and $numThreads threads")
-          // TODO: this has no effect if another libcudf file read set KvikIO up first, and
-          // nothing detects that. The plugin's other readers and writers use host buffers, not
-          // libcudf file sources, so it is unlikely; a cuDF change reporting whether KvikIO was
-          // already set up would let this warn.
-          NativeFileSource.setUpKvikio(compatMode, numThreads)
+          setUpKvikio(conf)
           kvikioInitialized = true
         }
       }
     }
+  }
+
+  private def setUpKvikio(conf: RapidsConf): Unit = {
+    if (conf.isReaderGdsEnabled) {
+      val cufileCompat = sys.env.get("CUFILE_ALLOW_COMPAT_MODE")
+      val detected = if (cufileCompat.exists(_.equalsIgnoreCase("false"))) {
+        "files cuFile cannot read directly are read and reported as host reads"
+      } else {
+        "cuFile may read files it cannot read directly through host memory, reported as " +
+          "direct, unless cufile.json sets allow_compat_mode to false"
+      }
+      logInfo("GPUDirect Storage enabled with KvikIO compatibility mode AUTO and " +
+        s"CUFILE_ALLOW_COMPAT_MODE=${cufileCompat.getOrElse("<unset>")}: $detected")
+      checkKvikioTaskSize()
+    }
+    val compatMode = if (conf.isReaderGdsEnabled) {
+      NativeFileSource.CompatMode.AUTO
+    } else {
+      NativeFileSource.CompatMode.ON
+    }
+    val numThreads = kvikioNumThreads(conf)
+    logInfo(s"KvikIO reads with compatibility mode $compatMode and $numThreads threads")
+    // TODO: this has no effect if another libcudf file read set KvikIO up first, and nothing
+    // detects that. The plugin's other readers and writers use host buffers, not libcudf file
+    // sources, so it is unlikely; a cuDF change reporting whether KvikIO was already set up
+    // would let this warn.
+    NativeFileSource.setUpKvikio(compatMode, numThreads)
   }
 
   /**
@@ -797,6 +817,23 @@ object GpuDeviceManager extends Logging {
         }
         threads
       case None => fromEnv.getOrElse(conf.multiThreadReadNumThreads)
+    }
+  }
+
+  /**
+   * KvikIO splits a read into tasks of KVIKIO_TASK_SIZE bytes from its start, so the hybrid scan's
+   * aligned device reads stay aligned past the first task only if the task size is a whole number
+   * of cuFile's 4 KiB blocks. The default, 4 MiB, is.
+   */
+  private def checkKvikioTaskSize(): Unit = {
+    // KvikIO reads the leading integer and ignores the rest, and rejects a value without one.
+    val leadingInteger = """\s*([+-]?\d+).*""".r
+    sys.env.get("KVIKIO_TASK_SIZE").foreach {
+      case leadingInteger(digits) if BigInt(digits) % 4096 != 0 =>
+        throw new IllegalArgumentException(s"KVIKIO_TASK_SIZE=$digits is not a multiple of " +
+          "4096, so GPUDirect Storage reads would not stay aligned to cuFile's 4 KiB blocks. " +
+          "Unset it or set it to a multiple of 4096.")
+      case _ =>
     }
   }
 
