@@ -1158,7 +1158,6 @@ def test_from_json_struct_boolean(pattern):
         conf=_enable_all_types_conf)
 
 @allow_non_gpu(*non_utc_allow)
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10898')
 def test_from_json_struct_decimal():
     json_string_gen = StringGen(r'{ "a": "[+-]?([0-9]{0,5})?(\.[0-9]{0,2})?([eE][+-]?[0-9]{1,2})?" }') \
         .with_special_pattern('', weight=50) \
@@ -1179,10 +1178,10 @@ def test_from_json_struct_decimal():
     "\"" + optional_whitespace_regex + "[0-9]{2}/[0-9]{2}/[1-8]{1}[0-9]{3}" + optional_whitespace_regex + "\"",
     # special constant values
     "\"" + optional_whitespace_regex + "(now|today|tomorrow|epoch)" + optional_whitespace_regex + "\"",
-    # "nnnnn" (number of days since epoch prior to Spark 3.4, throws exception from 3.4)
-    pytest.param("\"[0-9]{5}\"", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/9664")),
+    # five-digit quoted year
+    "\"[0-9]{5}\"",
     # integral
-    pytest.param("[0-9]{1,5}", marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/9664")),
+    "[0-9]{1,5}",
     # floating-point
     "[0-9]{0,2}\\.[0-9]{1,2}",
     # boolean

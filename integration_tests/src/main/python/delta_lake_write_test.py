@@ -1739,7 +1739,8 @@ def test_delta_insert_by_name_schema_evolution_disabled(spark_tmp_path):
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_340() and not is_databricks_runtime(), reason="Schema evolution fixed in later releases")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+                            enabled_xfail_reason=None if is_databricks173_or_later() else
+                            'https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_overwrite_schema_evolution_arrays(spark_tmp_path, enable_deletion_vectors):
     data_path = spark_tmp_path + "/DELTA_DATA"
     src_path = data_path + "/SRC"
@@ -3328,13 +3329,14 @@ def test_delta_write_column_name_mapping(spark_tmp_path, mapping, optimized_writ
 # Hash aggregate can be used in a metadata query for compaction which completely falls back
 compaction_allow = "HashAggregateExec"
 if is_databricks_runtime():
-    # The native OPTIMIZE command stays on CPU while its nested write runs on GPU.
+    # Native OPTIMIZE stays on CPU; capture also includes the preceding append.
     compaction_allow += ",ExecutedCommandExec"
 @allow_non_gpu(compaction_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+                            enabled_xfail_reason=None if is_databricks173_or_later() else
+                            'https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_compaction(spark_tmp_path, enable_deletion_vectors):
     from delta.tables import DeltaTable
     def do_write(spark,  path):
@@ -3342,7 +3344,9 @@ def test_delta_compaction(spark_tmp_path, enable_deletion_vectors):
         DeltaTable.forPath(spark, path).optimize().executeCompaction()
     data_path = spark_tmp_path + "/DELTA_DATA"
     with_cpu_session(
-        lambda spark: _create_cpu_gpu_tables(spark, data_path, "id bigint"), conf=_delta_confs)
+        lambda spark: _create_cpu_gpu_tables(
+            spark, data_path, "id bigint", enable_deletion_vectors=enable_deletion_vectors),
+        conf=_delta_confs)
     assert_gpu_and_cpu_writes_are_equal_collect(
         do_write,
         lambda spark, path: spark.read.format("delta").load(path),
