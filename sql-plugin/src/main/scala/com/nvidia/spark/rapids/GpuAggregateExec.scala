@@ -1324,22 +1324,13 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
 
   override def convertToGpu(): GpuExec = {
     lazy val aggModes = agg.aggregateExpressions.map(_.mode).toSet
-    // `aggModes` is empty when there are no aggregate functions at all (a dedup, e.g.
-    // `distinct()` / `GROUP BY` with no aggregates). `forall` is vacuously true on an
-    // empty set, so without the `nonEmpty` check this would report that the aggregate is
-    // a safe Partial one. It is not: single pass partial sort agg deliberately emits
-    // non-fully-aggregated output and relies on a downstream final agg to merge it, which
-    // a terminal dedup does not have -- yielding duplicate rows. This mirrors the
-    // `aggregateExpressions.nonEmpty` guard on `allowNonFullyAggregatedOutput` below.
-    lazy val canUsePartialSortAgg = aggModes.nonEmpty && aggModes.forall { mode =>
-      mode == Partial || mode == PartialMerge
-    } && agg.groupingExpressions.nonEmpty // Don't do this for a reduce...
-
-    // for a aggregateExpressions.isEmpty case, we cannot distinguish between final and non-final,
-    // so don't allow it.
-    lazy val allowNonFullyAggregatedOutput = aggModes.forall { mode =>
-      mode == Partial || mode == PartialMerge
-    } && agg.aggregateExpressions.nonEmpty
+    // A pure PartialMerge can be the stage that deduplicates keys for COUNT(DISTINCT).
+    // The next, mixed Partial/PartialMerge stage can emit partial buffers for Final to merge.
+    // Requiring Partial also excludes deduplication with no aggregate functions.
+    lazy val allowNonFullyAggregatedOutput =
+      aggModes.contains(Partial) && aggModes.subsetOf(Set(Partial, PartialMerge))
+    lazy val canUsePartialSortAgg =
+      allowNonFullyAggregatedOutput && agg.groupingExpressions.nonEmpty
 
     lazy val groupingCanBeSorted = agg.groupingExpressions.forall { expr =>
       orderable.isSupportedByPlugin(expr.dataType)

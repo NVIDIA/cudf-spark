@@ -557,10 +557,7 @@ def _child_batch_counts(plan):
 def _aggs_with_no_agg_functions(plan):
     """GpuHashAggregate nodes that have grouping keys but an empty aggregateExpressions.
 
-    A GROUP BY with no aggregate functions is a distinct on the keys. aggModes is derived
-    from aggregateExpressions, so it is empty here, and `forall` on an empty set is
-    vacuously true -- this is the shape canUsePartialSortAgg's `aggModes.nonEmpty` guard
-    exists to reject.
+    A GROUP BY with no aggregate functions is a distinct on the keys and must fully merge them.
     """
     return [node for node in collect_plan_nodes(plan)
             if node.getClass().getSimpleName() == "GpuHashAggregateExec"
@@ -572,8 +569,7 @@ def _assert_no_agg_functions_not_single_pass(expect_forced=False):
     that aggregate was kept off the single pass partial sort path.
 
     allowSinglePassAgg is the plan-level output of canUsePartialSortAgg, so this pins the
-    guard directly. Removing the `aggModes.nonEmpty` check flips it to True and the query
-    returns duplicate rows.
+    eligibility decision directly. Allowing single-pass sort here can produce duplicate rows.
     """
     def do_assert(cpu_plan, plan):
         aggs = _aggs_with_no_agg_functions(plan)
@@ -686,14 +682,13 @@ def test_hash_reduction_count_action_after_join(override_batch_size_bytes):
 
 @pytest.mark.parametrize('override_batch_size_bytes', [None, 1], ids=idfn)
 def test_distinct_zero_columns(override_batch_size_bytes):
-    # Regression test for the `aggModes.nonEmpty` guard on canUsePartialSortAgg
+    # Regression test for excluding empty aggregate modes from canUsePartialSortAgg
     # (GpuAggregateExec.scala). Catalyst plans this as
     #   HashAggregate(keys=[0#x], functions=[], output=[])
     # -- a zero-column distinct() gets a literal 0 as its grouping key, so
-    # groupingExpressions is non-empty while aggregateExpressions is empty, making aggModes
-    # empty and `forall` on it vacuously true. Without the guard the aggregate takes the
-    # single pass partial sort path and emits non-fully-aggregated output with no final agg
-    # to merge it: the GPU returns 1000 rows where the CPU returns 1.
+    # groupingExpressions is non-empty while aggregateExpressions is empty. Single-pass
+    # partial sort here would emit duplicate keys with no final agg to merge them:
+    # the GPU would return 1000 rows where the CPU returns 1.
     #
     # This checks wrong results, not the zero-column crash.
     conf = dict(_plan_metric_conf)
@@ -729,7 +724,7 @@ def test_hash_grpby_literal_sum_count_action(data_gen, override_batch_size_bytes
 
 @pytest.mark.parametrize('override_batch_size_bytes', [None, 1024], ids=idfn)
 def test_hash_grpby_skewed_single_key_batch_size(override_batch_size_bytes):
-    # Regression test for the `aggModes.nonEmpty` guard on canUsePartialSortAgg, reached
+    # Regression test for excluding empty aggregate modes from canUsePartialSortAgg, reached
     # through a grouped aggregate rather than a distinct(). count() prunes sum('id') away and
     # leaves
     #   HashAggregate(keys=[key], functions=[], output=[key])
@@ -754,6 +749,28 @@ def test_hash_grpby_skewed_single_key_batch_size(override_batch_size_bytes):
         conf = conf,
         gpu_plan_assertion = _assert_no_agg_functions_not_single_pass(expect_forced=True)
     )
+
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan('GpuHashAggregateExec')
+@pytest.mark.parametrize('grouping', [[], ['g']], ids=['global', 'grouped'])
+@pytest.mark.parametrize('shortcut_conf', [
+    {'spark.rapids.sql.agg.skipAggPassReductionRatio': '0',
+     'spark.rapids.sql.agg.singlePassPartialSortEnabled': 'false',
+     'spark.rapids.sql.agg.forceSinglePassPartialSort': 'false'},
+    {'spark.rapids.sql.agg.skipAggPassReductionRatio': '1',
+     'spark.rapids.sql.agg.forceSinglePassPartialSort': 'true'}
+], ids=['skip-pass', 'single-pass-sort'])
+def test_count_distinct_with_sum_across_batches(grouping, shortcut_conf):
+    def query(spark):
+        # Both input partitions contain v = 0, 1, 2. The reduce task must merge each key
+        # across batches before the partial count consumes it.
+        df = spark.range(0, 6, 1, 2).selectExpr('id', 'id % 3 AS v')
+        return df.withColumn('g', f.col('v') % 2).groupBy(*grouping).agg(
+            f.countDistinct('v'), f.sum('id'))
+
+    conf = {'spark.sql.shuffle.partitions': '1', 'spark.rapids.sql.batchSizeBytes': '1',
+            'spark.sql.adaptive.enabled': 'false'}
+    assert_gpu_and_cpu_are_equal_collect(query, conf=copy_and_update(conf, shortcut_conf))
 
 # Make sure that we can do computation in the group by columns
 @ignore_order
