@@ -13,8 +13,9 @@ Hive text tables, and DSv2 file scans (Parquet, ORC, CSV, JSON, Avro).
 | `spark.rapids.sql.history.metrics.provider` | `none` | any other value enables history-backed planning |
 | `spark.rapids.sql.history.planningTimeoutMillis` | 100 | budget for one history lookup while planning |
 | `spark.rapids.sql.history.declareTimeoutMillis` | 5000 | budget for declaring each metric family to the store |
-| `spark.rapids.sql.history.scanSplit.enabled` | `false` | `true` turns on the scan split heuristic when a provider is set; off by default because the ratio is keyed by table only, not by the columns read, the filters pushed down or dynamic partition pruning |
-| `spark.rapids.sql.history.scanSplit.maxAgeDays` | 7 | how old the last ratio may be; lookup only, capped at the store's 14 day retention |
+| `spark.rapids.sql.history.scanSplit.enabled` | `false` | `true` turns on the scan split heuristic when a provider is set |
+| `spark.rapids.sql.history.scanSplit.aggregate` | `latest` | how the readings that a scan finds are combined: `latest` (the newest reading, a bounded read), `mean`, `min`, `max` (the largest ratio gives the smallest split) or `consistent` (the mean when the readings are within 3x of each other, else Spark's split) |
+| `spark.rapids.sql.history.scanSplit.maxAgeDays` | 7 | how old a ratio may be; lookup only, capped at the store's 14 day retention |
 | `spark.rapids.sql.history.scanSplit.minBytes` | 64 MiB | lower bound of a learned split |
 | `spark.rapids.sql.history.scanSplit.maxBytes` | 4 GiB | upper bound of a learned split |
 
@@ -27,22 +28,27 @@ the history metrics API (`MetricStores.current()`) only; the driver plugin's
 - **Measure**: when a query ends, each scan records its decode-expansion ratio, GPU output batch
   bytes / on-disk bytes. It is recorded only if every planned split was read to the end; a split
   read more than once (task or stage retries) counts once.
-- **Key**: the table name (catalog or Hive identifier), else `path:` + the
-  sorted root paths (user info and trailing `/` dropped). Keys over 253 UTF-8 bytes become a
-  readable prefix + `#` + 16 hex of their SHA-256. A file list is keyed on its exact files.
-  The key identifies the table, not what a query reads from it. Known limitations:
-  - The ratio depends on the columns a scan projects and the filters it pushes down, which are
-    not part of the key. Scans of one table that read different columns or filters share one
-    key, and the latest recording wins. A fingerprint of the read schema and filters is future
-    work.
+- **Key**: three dimensions: `plan` and `literals`, the two parts of a `PlanKey` (the table name,
+  else `path:` + the sorted root paths; the columns read; the shape of the filters with literals
+  replaced by `?`; and the literals and resolved dynamic pruning keys), each stored as a 64-bit
+  hash computed in place (no string is built), and `size`, `floor(log2(listedBytes))`. Known
+  limitations:
   - A path read is keyed by its roots as written, so another spelling of the same data (a
     different partition directory, an expanded glob, a new file list) starts with no history.
   - DSv2 file scans are always keyed by path, so one table read through v1 and through DSv2 has
     two histories.
-- **Decide**: the next scan of that table reads the latest ratio (at most `maxAgeDays`, default 7, old) and sets
+- **Decide**: one lookup in the store with three tiers (the same plan and literals and size; the
+  same plan and literals and a neighbouring size; the same plan, any literals, a neighbouring or
+  the same size). The store returns every tier's readings (at most `maxAgeDays`, default 7, old),
+  each in its closest tier. `aggregate` (default: the latest) picks: `latest`, `mean`, `min` and
+  `max` the closest tier with readings, `consistent` the closest tier whose readings are within 3x
+  of each other (else the scan keeps Spark's split). The ratio sets
   `split = targetBatchBytes / ratio`, clamped to `[minBytes, min(maxBytes, listedBytes / minPartitionNum)]`
   (defaults 64 MiB and 4 GiB). If `listedBytes / minPartitionNum` is below `minBytes`, the scan
-  keeps Spark's split.
+  keeps Spark's split. Known limitation: each lookup reads every reading of the plan in the
+  window, with no cap. A query planned very often (for example a micro-batch every few seconds)
+  builds up many readings; a lookup that runs past `planningTimeoutMillis` gives no ratio, and the
+  scan keeps Spark's split.
 - **minPartitionNum**: resolved as Spark does for file scans: `spark.sql.files.minPartitionNum`,
   else `spark.sql.leafNodeDefaultParallelism`, else the SparkContext's default parallelism (the
   cores registered when the query plans, if nothing is configured).
@@ -59,11 +65,17 @@ recorded again.
 Driver log lines, kept stable for tooling:
 
 ```
-scan.split: table=<t> ratio=<r> targetBatch=<b> rawSplit=<s>
-scan.split: table=<t> listed=<l> -> split=<n> bytes
-scan.split: table=<t> listed=<l> -> no history, spark default
-scan.split: table=<t> not recorded: <reason>
+scan.split: <k> tier=<n> ratio=<r> targetBatch=<b> rawSplit=<s>
+scan.split: <k> listed=<l> -> split=<n> bytes
+scan.split: <k> listed=<l> -> spark default
+scan.split: <k> not recorded: <reason>
+scan.split: not recorded: the scan has no key
 ```
+
+`<k>` is `<table or last path segment> literals=<v> size=<z> plan=<p> lit=<q>`, with `<p>` and `<q>`
+the two hashes in 16 hex digits and `<v>` the literals, capped. At DEBUG, each key is also logged
+with its readable text (source, columns, filter shapes, literals; each part capped):
+`scan.split: key plan=<p> literals=<q> <text>`.
 
 Store errors are logged once per JVM per reason and the decision falls back to static.
 

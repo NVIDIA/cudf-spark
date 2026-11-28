@@ -16,17 +16,15 @@
 
 package com.nvidia.spark.rapids.perf
 
-import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Collections
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.history.{DimValue, MetricStore, MetricStores, Observation, SchemaStatus,
-  Status, SummaryResponse}
+import com.nvidia.spark.history.{DimMatch, DimValue, LookupResponse, MetricStore, MetricStores,
+  Observation, Reading, SchemaStatus, Status}
 import com.nvidia.spark.rapids.LocalGpuMetric
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
-import org.apache.hadoop.fs.Path
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -40,9 +38,21 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
 
   private val GiB = 1024L * 1024 * 1024
   private val MiB = 1024L * 1024
-  private val table = "cat.db.events"
   private val now = 1790000000000L
   private val policy = HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5))
+
+  /** A scan of a table that filters on a date, as it ran on one day. */
+  private val scan = PlanKey(0x1234567890abcdefL, -0x0fedcba098765432L)
+
+  /** The same scan on another day. */
+  private val nextDay = PlanKey(scan.plan, 42L)
+
+  /** Every decision below lists 960 GiB, which is in the size bucket of 2^39. */
+  private val Listed = 960 * GiB
+  private val Bucket = 39L
+
+  private def sized(key: PlanKey, bucket: Long = Bucket): ScanHistoryKey =
+    ScanHistoryKey(key, bucket)
 
   private def heuristic(store: MetricStore, enabled: Boolean = true): ScanSplitHeuristic = {
     val h = new ScanSplitHeuristic(() => store)
@@ -59,27 +69,40 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
   private val Limits = ScanSplitLimits(64 * MiB, 4 * GiB, Duration.ofDays(7))
 
   /** Decides the file-source split for `key` over 960 GiB on 96 slots, 1 GiB batches. */
-  private def decide(h: ScanSplitHeuristic, key: String = table, nowMs: Long = now): Long =
-    h.fileSourceSplit(Some(key), Static,
-      name => ScanContext(name, 960 * GiB, GiB, 96L, Static, Limits), nowMs)
+  private def decide(
+      h: ScanSplitHeuristic,
+      key: PlanKey = scan,
+      nowMs: Long = now,
+      limits: ScanSplitLimits = Limits): Long =
+    h.fileSourceSplit(Some(key), Static, Listed,
+      hk => ScanContext(hk, Listed, GiB, 96L, Static, limits), nowMs)
 
-  private def observation(key: String, value: Double, atMs: Long): Observation =
-    new Observation(ScanExpansionRatio.metric,
-      Collections.singletonMap(ScanExpansionRatio.dimension, DimValue.of(key)), value, atMs)
+  private def observation(key: ScanHistoryKey, value: Double, atMs: Long): Observation =
+    new Observation(ScanExpansionRatio.metric, key.dimensions.asJava, value, atMs)
 
-  /** A store that already holds `values` for `table`, recorded at the given times. */
-  private def storeWith(values: (Double, Long)*): FakeMetricStore = {
+  /** A store that already holds these readings, each recorded a second ago. */
+  private def storeHolding(readings: (ScanHistoryKey, Double)*): FakeMetricStore = {
     val store = new FakeMetricStore
     store.declare(Collections.singletonList(ScanExpansionRatio.schema), Duration.ofSeconds(1))
-    values.foreach { case (v, at) => store.record(observation(table, v, at)) }
+    readings.foreach { case (key, v) => store.record(observation(key, v, now - 1000)) }
     store.declareCalls.clear()
     store.offered.clear()
     store
   }
 
-  /** A one-split scan of `table` whose split decoded `decoded` of its `listed` bytes. */
+  /** A store that already holds `values` for `scan`, recorded at the given times. */
+  private def storeWith(values: (Double, Long)*): FakeMetricStore = {
+    val store = new FakeMetricStore
+    store.declare(Collections.singletonList(ScanExpansionRatio.schema), Duration.ofSeconds(1))
+    values.foreach { case (v, at) => store.record(observation(sized(scan), v, at)) }
+    store.declareCalls.clear()
+    store.offered.clear()
+    store
+  }
+
+  /** A one-split scan of `scan` whose split decoded `decoded` of its `listed` bytes. */
   private def scanContext(decoded: Long, listed: Long = 100 * MiB): ScanContext =
-    ScanContext.forObservation(table, 1, () => ReadTotals(decoded, listed, 1L))
+    ScanContext.forObservation(sized(scan), 1, () => ReadTotals(decoded, listed, 1L))
 
   test("the metric's id and name are permanent, and are in the catalog the plugin supplies") {
     // Stored observations are keyed by the id, so changing either value is a breaking change.
@@ -91,29 +114,54 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(!entry.get.retired())
   }
 
-  test("decides from the table's last reading") {
+  test("the metric's dimensions are the plan, the literals and the size: floor(log2 bytes)") {
+    assert(ScanExpansionRatio.dimensions.map(d => d.name() -> d.kind()) == Seq(
+      "plan" -> DimValue.Kind.LONG,
+      "literals" -> DimValue.Kind.LONG,
+      "size" -> DimValue.Kind.LONG))
+    def bucket(bytes: Long): Option[Long] = ScanHistoryKey.of(scan, bytes).map(_.size)
+    assert(bucket(0L).isEmpty && bucket(-5L).isEmpty)
+    assert(Seq(1L, 3L, GiB - 1, GiB, Long.MaxValue).map(bucket) ==
+      Seq(0L, 1L, 29L, 30L, 62L).map(Some(_)))
+  }
+
+  test("search list: exact, then the size neighbours, then any literals within one bucket") {
+    val list = sized(scan).searchList
+    def one(value: DimValue): DimMatch = DimMatch.equalTo(value)
+    def oneOf(buckets: Long*): DimMatch = DimMatch.in(buckets.map(b => DimValue.of(b)).asJava)
+    val plan = "plan" -> one(DimValue.of(scan.plan))
+    val literals = "literals" -> one(DimValue.of(scan.literals))
+    assert(list == Seq(
+      Map(plan, literals, "size" -> one(DimValue.of(39L))),
+      Map(plan, literals, "size" -> oneOf(38L, 40L)),
+      Map(plan, "size" -> oneOf(38L, 39L, 40L))))
+    // There is no bucket below 0.
+    assert(sized(scan, 0L).searchList(1) == Map(plan, literals, "size" -> oneOf(1L)))
+    assert(sized(scan, 0L).searchList(2) == Map(plan, "size" -> oneOf(0L, 1L)))
+  }
+
+  test("decides from a reading of the same scan") {
     val store = storeWith(4.0 -> (now - 1000))
     assert(decide(heuristic(store)) == 256 * MiB)
   }
 
-  test("summary request: table bound, window [now - 7 days, now + 1), limit 1") {
+  test("one request carries the whole search list, over the planning window") {
     val store = storeWith(4.0 -> (now - 1000))
     decide(heuristic(store))
-    assert(store.summarizeCalls.size == 1)
-    val (request, timeout) = store.summarizeCalls.head
+    assert(store.lookupCalls.size == 1, "one request, one call")
+    assert(store.summarizeCalls.isEmpty, "no request per tier")
+    val (request, timeout) = store.lookupCalls.head
+    assert(timeout == policy.planningTimeout)
     assert(request.metric() == ScanExpansionRatio.metric)
-    assert(request.bound() == Collections.singletonMap("table", DimValue.of(table)))
     // The window is the configured maximum age, 7 days by default.
     assert(request.fromMs() == now - Duration.ofDays(7).toMillis)
     assert(request.toMs() == now + 1)
-    assert(request.limit() == 1)
-    assert(timeout == policy.planningTimeout)
+    assert(request.tiers().asScala == sized(scan).searchList.map(_.asJava))
   }
 
   /** Like `decide`, with the configured maximum age of a reading. */
   private def decideWithin(h: ScanSplitHeuristic, maxAge: Duration): Long =
-    h.fileSourceSplit(Some(table), Static,
-      name => ScanContext(name, 960 * GiB, GiB, 96L, Static, Limits.copy(maxAge = maxAge)), now)
+    decide(h, limits = Limits.copy(maxAge = maxAge))
 
   test("a reading older than the planning age is ignored unless the age is raised") {
     val store = storeWith(4.0 -> (now - Duration.ofDays(9).toMillis))
@@ -128,9 +176,9 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
   test("the configured age sets the lookup window and is capped at the store retention") {
     val store = storeWith(4.0 -> (now - Duration.ofDays(20).toMillis))
     assert(decideWithin(heuristic(store), Duration.ofDays(30)) == Static)
-    assert(store.summarizeCalls.last._1.fromMs() == now - Duration.ofDays(14).toMillis)
+    assert(store.lookupCalls.last._1.fromMs() == now - Duration.ofDays(14).toMillis)
     decideWithin(heuristic(store), Duration.ofDays(3))
-    assert(store.summarizeCalls.last._1.fromMs() == now - Duration.ofDays(3).toMillis)
+    assert(store.lookupCalls.last._1.fromMs() == now - Duration.ofDays(3).toMillis)
     // Changing the lookup age never changes what is declared.
     assert(store.declareCalls.nonEmpty)
     assert(store.declareCalls.forall(_._1.asScala.forall(
@@ -152,22 +200,89 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(decide(heuristic(store)) == Static)
   }
 
-  test("no history for the table means no decision") {
-    val store = storeWith(4.0 -> (now - 1000))
-    assert(decide(heuristic(store), "cat.db.other") == Static)
+  test("another plan, even by one bit, has no history, whatever its literals") {
+    val store = storeHolding(sized(scan) -> 4.0)
+    val otherPlan = PlanKey(scan.plan ^ 1L, scan.literals)
+    assert(decide(heuristic(store), otherPlan) == Static)
+    assert(decide(heuristic(store), PlanKey(otherPlan.plan, nextDay.literals)) == Static)
     assert(decide(heuristic(new FakeMetricStore)) == Static)
   }
 
-  test("table keys are exact: case differs, history differs") {
+  test("the aggregate combines the readings of the closest tier that has any") {
+    // Tier 3 holds three readings in three size buckets: 2, 4 and 6, the newest being 4.
+    val store = new FakeMetricStore
+    store.declare(Collections.singletonList(ScanExpansionRatio.schema), Duration.ofSeconds(1))
+    Seq((Bucket - 1, 2.0, 3000L), (Bucket, 4.0, 1000L), (Bucket + 1, 6.0, 2000L)).foreach {
+      case (bucket, ratio, age) =>
+        store.record(observation(sized(nextDay, bucket), ratio, now - age))
+    }
+    assert(Limits.aggregate == RatioAggregate.Latest)
+    Seq(RatioAggregate.Latest -> 256 * MiB, RatioAggregate.Mean -> 256 * MiB,
+        RatioAggregate.Min -> 512 * MiB, RatioAggregate.Max -> (GiB / 6.0).toLong,
+        // 2, 4 and 6 are within a factor of three, so consistent takes their mean.
+        RatioAggregate.Consistent -> 256 * MiB).foreach {
+      case (aggregate, expected) =>
+        assert(decide(heuristic(store), limits = Limits.copy(aggregate = aggregate)) == expected,
+          aggregate.name)
+    }
+  }
+
+  test("consistent: readings within a factor of three give their mean, others Spark's split") {
+    val consistent = Limits.copy(aggregate = RatioAggregate.Consistent)
+    val agree = storeHolding(sized(scan) -> 3.0)
+    agree.record(observation(sized(scan), 5.0, now - 500))
+    assert(decide(heuristic(agree), limits = consistent) == 256 * MiB)
+    val disagree = storeHolding(sized(scan) -> 1.0)
+    disagree.record(observation(sized(scan), 4.0, now - 500))
+    assert(decide(heuristic(disagree), limits = consistent) == Static)
+    // Exactly 3x apart still agrees: the mean of 1 and 3.
+    val boundary = storeHolding(sized(scan) -> 1.0)
+    boundary.record(observation(sized(scan), 3.0, now - 500))
+    assert(decide(heuristic(boundary), limits = consistent) == 512 * MiB)
+  }
+
+  test("every aggregate uses only the closest tier with readings, not the farther ones") {
+    // Tier 1 holds 2 and 4; tier 3 (another day) holds 8, which no aggregate may use.
+    val store = storeHolding(sized(scan) -> 2.0)
+    store.record(observation(sized(scan), 4.0, now - 500))
+    store.record(observation(sized(nextDay), 8.0, now - 100))
+    Seq(RatioAggregate.Latest -> 256 * MiB, RatioAggregate.Mean -> (GiB / 3.0).toLong,
+        RatioAggregate.Min -> 512 * MiB, RatioAggregate.Max -> 256 * MiB,
+        RatioAggregate.Consistent -> (GiB / 3.0).toLong).foreach {
+      case (aggregate, expected) =>
+        assert(decide(heuristic(store), limits = Limits.copy(aggregate = aggregate)) == expected,
+          aggregate.name)
+    }
+  }
+
+  test("a closer tier whose readings are all unusable falls through to the next with readings") {
     val store = storeWith(4.0 -> (now - 1000))
-    assert(decide(heuristic(store), table.toUpperCase(java.util.Locale.ROOT)) ==
-      Static)
+    store.lookupRaw = Some(Collections.singletonList(LookupResponse.ok(java.util.Arrays.asList(
+      java.util.Arrays.asList(Reading.of(-1.0, now - 10), Reading.of(0.0, now - 20)),
+      Collections.emptyList[Reading](),
+      Collections.singletonList(Reading.of(2.0, now - 30))))))
+    Seq(RatioAggregate.Latest, RatioAggregate.Consistent).foreach { aggregate =>
+      assert(decide(heuristic(store), limits = Limits.copy(aggregate = aggregate)) == 512 * MiB,
+        aggregate.name)
+    }
+  }
+
+  test("consistent passes over a closer tier that disagrees for a farther one that agrees") {
+    // Tier 1 holds 1 and 4, more than 3x apart; tier 3 (another day) holds 2 and 2.5.
+    val store = storeHolding(sized(scan) -> 1.0)
+    store.record(observation(sized(scan), 4.0, now - 500))
+    store.record(observation(sized(nextDay), 2.0, now - 300))
+    store.record(observation(sized(nextDay), 2.5, now - 200))
+    assert(decide(heuristic(store), limits = Limits.copy(aggregate = RatioAggregate.Consistent)) ==
+      (GiB / 2.25).toLong)
+    // latest keeps the closest tier: its newest reading, 4.
+    assert(decide(heuristic(store)) == 256 * MiB)
   }
 
   test("disabled heuristic never touches the store") {
     val store = storeWith(4.0 -> (now - 1000))
     assert(decide(heuristic(store, enabled = false)) == Static)
-    assert(store.declareCalls.isEmpty && store.summarizeCalls.isEmpty)
+    assert(store.declareCalls.isEmpty && store.lookupCalls.isEmpty)
   }
 
   test("built-in no-op store: no decision, one log line") {
@@ -189,7 +304,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
       assert(decide(h) == Static, code)
       h.recordAll(scanContext(decoded = 400 * MiB))
       assert(store.declareCalls.size == 1, s"$code: declared once and cached")
-      assert(store.summarizeCalls.isEmpty, code)
+      assert(store.lookupCalls.isEmpty, code)
       assert(store.offered.isEmpty, code)
       assert(h.historyOf.reportedReasons == Set(s"declare-$code"))
     }
@@ -215,14 +330,19 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     }
   }
 
-  test("malformed or failing summarize: no decision") {
-    val malformed = Seq(
-      FakeMetricStore.emptyResponses,
-      java.util.Arrays.asList(SummaryResponse.ok(null), SummaryResponse.ok(null)),
+  test("malformed or failing lookup: no decision") {
+    def okWith(tiers: Int): LookupResponse =
+      LookupResponse.ok(Seq.fill(tiers)(Collections.emptyList[Reading]()).asJava)
+    val malformed: Seq[java.util.List[LookupResponse]] = Seq(
+      Collections.emptyList[LookupResponse](),
+      // Two responses to one request.
+      java.util.Arrays.asList(okWith(3), okWith(3)),
+      // One list for a request of three tiers.
+      Collections.singletonList(okWith(1)),
       null)
     malformed.foreach { responses =>
       val store = storeWith(4.0 -> (now - 1000))
-      store.summarizeRaw = Some(responses)
+      store.lookupRaw = Some(responses)
       val h = heuristic(store)
       assert(decide(h) == Static)
       assert(h.historyOf.reportedReasons == Set("lookup-malformed"))
@@ -235,70 +355,12 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
       Set("lookup-java.lang.IllegalStateException"))
   }
 
-  test("malformed table names are not tracked") {
-    val store = storeWith(4.0 -> (now - 1000))
-    val h = heuristic(store)
-    val badUtf16 = "db.\ud800"
-    assert(decide(h, badUtf16) == Static)
-    h.recordAll(scanContext(400 * MiB).copy(table = badUtf16))
-    assert(store.summarizeCalls.isEmpty && store.offered.isEmpty)
-    assert(h.historyOf.reportedReasons == Set("untrackable-key"))
-  }
-
-  test("over-long table names are tracked under their capped key") {
-    val store = new FakeMetricStore
-    val h = heuristic(store)
-    val long = "t" * 300
-    h.recordAll(scanContext(400 * MiB).copy(table = long))
-    assert(store.stored.map(_.dimensions().get("table")) ==
-      Seq(DimValue.of(ScanSplitHeuristic.capped(long))))
-    assert(decide(h, long, store.stored.head.timestampMs() + 1) == 256 * MiB)
-  }
-
-  private def utf8(s: String): Int = s.getBytes(StandardCharsets.UTF_8).length
-
-  test("capped: keys at the cap are kept, longer ones hashed with a readable prefix") {
-    val limit = ScanSplitHeuristic.MAX_KEY_BYTES
-    assert(limit == 253)
-    val atCap = "k" * limit
-    assert(ScanSplitHeuristic.capped(atCap) eq atCap)
-    val long = "cat.db." + "x" * 400
-    val c = ScanSplitHeuristic.capped(long)
-    assert(c == ScanSplitHeuristic.capped(long), "deterministic")
-    assert(utf8(c) == limit)
-    assert(c.matches("cat\\.db\\.x+#[0-9a-f]{16}"))
-    assert(ScanSplitHeuristic.capped(long + "y") != c)
-    // Never cuts a multi-byte character: 2-byte and 4-byte code points.
-    Seq("\u00e9", "\ud83d\ude00").foreach { ch =>
-      val capped = ScanSplitHeuristic.capped(ch * 200)
-      val prefix = capped.substring(0, capped.indexOf('#'))
-      assert(prefix.codePoints().allMatch(_ == ch.codePointAt(0)))
-      assert(utf8(capped) <= limit)
-      assert(DimValue.of(capped) != null)
-    }
-  }
-
-  private def p(s: String): Path = new Path(s)
-
-  test("scanKey: catalog name, else sorted distinct normalized roots") {
-    assert(ScanSplitHeuristic.scanKey(Some(table), fail("roots read")) ==
-      Right(table))
-    val key = ScanSplitHeuristic.scanKey(None,
-      Seq(p("s3a://b/t2/"), p("s3a://user:secret@b/t1"), p("s3a://b/t2")))
-    assert(key == Right("path:s3a://b/t1,s3a://b/t2"))
-    assert(ScanSplitHeuristic.scanKey(None, Seq(p("s3a://b/t1"))) !=
-      ScanSplitHeuristic.scanKey(None, Seq(p("s3a://b/t1"), p("s3a://b/t3"))))
-    val roots = (0 until 20).map(i => p(s"hdfs://nn/warehouse/some/long/table/path/dt=$i"))
-    val capped = ScanSplitHeuristic.scanKey(None, roots).toOption.get
-    assert(capped.startsWith("path:hdfs://nn/warehouse/") && utf8(capped) <= 253)
-  }
-
-  test("scanKey: no usable key without roots; a file list keys on its exact files") {
-    assert(ScanSplitHeuristic.scanKey(None, Nil) == Left("no root paths"))
-    assert(ScanSplitHeuristic.scanKey(None, Seq(p("file:/d/b.parquet"), p("file:/d/a.parquet"))) ==
-      Right("path:file:/d/a.parquet,file:/d/b.parquet"))
-    assert(ScanSplitHeuristic.scanKey(None, Seq(p("file:/d/a.parquet"))) !=
-      ScanSplitHeuristic.scanKey(None, Seq(p("file:/d/a.parquet"), p("file:/d/b.parquet"))))
+  test("a key that cannot be derived is no key, and never an exception") {
+    val key = PlanKey(7L, PlanKey.NONE)
+    assert(ScanSplitHeuristic.derived(Some(key)) == Some(key))
+    assert(ScanSplitHeuristic.derived(None).isEmpty)
+    assert(ScanSplitHeuristic.derived(throw new IllegalStateException("boom")).isEmpty)
+    assert(ScanSplitHeuristic.derived(throw new NoSuchElementException("no part")).isEmpty)
   }
 
   test("observeReader records the split's decoded bytes once the reader is exhausted") {
@@ -324,17 +386,17 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(totals.drain() == ReadTotals(10L, 7L, 1L))
   }
 
-  test("observe records decoded / listed under the table") {
+  test("observe records decoded / listed under the scan's key") {
     val store = new FakeMetricStore
     val h = heuristic(store)
     h.recordAll(scanContext(decoded = 400 * MiB))
     assert(store.stored.size == 1)
     val o = store.stored.head
     assert(o.metric() == ScanExpansionRatio.metric)
-    assert(o.dimensions() == Collections.singletonMap("table", DimValue.of(table)))
+    assert(o.dimensions() == sized(scan).dimensions.asJava)
     assert(o.value() == 4.0)
     // The next decision uses it.
-    assert(decide(h, table, o.timestampMs() + 1) == 256 * MiB)
+    assert(decide(h, scan, o.timestampMs() + 1) == 256 * MiB)
   }
 
   test("ratio of a complete scan: decoded over listed, over all its splits") {
@@ -492,17 +554,19 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(totals.drain() == ReadTotals(0L, 0L, 0L))
   }
 
-  test("file-source hook: catalog tables only, and only while enabled") {
+  test("file-source hook: scans with a key and listed bytes, and only while enabled") {
     val store = storeWith(4.0 -> (now - 1000))
-    def ctx(name: String): ScanContext = ScanContext(name, 960 * GiB, GiB, 96L, 123L, Limits)
-    val noContext: String => ScanContext = _ => fail("context built without a decision")
+    def ctx(hk: ScanHistoryKey): ScanContext =
+      ScanContext(hk, Listed, GiB, 96L, 123L, Limits)
+    val noContext: ScanHistoryKey => ScanContext = _ => fail("context built without a decision")
     val disabled = heuristic(store, enabled = false)
-    assert(disabled.fileSourceSplit(Some(table), 123L, noContext, now) == 123L)
+    assert(disabled.fileSourceSplit(Some(scan), 123L, Listed, noContext, now) == 123L)
     val h = heuristic(store)
-    assert(h.fileSourceSplit(None, 123L, noContext, now) == 123L)
-    assert(store.summarizeCalls.isEmpty)
-    assert(h.fileSourceSplit(Some(table), 123L, ctx, now) == 256 * MiB)
-    assert(h.fileSourceSplit(Some("cat.db.other"), 123L, ctx, now) == 123L)
+    assert(h.fileSourceSplit(None, 123L, Listed, noContext, now) == 123L)
+    assert(h.fileSourceSplit(Some(scan), 123L, 0L, noContext, now) == 123L, "nothing listed")
+    assert(store.lookupCalls.isEmpty)
+    assert(h.fileSourceSplit(Some(scan), 123L, Listed, ctx, now) == 256 * MiB)
+    assert(h.fileSourceSplit(Some(PlanKey(0L, 0L)), 123L, Listed, ctx, now) == 123L)
   }
 
 }

@@ -20,9 +20,11 @@ import java.nio.file.Files
 import java.time.Duration
 import java.util.Collections
 
-import com.nvidia.spark.history.{DimValue, MetricStores, Observation}
+import scala.collection.JavaConverters._
+
+import com.nvidia.spark.history.{MetricStores, Observation}
 import com.nvidia.spark.rapids.perf.{FakeMetricStore, HistoryPolicy, HistorySizedFileScan,
-  ScanExpansionRatio, ScanSplitHeuristic}
+  PlanKey, ScanExpansionRatio, ScanHistoryKey, ScanSplitHeuristic}
 import org.apache.hadoop.fs.Path
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -141,10 +143,12 @@ class ScanSplitResizeSuite extends AnyFunSuite {
       val store = new FakeMetricStore
       store.declare(Collections.singletonList(ScanExpansionRatio.schema), Duration.ofSeconds(1))
       val index = newIndex(spark, out)
-      val key = ScanSplitHeuristic.scanKey(None, index.rootPaths).toOption.get
+      // What the scan itself derives: its plan, no literals, and the bucket of its listed bytes.
+      val key = PlanKey.forFileScan(None, index.rootPaths, schema, Seq.empty, Seq.empty).get
+      val listed = index.listFiles(Nil, Nil).flatMap(_.files.map(_.getLen)).sum
       // 1 GiB target batch / 1e7 = 107 bytes, above the configured 100 byte floor.
       store.record(new Observation(ScanExpansionRatio.metric,
-        Collections.singletonMap(ScanExpansionRatio.dimension, DimValue.of(key)), 1e7,
+        ScanHistoryKey.of(key, listed).get.dimensions.asJava, 1e7,
         System.currentTimeMillis() - 1000))
       val registration = MetricStores.install(store)
       ScanSplitHeuristic.instance.enable(

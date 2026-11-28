@@ -186,6 +186,21 @@ The request belongs to the heuristic. One heuristic may use the latest matching 
 another uses several observations or the entire bounded window. The store provides selection and
 summary operations; it does not impose one evidence policy on every heuristic.
 
+## Look up earlier evidence for several tiers in one request
+
+`store.lookup(requests, budget)` returns the evidence of several tiers in one call, and the caller
+decides which to use. A `LookupRequest` has a metric, ordered tiers (each a
+`Map<String, DimMatch>` built with `.tier(...)`, from the most specific to the most general) and a
+window. A tier names the dimensions it constrains with `DimMatch.equalTo(value)` or
+`DimMatch.in(values)`; a dimension it leaves out matches any value.
+
+An `OK` `LookupResponse` has one list of `Reading`s (value and observation time) per tier
+(`tiers()`), newest first (observation time, then acceptance order, descending), with every
+observation in the window returned once, in the first tier that matches it; an empty list means
+that tier had none. The store narrows the window to its planning-visibility age. Statuses, deadlines and the batch cap are
+those of `summarize`. A store that does not implement `lookup` answers every request
+`UNAVAILABLE`, which a consumer treats as abstention.
+
 ## Treat responses as permission to consider evidence
 
 A valid batch returns one positional response per request. Apply these rules before metric-specific

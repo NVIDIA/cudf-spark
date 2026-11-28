@@ -22,7 +22,7 @@ import scala.collection.mutable.HashMap
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
-import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitObservingReaderFactory,
+import com.nvidia.spark.rapids.perf.{PlanKey, ScanSplitHeuristic, SplitObservingReaderFactory,
   SplitTotals}
 import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, SparkShimImpl, StaticPartitionShims}
 import org.apache.hadoop.fs.Path
@@ -493,7 +493,8 @@ case class GpuFileSourceScanExec(
     // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
     val rdd = inputRDD.asInstanceOf[RDD[ColumnarBatch]]
     // Per execution: a re-run plan reuses `inputRDD`.
-    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, plannedListedBytes,
+      splitBytes, sparkContext)
     rdd.mapPartitionsInternal { rawBatches =>
       // input_file_name() builds numRows * pathBytes of string data, which cudf caps at 2 GiB,
       // so oversized batches are sliced before the projection sees them.
@@ -605,9 +606,13 @@ case class GpuFileSourceScanExec(
     getFinalRDD(readFile, partitions)
   }
 
-  /** History key: catalog name, else "path:" roots; None while history is off or unusable. */
-  @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
-    tableIdentifier.map(_.unquotedString), relation.location.rootPaths)
+  /**
+   * History key: what this scan reads, from its plan; None while history is off or unusable.
+   * First used when the splits are planned, after dynamic pruning filters have their results.
+   */
+  @transient private lazy val historyKey: Option[PlanKey] =
+    ScanSplitHeuristic.historyKey(PlanKey.forFileScan(tableIdentifier.map(_.unquotedString),
+      relation.location.rootPaths, requiredSchema, partitionFilters, dataFilters))
 
   /** Decoded bytes and partitions read; keyed scans only. */
   @transient private lazy val splitBytes: Option[SplitTotals] =
@@ -615,6 +620,9 @@ case class GpuFileSourceScanExec(
 
   /** Reads planned, files or partitions by how the scan reads; 0 while history is off. */
   @transient private var plannedSplits: Int = 0
+
+  /** On-disk bytes of the planned reads, the size of the recorded key; 0 while history is off. */
+  @transient private var plannedListedBytes: Long = 0L
 
   private def getFinalRDD(
       readFile: Option[(PartitionedFile) => Iterator[InternalRow]],
@@ -648,6 +656,10 @@ case class GpuFileSourceScanExec(
       FilePartitionShims.copyWithFiles(partition, newFiles)
     }
 
+    splitBytes.foreach { _ =>
+      plannedListedBytes =
+        locatedPartitions.map(p => FilePartitionShims.getFiles(p).map(_.length).sum).sum
+    }
     if (isPerFileReadEnabled) {
       logInfo("Using the original per file reader")
       // A read is a file here, and a partition below.
