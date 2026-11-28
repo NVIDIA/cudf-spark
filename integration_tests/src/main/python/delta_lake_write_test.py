@@ -2639,6 +2639,45 @@ def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
+def test_delta_replace_where_rejects_out_of_partition_rows(spark_tmp_path):
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.replaceWhere.dataColumns.enabled": "false"})
+
+    def create_tables(spark):
+        for suffix in ["CPU", "GPU"]:
+            (spark.range(2).selectExpr("id", "id % 2 AS p").write.format("delta")
+             .partitionBy("p").save(f"{spark_tmp_path}/{suffix}"))
+
+    with_cpu_session(create_tables, conf=conf)
+
+    def overwrite(spark, path):
+        with pytest.raises(AnalysisException, match="p=1") as error:
+            (spark.range(2, 4).selectExpr("id", "id % 2 AS p").write.format("delta")
+             .mode("overwrite").option("replaceWhere", "p = 0").save(path))
+        assert "p = 0" in str(error.value)
+        # Older PySpark versions expose the Delta error through the message only.
+        get_condition = (getattr(error.value, "getCondition", None) or
+                         getattr(error.value, "getErrorClass", None))
+        if get_condition:
+            assert get_condition() == "DELTA_REPLACE_WHERE_MISMATCH"
+
+    with_cpu_session(lambda spark: overwrite(spark, f"{spark_tmp_path}/CPU"), conf=conf)
+    assert_rapids_delta_write(lambda spark: overwrite(spark, f"{spark_tmp_path}/GPU"),
+                              conf=conf, required_gpu_classes=["GpuRapidsDeltaWriteExec"],
+                              require_non_empty=True)
+
+    def check_snapshots(spark):
+        for suffix in ["CPU", "GPU"]:
+            path = f"{spark_tmp_path}/{suffix}"
+            assert read_delta_path(spark, path).orderBy("id").collect() == [(0, 0), (1, 1)]
+            history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`").select("version").collect()
+            assert history == [(0,)]
+
+    with_cpu_session(check_snapshots, conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Requires Delta 4.2+ CDF writes")
 @pytest.mark.parametrize("operation", ["add_only", "remove_only"])
