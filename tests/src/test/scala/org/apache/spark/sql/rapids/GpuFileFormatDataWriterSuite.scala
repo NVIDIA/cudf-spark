@@ -19,9 +19,11 @@ import java.io.{IOException, OutputStream}
 import java.net.URI
 import java.util.concurrent.{ExecutorService, TimeUnit}
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.{CudaFatalException, HostMemoryBuffer, Rmm, RmmAllocationMode, Table,
   TableWriter}
-import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion, SpillableColumnarBatch}
+import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuBoundReference, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
@@ -43,13 +45,14 @@ import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.io.FileCommitProtocol
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, ExprId, SortOrder}
 import org.apache.spark.sql.execution.datasources.WriteTaskStats
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{DataType, DoubleType, FloatType, IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -659,6 +662,234 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
           .writeSpillableAndClose(any())
         // three because we wrote 3 files (15 rows, limit was 5 rows per file)
         verify(mockOutputWriter, times(3)).close()
+      }
+    }
+  }
+
+  private case class FloatingWrite(
+      partitionBits: Long, bucket: Option[Int], counter: Int, rows: Seq[Int])
+
+  private def recordFloatingWrites(
+      writer: GpuDynamicPartitionDataSingleWriter,
+      dataType: DataType): ArrayBuffer[FloatingWrite] = {
+    val writes = ArrayBuffer.empty[FloatingWrite]
+    doAnswer { invocation =>
+      val part = invocation.getArgument[Option[InternalRow]](0).get
+      val value = if (dataType == FloatType) part.getFloat(0).toDouble else part.getDouble(0)
+      val bits = java.lang.Double.doubleToRawLongBits(value)
+      val bucket = invocation.getArgument[Option[Int]](1)
+      val counter = invocation.getArgument[Int](2)
+      val output = mock[ColumnarOutputWriter]
+      doAnswer { write =>
+        val input = write.getArgument[SpillableColumnarBatch](0)
+        val rowCount = input.numRows()
+        withResource(input) { _ =>
+          withResource(input.getColumnarBatch()) { cb =>
+            withResource(GpuColumnVector.extractBases(cb).head.copyToHost()) { host =>
+              writes += FloatingWrite(bits, bucket, counter,
+                (0 until cb.numRows()).map(i => host.getInt(i)))
+            }
+          }
+        }
+        Long.box(rowCount)
+      }.when(output).writeSpillableAndClose(any())
+      output
+    }.when(writer).newWriter(any(), any(), any())
+    writes
+  }
+
+  private def floatingBatch(dataType: DataType, values: Seq[Double],
+      rows: Seq[Int], buckets: Option[Seq[Int]] = None): ColumnarBatch = {
+    withResource(ai.rapids.cudf.ColumnVector.fromDoubles(values: _*)) { doubles =>
+      closeOnExcept(GpuColumnVector.from(
+          doubles.castTo(GpuColumnVector.getNonNestedRapidsType(dataType)), dataType)) { parts =>
+        closeOnExcept(GpuColumnVector.from(
+            ai.rapids.cudf.ColumnVector.fromInts(rows: _*), IntegerType)) { data =>
+          val bucketColumns: Seq[ColumnVector] = buckets.toSeq.map { ids =>
+            GpuColumnVector.from(ai.rapids.cudf.ColumnVector.fromInts(ids: _*), IntegerType)
+          }
+          val columns = Array[ColumnVector](parts, data) ++ bucketColumns
+          new ColumnarBatch(columns, rows.size)
+        }
+      }
+    }
+  }
+
+  Seq(FloatType, DoubleType).foreach { dataType =>
+    test(s"dynamic partition data writer retries a $dataType partition split") {
+      resetMocks()
+      val batch = withResource(ai.rapids.cudf.ColumnVector.fromDoubles(
+          -0.0d, -0.0d, 0.0d, 0.0d)) { doubles =>
+        val dtype = GpuColumnVector.getNonNestedRapidsType(dataType)
+        closeOnExcept(GpuColumnVector.from(doubles.castTo(dtype), dataType)) { parts =>
+          val data = GpuColumnVector.from(
+            ai.rapids.cudf.ColumnVector.fromInts(10, 11, 20, 21), IntegerType)
+          new ColumnarBatch(Array[ColumnVector](parts, data), 4)
+        }
+      }
+      withColumnarBatchesVerifyClosed(Seq(batch)) {
+        when(mockJobDescription.customPartitionLocations)
+          .thenReturn(Map.empty[TablePartitionSpec, String])
+        var attempts = 0
+        val writer = spy(new GpuDynamicPartitionDataSingleWriter(
+            mockJobDescription, mockTaskAttemptContext, mockCommitter, None) {
+          override protected def copyToHostAsBatch(
+              input: Table, colTypes: Array[DataType]): ColumnarBatch = {
+            attempts += 1
+            if (attempts == 1) {
+              throw new GpuRetryOOM("retry after floating partition grouping")
+            }
+            super.copyToHostAsBatch(input, colTypes)
+          }
+        })
+        val writes = recordFloatingWrites(writer, dataType)
+        try {
+          writer.writeWithIterator(Iterator(batch))
+          writer.commit()
+          assert(attempts == 2)
+          assert(writes.flatMap(_.rows).sorted == Seq(10, 11, 20, 21))
+          writes.foreach { write =>
+            val expected = if (write.partitionBits == Long.MinValue) Seq(10, 11) else Seq(20, 21)
+            assert(write.partitionBits == Long.MinValue || write.partitionBits == 0L)
+            assert(write.rows.sorted == expected)
+            assert(write.bucket.isEmpty)
+            assert(write.counter == 0)
+          }
+          verify(writer, times(2)).newWriter(any(), any(), any())
+        } finally {
+          writer.releaseResources()
+        }
+      }
+    }
+
+    test(s"concurrent data writer retries a $dataType partition split") {
+      resetMocks()
+      val batch = withResource(ai.rapids.cudf.ColumnVector.fromDoubles(
+          -0.0d, -0.0d, 0.0d, 0.0d)) { doubles =>
+        val dtype = GpuColumnVector.getNonNestedRapidsType(dataType)
+        closeOnExcept(GpuColumnVector.from(doubles.castTo(dtype), dataType)) { parts =>
+          val data = GpuColumnVector.from(
+            ai.rapids.cudf.ColumnVector.fromInts(10, 11, 20, 21), IntegerType)
+          new ColumnarBatch(Array[ColumnVector](parts, data), 4)
+        }
+      }
+      withColumnarBatchesVerifyClosed(Seq(batch)) {
+        when(mockTaskAttemptContext.getConfiguration).thenReturn(new Configuration())
+        when(mockJobDescription.customPartitionLocations)
+          .thenReturn(Map.empty[TablePartitionSpec, String])
+        val sortOrder = partSpec.map(SortOrder(_, Ascending))
+        val concurrentSpec = GpuConcurrentOutputWriterSpec(9, allCols, 1, sortOrder)
+        var attempts = 0
+        val writer = spy(new GpuDynamicPartitionDataConcurrentWriter(
+            mockJobDescription, mockTaskAttemptContext, mockCommitter, concurrentSpec, None) {
+          override protected def copyToHostAsBatch(
+              input: Table, colTypes: Array[DataType]): ColumnarBatch = {
+            attempts += 1
+            // No writer may be created by either attempt before grouping succeeds.
+            verify(mockOutputWriterFactory, never())
+              .newInstance(any(), any(), any(), any(), any(), any())
+            if (attempts == 1) {
+              throw new GpuRetryOOM("retry after concurrent floating partition grouping")
+            }
+            super.copyToHostAsBatch(input, colTypes)
+          }
+        })
+        val writes = recordFloatingWrites(writer, dataType)
+        try {
+          writer.writeWithIterator(Iterator(batch))
+          writer.commit()
+          assert(attempts == 2)
+          assert(writes.flatMap(_.rows).sorted == Seq(10, 11, 20, 21))
+          writes.foreach { write =>
+            val expected = if (write.partitionBits == Long.MinValue) Seq(10, 11) else Seq(20, 21)
+            assert(write.partitionBits == Long.MinValue || write.partitionBits == 0L)
+            assert(write.rows.sorted == expected)
+            assert(write.bucket.isEmpty)
+            assert(write.counter == 0)
+          }
+          verify(writer, times(2)).newWriter(any(), any(), any())
+        } finally {
+          writer.releaseResources()
+        }
+      }
+    }
+
+    Seq(false, true).foreach { bucketed =>
+      test(s"$dataType partition rows and counters survive revisits, bucketed=$bucketed") {
+        resetMocks()
+        val values = Seq(-0.0d, 0.0d, -0.0d, 0.0d)
+        val buckets = if (bucketed) Some(Seq(0, 0, 1, 1)) else None
+        val batches = Seq(
+          floatingBatch(dataType, values, Seq(10, 20, 11, 21), buckets),
+          floatingBatch(dataType, values, Seq(12, 22, 13, 23), buckets))
+        withColumnarBatchesVerifyClosed(batches) {
+          if (bucketed) {
+            when(mockJobDescription.bucketSpec).thenReturn(Some(GpuWriterBucketSpec(
+              GpuBoundReference(2, IntegerType, nullable = false)(
+                allCols(2).exprId, allCols(2).name), _ => "")))
+          }
+          val writer = prepareDynamicPartitionSingleWriter()
+          val writes = recordFloatingWrites(writer, dataType)
+          try {
+            writer.writeWithIterator(batches.iterator)
+            writer.commit()
+            val expected = for {
+              batch <- Seq(0, 1)
+              negative <- Seq(true, false)
+              bucket <- (if (bucketed) Seq(Some(0), Some(1)) else Seq(None))
+            } yield {
+              val start = (if (negative) 10 else 20) + 2 * batch
+              val rows = bucket.map(id => Seq(start + id)).getOrElse(Seq(start, start + 1))
+              FloatingWrite(if (negative) Long.MinValue else 0L, bucket, batch, rows)
+            }
+            assert(writes.toSeq == expected)
+          } finally {
+            writer.releaseResources()
+          }
+        }
+      }
+    }
+
+    test(s"large sorted nonzero $dataType partitions retain their boundary writer") {
+      resetMocks()
+      // More than 2^21 rows exercises cuDF's arbitrary hash-group ordering.
+      val count = (1 << 21) + 16
+      val first = floatingBatch(dataType,
+        Seq(-5.0d, -1.0d, 1.0d, 5.0d).flatMap(v => Seq.fill(count / 4)(v)),
+        0 until count)
+      val second = floatingBatch(dataType, Seq(5.0d, 6.0d), Seq(count, count + 1))
+      val batches = Seq(first, second)
+      withColumnarBatchesVerifyClosed(batches) {
+        val writer = prepareDynamicPartitionSingleWriter()
+        val writes = recordFloatingWrites(writer, dataType)
+        try {
+          writer.writeWithIterator(batches.iterator)
+          writer.commit()
+          assert(writes.map(_.partitionBits).toSeq == Seq(-5.0d, -1.0d, 1.0d, 5.0d, 5.0d, 6.0d)
+            .map(java.lang.Double.doubleToRawLongBits))
+          assert(writes.forall(_.counter == 0))
+          assert(writes.flatMap(_.rows).toSeq == (0 until count + 2))
+          verify(writer, times(5)).newWriter(any(), any(), any())
+        } finally {
+          writer.releaseResources()
+        }
+      }
+    }
+
+    test(s"dynamic partition data writer with an empty $dataType batch") {
+      resetMocks()
+      val schema = StructType(Seq(StructField("part", dataType),
+        StructField("data", IntegerType)))
+      val batches = Seq(GpuColumnVector.emptyBatch(schema))
+      withColumnarBatchesVerifyClosed(batches) {
+        val writer = prepareDynamicPartitionSingleWriter()
+        try {
+          writer.writeWithIterator(batches.iterator)
+          verify(writer, never()).newWriter(any(), any(), any())
+          verify(mockOutputWriter, never()).writeSpillableAndClose(any())
+        } finally {
+          writer.releaseResources()
+        }
       }
     }
   }

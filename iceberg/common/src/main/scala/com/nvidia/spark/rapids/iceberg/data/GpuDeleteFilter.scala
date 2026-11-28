@@ -19,9 +19,11 @@ package com.nvidia.spark.rapids.iceberg.data
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFileInfo._
@@ -34,9 +36,9 @@ import org.apache.iceberg.types.Types.NestedField
 import org.apache.iceberg.types.TypeUtil.getProjectedIds
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.expressions.ExprId
+import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId}
 import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
-import org.apache.spark.sql.types.{BooleanType, DataType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DoubleType, FloatType, IntegerType, LongType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /** Delete files split by the phase that applies them. */
@@ -385,30 +387,50 @@ class GpuDeleteFilter(
     val schema = eqDeleteSchema(eqIds)
     val sparkType = toSparkType(schema)
     val sparkTypes = sparkType.fields.map(_.dataType)
-    val buildSide = deleteLoader.loadDeletes(eqDeletes, schema, sparkTypes)
-    val buildKeys = eqIds
-      .indices
-      .map(idx => {
-        val field = sparkType.fields(idx)
-        GpuBoundReference(idx, field.dataType, field.nullable)(ExprId(eqIds(idx)), field.name)
-      })
-
-    val probeKeys = eqIds.zipWithIndex
-      .map {
-        case (id, index) =>
-          val field = sparkType.fields(index)
-          val inputIdx = requiredSchema.columns()
-            .asScala
-            .indexWhere(_.fieldId() == id)
-          GpuBoundReference(inputIdx, field.dataType, field.nullable)(ExprId(id), field.name)
+    val loaded = deleteLoader.loadDeletes(eqDeletes, schema, sparkTypes)
+    val buildSide = if (sparkTypes.exists(t => t == FloatType || t == DoubleType)) {
+      val spillable = withResource(loaded) { _ =>
+        closeOnExcept(loaded.releaseBatch()) { batch =>
+          SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+        }
       }
+      withRetryNoSplit(spillable) { attempt =>
+        withResource(attempt.getColumnarBatch()) { batch =>
+          withResource(GpuFloatingPointKeyUtils.encode(batch)) { encoded =>
+            LazySpillableColumnarBatch(encoded, "Encoded eq deletes")
+          }
+        }
+      }
+    } else {
+      loaded
+    }
+    closeOnExcept(buildSide) { _ =>
+      val buildKeys = eqIds
+        .indices
+        .map(idx => {
+          val field = sparkType.fields(idx)
+          GpuBoundReference(idx, buildSide.dataTypes(idx), field.nullable)(
+            ExprId(eqIds(idx)), field.name)
+        })
+
+      val probeKeys = eqIds.zipWithIndex
+        .map {
+          case (id, index) =>
+            val field = sparkType.fields(index)
+            val inputIdx = requiredSchema.columns()
+              .asScala
+              .indexWhere(_.fieldId() == id)
+            GpuIcebergEqualityKey(
+              GpuBoundReference(inputIdx, field.dataType, field.nullable)(ExprId(id), field.name))
+        }
 
 
-    DeleteFilterContext(buildSide,
-      buildKeys,
-      probeKeys,
-      parquetConf.metrics(OP_TIME_LEGACY),
-      parquetConf.metrics(JOIN_TIME))
+      DeleteFilterContext(buildSide,
+        buildKeys,
+        probeKeys,
+        parquetConf.metrics(OP_TIME_LEGACY),
+        parquetConf.metrics(JOIN_TIME))
+    }
   }
 
   private def eqDeleteSchema(eqIds: Seq[Int]): Schema = {
@@ -423,6 +445,24 @@ class GpuDeleteFilter(
   override def close(): Unit = {
     // Per-task build batches are owned and closed by HashedExistenceJoinIterator.
   }
+}
+
+private object GpuIcebergEqualityKey {
+  def apply(child: GpuExpression): GpuExpression = child.dataType match {
+    case FloatType | DoubleType => GpuIcebergFloatEqualityKey(child)
+    case _ => child
+  }
+}
+
+/** Iceberg distinguishes signed zeros but treats all NaN representations as equal. */
+private case class GpuIcebergFloatEqualityKey(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = child.dataType match {
+    case FloatType => IntegerType
+    case DoubleType => LongType
+  }
+
+  override protected def doColumnar(input: GpuColumnVector): CudfColumnVector =
+    GpuFloatingPointKeyUtils.encodeFloat(input)
 }
 
 private case class DeleteFilterContext(
