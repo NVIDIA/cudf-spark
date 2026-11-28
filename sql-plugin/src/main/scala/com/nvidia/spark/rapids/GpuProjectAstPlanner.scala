@@ -258,7 +258,7 @@ private[rapids] object GpuProjectAstPlanner {
         } else if (enableAst && canUseLegacy(gpu) && !isSimpleArithmetic(gpu)) {
           Some(AstInterpreted)
         } else if (enableAstJit && gpu.selfSupportsAstJit && gpu.selfTriggersAstJit &&
-            GpuBatchUtils.isFixedWidth(gpu.dataType) && canHostRegion(gpu, AstJit)) {
+            GpuAstJitExpression.isSupportedDataType(gpu.dataType) && canHostRegion(gpu, AstJit)) {
           Some(AstJit)
         } else if (canHostLegacyRegion(gpu) && !leavesSimpleArithmetic(gpu, _ => false)) {
           Some(AstInterpreted)
@@ -280,7 +280,7 @@ private[rapids] object GpuProjectAstPlanner {
     private def joinsJitRegion(node: Expression): Boolean = node match {
       case gpu: GpuExpression if gpu.deterministic && !isLeaf(gpu) =>
         gpu.selfSupportsAstJit && !gpu.selfTriggersAstJit &&
-          GpuBatchUtils.isFixedWidth(gpu.dataType) && canHostRegion(gpu, AstJit)
+          GpuAstJitExpression.isSupportedDataType(gpu.dataType) && canHostRegion(gpu, AstJit)
       case _ => false
     }
 

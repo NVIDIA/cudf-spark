@@ -226,7 +226,7 @@ trait GpuExpression extends Expression {
   /** Whether this node and its complete expression subtree support AST JIT. */
   final def supportsAstJit: Boolean = selfSupportsAstJit && children.forall {
     case child: GpuExpression => child.supportsAstJit
-    case _: AttributeReference => true
+    case attr: AttributeReference => GpuAstJitExpression.isSupportedDataType(attr.dataType)
     case _ => false
   }
 

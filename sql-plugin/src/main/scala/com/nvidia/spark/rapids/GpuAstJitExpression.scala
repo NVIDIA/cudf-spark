@@ -27,6 +27,8 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DateType, DecimalType,
+  DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, TimestampType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
@@ -71,9 +73,15 @@ object GpuAstJitExpression {
     }
   }
 
+  def isSupportedDataType(dataType: DataType): Boolean = dataType match {
+    case BooleanType | ByteType | ShortType | IntegerType | LongType |
+         FloatType | DoubleType | DateType | TimestampType | StringType | _: DecimalType => true
+    case _ => false
+  }
+
   private[rapids] def canUseAstJit(expression: Expression): Boolean = expression match {
     case gpuExpression: GpuExpression =>
-      GpuBatchUtils.isFixedWidth(expression.dataType) &&
+      isSupportedDataType(expression.dataType) &&
         gpuExpression.supportsAstJit && gpuExpression.containsAstJitTrigger
     case _ => false
   }

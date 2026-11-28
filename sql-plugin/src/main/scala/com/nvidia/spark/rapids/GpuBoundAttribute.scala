@@ -306,7 +306,7 @@ case class GpuBoundReference(ordinal: Int, dataType: DataType, nullable: Boolean
     (val exprId: ExprId, val name: String)
   extends GpuLeafExpression with ShimExpression {
 
-  override def selfSupportsAstJit: Boolean = true
+  override def selfSupportsAstJit: Boolean = GpuAstJitExpression.isSupportedDataType(dataType)
 
   override def toString: String =
     s"input[$ordinal, ${dataType.simpleString}, $nullable]($name#${exprId.id})"

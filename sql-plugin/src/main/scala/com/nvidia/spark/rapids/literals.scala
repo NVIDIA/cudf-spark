@@ -649,7 +649,7 @@ object GpuLiteral {
  */
 case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression {
 
-  override def selfSupportsAstJit: Boolean = true
+  override def selfSupportsAstJit: Boolean = GpuAstJitExpression.isSupportedDataType(dataType)
 
   // Assume this came from Spark Literal and no need to call Literal.validateLiteralValue here.
 
@@ -744,6 +744,7 @@ case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression
   override def selfConvertsToAst: Boolean = dataType match {
     case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
          StringType | TimestampType | DateType => true
+    case dt: DecimalType => dt.precision <= Decimal.MAX_LONG_DIGITS
     case _ => false
   }
 
@@ -756,7 +757,20 @@ case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression
       case LongType => ast.Literal.ofLong(value.asInstanceOf[java.lang.Long])
       case FloatType => ast.Literal.ofFloat(value.asInstanceOf[java.lang.Float])
       case DoubleType => ast.Literal.ofDouble(value.asInstanceOf[java.lang.Double])
-      case StringType => ast.Literal.ofString(value.asInstanceOf[UTF8String].toString)
+      case StringType =>
+        if (value == null) {
+          ast.Literal.ofNull(DType.STRING)
+        } else {
+          ast.Literal.ofString(value.asInstanceOf[UTF8String].toString)
+        }
+      case dt: DecimalType =>
+        val cudfType = DecimalUtil.createCudfDecimal(dt)
+        if (value == null) {
+          ast.Literal.ofNull(cudfType)
+        } else {
+          ast.Literal.ofDecimal(cudfType,
+            value.asInstanceOf[Decimal].toJavaBigDecimal.unscaledValue)
+        }
       case TimestampType =>
         ast.Literal.ofTimestampFromLong(DType.TIMESTAMP_MICROSECONDS,
           value.asInstanceOf[java.lang.Long])

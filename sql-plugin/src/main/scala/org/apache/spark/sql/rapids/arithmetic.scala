@@ -280,6 +280,8 @@ case class GpuUnaryPositive(child: Expression) extends GpuUnaryExpression
 
   override def selfConvertsToAst: Boolean = true
 
+  override def selfSupportsAstJit: Boolean = GpuAstJitExpression.isSupportedDataType(dataType)
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
   }

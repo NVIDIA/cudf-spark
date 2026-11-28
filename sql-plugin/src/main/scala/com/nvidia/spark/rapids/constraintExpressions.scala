@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids
 
+import ai.rapids.cudf.ast
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimUnaryExpression
@@ -40,6 +41,12 @@ case class GpuKnownFloatingPointNormalized(child: Expression) extends ShimTaggin
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     child.columnarEval(batch)
   }
+
+  override def selfSupportsAstJit: Boolean = GpuAstJitExpression.isSupportedDataType(dataType)
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
+  }
 }
 
 /**
@@ -56,6 +63,12 @@ case class GpuKnownNotNull(child: Expression) extends ShimTaggingExpression
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     child.columnarEval(batch)
+  }
+
+  override def selfSupportsAstJit: Boolean = GpuAstJitExpression.isSupportedDataType(dataType)
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
   }
 }
 
