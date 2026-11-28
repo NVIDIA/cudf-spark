@@ -148,10 +148,12 @@ object GpuProjectExec {
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
         def projectWithEval(evalColumn: Expression => ColumnVector): ColumnarBatch = {
-          GpuArrayHofFusion.project(cb, boundExprs, evalColumn).getOrElse {
-            val newColumns = boundExprs.safeMap(evalColumn).toArray[ColumnVector]
-            new ColumnarBatch(newColumns, cb.numRows())
-          }
+          GpuArrayHofFusion.project(cb, boundExprs, evalColumn)
+            .orElse(GpuBatchFusion.project(cb, boundExprs, evalColumn))
+            .getOrElse {
+              val newColumns = boundExprs.safeMap(evalColumn).toArray[ColumnVector]
+              new ColumnarBatch(newColumns, cb.numRows())
+            }
         }
 
         val astExpressions = boundExprs.flatMap(

@@ -359,6 +359,15 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .booleanConf
     .createWithDefault(true)
 
+  val ENABLE_BATCH_FUSION = conf("spark.rapids.sql.batchFusion.enabled")
+    .doc("Enable batch fusion for eligible GPU projection expressions. Set " +
+      "to false to disable this hook for standard DataFrame actions such as " +
+      "collect. The session setting is not guaranteed to carry over to RDD " +
+      "actions on a DataFrame.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .booleanConf
+    .createWithDefault(true)
+
   val ENABLE_RLIKE_REGEX_REWRITE = conf("spark.rapids.sql.rLikeRegexRewrite.enabled")
       .doc("Enable the optimization to rewrite rlike regex to contains in some cases.")
       .internal()
