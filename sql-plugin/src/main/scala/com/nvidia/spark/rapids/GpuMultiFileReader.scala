@@ -18,7 +18,8 @@ package com.nvidia.spark.rapids
 
 import java.io.{File, FileNotFoundException, IOException}
 import java.net.{URI, URISyntaxException}
-import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService, Future, ThreadPoolExecutor, TimeUnit}
+import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService}
+import java.util.concurrent.{Future, ThreadPoolExecutor, TimeoutException, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.annotation.tailrec
@@ -578,7 +579,7 @@ abstract class MultiFileCloudPartitionReaderBase(
         case error => error
       }
       val metrics = GpuTaskMetrics.get
-      val taskId = tc.taskAttemptId()
+      val taskId = if (tc != null) tc.taskAttemptId() else -1L
       runner.addPreHook(() => {
         val onFlightTasks = MultiFileReaderThreadPool.runningTaskNum.incrementAndGet()
         metrics.updateMultithreadReaderMaxParallelism(onFlightTasks)
@@ -730,7 +731,12 @@ abstract class MultiFileCloudPartitionReaderBase(
     var currNumRows = initNumRows
     while (takeMore && !hasMetCombineThreshold(currSize, currNumRows) && filesToRead > 0) {
       val hmbFuture = if (keepReadsInOrder) {
-        tasks.poll()
+        val head = tasks.peek()
+        if (head != null && head.isDone) {
+          tasks.poll()
+        } else {
+          null
+        }
       } else {
         val fut = fcs.poll()
         if (fut != null) {
@@ -742,7 +748,19 @@ abstract class MultiFileCloudPartitionReaderBase(
         if (combineConf.combineWaitTime > 0) {
           // no more are ready, wait to see if any finish within wait time
           val taskResult = if (keepReadsInOrder) {
-            tasks.poll().get(combineConf.combineWaitTime, TimeUnit.MILLISECONDS)
+            val head = tasks.peek()
+            if (head == null) {
+              null
+            } else {
+              try {
+                val res = head.get(combineConf.combineWaitTime, TimeUnit.MILLISECONDS)
+                tasks.poll()
+                res
+              } catch {
+                case _: TimeoutException =>
+                  null
+              }
+            }
           } else {
             val fut = fcs.poll(combineConf.combineWaitTime, TimeUnit.MILLISECONDS)
             if (fut == null) {
@@ -759,6 +777,7 @@ abstract class MultiFileCloudPartitionReaderBase(
             val hmbAndMeta = convertAsyncResult(taskResult)
             results.append(hmbAndMeta)
             currSize += hmbAndMeta.memBuffersAndSizes.map(_.bytes).sum
+            currNumRows += hmbAndMeta.memBuffersAndSizes.map(_.numRows).sum
             filesToRead -= 1
           }
         } else {
@@ -816,6 +835,7 @@ abstract class MultiFileCloudPartitionReaderBase(
   }
 
   private def getNextBuffersAndMeta(): HostMemoryBuffersWithMetaDataBase = {
+    addNextTaskIfNeeded()
     if (canUseCombine) {
       getNextBuffersAndMetaAndCombine()
     } else {
@@ -956,7 +976,7 @@ abstract class MultiFileCloudPartitionReaderBase(
   }
 
   private def addNextTaskIfNeeded(): Unit = {
-    if (tasksToRun.nonEmpty && !isDone) {
+    while (tasks.size() < maxNumFileProcessed && tasksToRun.nonEmpty && !isDone) {
       val runner = tasksToRun.dequeue()
       if (!keepReadsInOrder) {
         val futureRunner = fcs.submit(runner)
