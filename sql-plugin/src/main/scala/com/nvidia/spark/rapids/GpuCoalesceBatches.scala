@@ -290,7 +290,10 @@ abstract class AbstractGpuCoalesceIterator(
     streamTimeOrNoop: GpuMetric,
     concatTime: GpuMetric,
     opTime: GpuMetric,
-    opName: String) extends Iterator[ColumnarBatch] with Logging {
+    opName: String,
+    private val yieldBeforeLookahead: Boolean = false,
+    private val readyBatchesYielded: GpuMetric = NoopMetric)
+  extends Iterator[ColumnarBatch] with Logging {
 
   val streamTime = streamTimeOrNoop match {
     case NoopMetric => new LocalGpuMetric
@@ -478,11 +481,14 @@ abstract class AbstractGpuCoalesceIterator(
    * is remaining data after the first batch is added.
    *
    * @note protected for testing
-   * @return boolean that is true if this call reached the last input batch.
+   * @return true only when all input is known to be exhausted. False can also mean that
+   *         collection yielded without checking for more input.
    */
   protected def populateCandidateBatches(): Boolean = {
     var numRows: Long = 0 // to avoid overflows
     var numBytes: Long = 0
+    def readyToYield: Boolean = yieldBeforeLookahead && goal.isInstanceOf[TargetSize] &&
+      hasAnyToConcat && numBytes >= goal.targetSizeBytes
 
     // check if there is a batch "on deck" from a previous call to next()
     if (hasOnDeck) {
@@ -496,7 +502,7 @@ abstract class AbstractGpuCoalesceIterator(
     // A range shuffle consumes every splittable, size-based input batch independently. Avoid
     // reading and retaining the next wide batch while the current range-shuffle batch is still
     // live. Single-batch goals must continue reading the complete partition.
-    while (numRows < filteringModeRowsThreshold && !hasOnDeck &&
+    while (numRows < filteringModeRowsThreshold && !hasOnDeck && !readyToYield &&
         !(RangeInputBatching.isActive && goal.isInstanceOf[SplittableGoal] && hasAnyToConcat) &&
         iter.hasNext) {
       val cbFromIter = iter.next()
@@ -609,18 +615,21 @@ abstract class AbstractGpuCoalesceIterator(
       } // end of while(maybeFilteredIter.hasNext)
     }
 
-    val isLastBatch = !(hasOnDeck || iter.hasNext)
-
-    // enforce single batch limit when appropriate
-    if (!isLastBatch) {
-      goal match {
-        case _: RequireSingleBatchLike =>
+    goal match {
+      case _: RequireSingleBatchLike =>
+        // This requirement needs an actual remaining-input check, not a finality hint.
+        if (hasOnDeck || iter.hasNext) {
           throw new IllegalStateException("A single batch is required for this operation," +
               " Please try increasing your partition count.")
-        case _ =>
-      }
+        }
+        true
+      case _ if readyToYield =>
+        // Do not trigger expensive upstream work solely to establish finality.
+        readyBatchesYielded += 1
+        false // Finality is unknown; do not mark the output batch as final.
+      case _ =>
+        !(hasOnDeck || iter.hasNext)
     }
-    isLastBatch
   }
 
   var wasLastBatch: Boolean = false
@@ -661,7 +670,7 @@ abstract class AbstractGpuCoalesceIterator(
       batchRowLimit = 0
 
       try {
-        val isLastBatch = if (!coalesceBatchIterator.hasNext) {
+        val knownToBeLastInputBatch = if (!coalesceBatchIterator.hasNext) {
           populateCandidateBatches()
         } else {
           wasLastBatch
@@ -674,7 +683,7 @@ abstract class AbstractGpuCoalesceIterator(
             case _: SplittableGoal if supportsRetryIterator =>
               coalesceBatchIterator = getCoalesceRetryIterator
               val batch = coalesceBatchIterator.next()
-              if (isLastBatch) {
+              if (knownToBeLastInputBatch) {
                 if (!hasNext) {
                   GpuColumnVector.tagAsFinalBatch(batch)
                 } else {
@@ -686,7 +695,7 @@ abstract class AbstractGpuCoalesceIterator(
               batch
             case _ =>
               val singleBatch = concatAllAndPutOnGPU()
-              if (isLastBatch) {
+              if (knownToBeLastInputBatch) {
                 GpuColumnVector.tagAsFinalBatch(singleBatch)
               }
               numOutputRows += singleBatch.numRows()
@@ -756,7 +765,9 @@ class GpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     collectTime: GpuMetric,
     concatTime: GpuMetric,
     opTime: GpuMetric,
-    opName: String)
+    opName: String,
+    yieldBeforeLookahead: Boolean = false,
+    readyBatchesYielded: GpuMetric = NoopMetric)
   extends AbstractGpuCoalesceIterator(iter,
     goal,
     numInputRows,
@@ -766,7 +777,9 @@ class GpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     collectTime,
     concatTime,
     opTime,
-    opName) {
+    opName,
+    yieldBeforeLookahead,
+    readyBatchesYielded) {
 
   protected val batches: ArrayBuffer[SpillableColumnarBatch] = ArrayBuffer.empty
 
@@ -849,7 +862,9 @@ class GpuCompressionAwareCoalesceIterator(
     concatTime: GpuMetric,
     opTime: GpuMetric,
     opName: String,
-    codecConfigs: TableCompressionCodecConfig)
+    codecConfigs: TableCompressionCodecConfig,
+    yieldBeforeLookahead: Boolean = false,
+    readyBatchesYielded: GpuMetric = NoopMetric)
   extends GpuCoalesceIterator(
     iter, sparkTypes, goal,
     numInputRows = numInputRows,
@@ -859,7 +874,9 @@ class GpuCompressionAwareCoalesceIterator(
     collectTime = collectTime,
     concatTime = concatTime,
     opTime = opTime,
-    opName) {
+    opName,
+    yieldBeforeLookahead,
+    readyBatchesYielded) {
 
   private[this] var codec: TableCompressionCodec = _
 
@@ -939,7 +956,8 @@ case class GpuCoalesceBatches(child: SparkPlan, goal: CoalesceGoal)
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     NUM_INPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_ROWS),
     NUM_INPUT_BATCHES -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_BATCHES),
-    CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME)
+    CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
+    "readyBatchesYielded" -> createMetric(DEBUG_LEVEL, "ready batches yielded before lookahead")
   )
 
   override protected def doExecute(): RDD[InternalRow] = {
@@ -973,6 +991,8 @@ case class GpuCoalesceBatches(child: SparkPlan, goal: CoalesceGoal)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
     val concatTime = gpuLongMetric(CONCAT_TIME)
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
+    val yieldReady = RapidsConf.COALESCE_BATCHES_YIELD_BEFORE_LOOKAHEAD.get(conf)
+    val readyBatches = gpuLongMetric("readyBatchesYielded")
 
     // cache in local vars to avoid serializing the plan
     val outputSchema = schema
@@ -995,7 +1015,9 @@ case class GpuCoalesceBatches(child: SparkPlan, goal: CoalesceGoal)
               iter, dataTypes, sizeGoal, decompressMemoryTarget,
               numInputRows, numInputBatches, numOutputRows, numOutputBatches, NoopMetric,
               concatTime, opTime, "GpuCoalesceBatches",
-              localCodecConfigs)
+              localCodecConfigs,
+              yieldBeforeLookahead = yieldReady,
+              readyBatchesYielded = readyBatches)
           }
         case batchingGoal: BatchedByKey =>
           val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)

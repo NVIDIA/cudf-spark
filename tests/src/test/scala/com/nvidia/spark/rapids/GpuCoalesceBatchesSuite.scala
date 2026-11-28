@@ -142,6 +142,51 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
     }, new SparkConf().set(RapidsConf.METRICS_LEVEL.key, "DEBUG"))
   }
 
+  test("yield-before-lookahead configuration reaches GPU coalescing") {
+    val sourcePartitions = 8
+    val taskPartitions = 4
+    val numRows = sourcePartitions.toLong
+    Seq(false, true).foreach { enabled =>
+      withClue(s"yieldBeforeLookahead=$enabled: ") {
+        val conf = new SparkConf()
+          .set(RapidsConf.METRICS_LEVEL.key, "DEBUG")
+          .set(RapidsConf.COALESCE_BATCHES_YIELD_BEFORE_LOOKAHEAD.key, enabled.toString)
+        withGpuSparkSession(spark => {
+          val input = spark.range(0L, numRows, 1L, sourcePartitions)
+          // A one-byte target makes every nonempty Long batch ready to yield.
+          val gpuInput = GpuRowToColumnarExec(input.queryExecution.sparkPlan, TargetSize(1))
+          assertResult(sourcePartitions)(gpuInput.executeColumnar().getNumPartitions)
+          // With eight one-row source partitions, each task crosses a source boundary.
+          val grouped = GpuCoalesceExec(taskPartitions, gpuInput)
+          val coalesce = GpuCoalesceBatches(grouped, TargetSize(1))
+          val rdd = coalesce.doExecuteColumnar()
+          assertResult(taskPartitions)(rdd.getNumPartitions)
+          val rowsByTask = rdd.mapPartitions { batches =>
+            val rows = Vector.newBuilder[Long]
+            while (batches.hasNext) {
+              withResource(batches.next()) { batch =>
+                withResource(GpuColumnVector.extractBases(batch).head.copyToHost()) { host =>
+                  (0 until batch.numRows()).foreach { row => rows += host.getLong(row) }
+                }
+              }
+            }
+            Iterator.single(rows.result())
+          }.collect().toVector
+
+          assertResult(taskPartitions)(rowsByTask.size)
+          assert(rowsByTask.forall(_.size == numRows / taskPartitions))
+          assertResult((0L until numRows).toVector)(rowsByTask.flatten.sorted)
+          val inputBatches = coalesce.metrics(GpuMetric.NUM_INPUT_BATCHES).value
+          assertResult(numRows)(inputBatches)
+          assertResult(numRows)(coalesce.metrics(GpuMetric.NUM_OUTPUT_ROWS).value)
+          assertResult(inputBatches)(coalesce.metrics(GpuMetric.NUM_OUTPUT_BATCHES).value)
+          assertResult(if (enabled) inputBatches else 0L)(
+            coalesce.metrics("readyBatchesYielded").value)
+        }, conf)
+      }
+    }
+  }
+
   test("require single batch") {
 
     val conf = makeBatchedBytes(1, enableCsvConf())
