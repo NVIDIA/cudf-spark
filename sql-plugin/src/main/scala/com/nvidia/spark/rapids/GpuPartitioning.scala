@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, HostMemoryBuffer, Table}
+import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
@@ -138,7 +138,9 @@ trait GpuPartitioning extends Partitioning {
     val hostPartColumns = NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, d2hCopyTime) {
       val hostColumns = withResource(partitionColumns) { _ =>
         withRetryNoSplit {
-          partitionColumns.safeMap(_.copyToHostAsync(Cuda.DEFAULT_STREAM))
+          partitionColumns.safeMap { column =>
+            CopyPipeline.copyToHostAsync(column, Cuda.DEFAULT_STREAM)
+          }
         }
       }
       closeOnExcept(hostColumns) { _ =>
@@ -223,11 +225,14 @@ trait GpuPartitioning extends Partitioning {
             s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
             s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
           NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, d2hCopyTime) {
-            closeOnExcept(HostMemoryBuffer.allocate(data.getLength)) { dataHost =>
-              closeOnExcept(HostMemoryBuffer.allocate(offsets.getLength)) { offsetsHost =>
+            closeOnExcept(CopyPipeline.allocateHostDestination(data.getLength)) { dataHost =>
+              closeOnExcept(CopyPipeline.allocateHostDestination(offsets.getLength)) {
+                  offsetsHost =>
                 NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
-                  dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
-                  offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
+                  CopyPipeline.copyToHostAsync(dataHost, 0, data, 0,
+                    data.getLength, Cuda.DEFAULT_STREAM)
+                  CopyPipeline.copyToHostAsync(offsetsHost, 0, offsets, 0,
+                    offsets.getLength, Cuda.DEFAULT_STREAM)
                   Cuda.DEFAULT_STREAM.sync()
                 }
                 (dataHost, offsetsHost)

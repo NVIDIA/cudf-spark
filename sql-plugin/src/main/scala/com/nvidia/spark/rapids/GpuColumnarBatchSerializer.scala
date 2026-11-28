@@ -433,7 +433,7 @@ private class KudoSerializerInstance(
             for (i <- 0 until numColumns) {
               batch.column(i) match {
                 case gpu: GpuColumnVector =>
-                  val cpu = gpu.copyToHostAsync(Cuda.DEFAULT_STREAM)
+                  val cpu = CopyPipeline.copyToHostAsync(gpu, Cuda.DEFAULT_STREAM)
                   toClose += cpu
                   columns(i) = cpu.getBase
                 case cpu: RapidsHostColumnVector =>

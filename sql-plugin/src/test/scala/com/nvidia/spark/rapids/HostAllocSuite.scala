@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{Cuda, DefaultHostMemoryAllocator, DeviceMemoryBuffer, DType, HostColumnVector, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -430,6 +430,150 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       }
     }
     assert(HostAlloc.getUsageRatio() == 0.0)
+  }
+
+  for (stagingEnabled <- Seq(false, true)) {
+    test(s"D2H allocator accounts pooled/raw buffers and preserves pinned capacity: " +
+        s"staging=$stagingEnabled") {
+      val properties = Map(
+        "ai.rapids.cudf.pageable.staged.copy.enabled" -> stagingEnabled.toString,
+        "ai.rapids.cudf.pageable.staged.copy.disabled" -> "false",
+        "ai.rapids.cudf.pageable.staged.copy.h2d.disabled" -> "false",
+        "ai.rapids.cudf.pageable.staged.copy.d2h.disabled" -> "false",
+        "ai.rapids.cudf.pageable.staged.copy.threads" -> "1",
+        "ai.rapids.cudf.pageable.staged.copy.chunk.bytes" -> "4096",
+        "ai.rapids.cudf.pageable.staged.copy.registered.buffers" -> "true")
+      val previous = properties.keys.map(key => key -> Option(System.getProperty(key))).toMap
+      properties.foreach { case (key, value) => System.setProperty(key, value) }
+      try {
+        PinnedMemoryPool.initialize(4096)
+        PageableMemoryPool.initialize(8192, 1)
+        HostAlloc.initialize(4096)
+        assert(PageableMemoryPool.isDeviceToHostStagingEnabled == stagingEnabled)
+        assert(PageableMemoryPool.isHostToDeviceStagingEnabled == stagingEnabled)
+        val pattern = Array.tabulate[Byte](4096)(i => (i * 31 + 7).toByte)
+        withResource(HostMemoryBuffer.allocateRaw(pattern.length)) { input =>
+          input.setBytes(0, pattern, 0, pattern.length)
+          withResource(DeviceMemoryBuffer.allocate(pattern.length)) { device =>
+            device.copyFromHostBuffer(input)
+            withResource(HostAlloc.allocPageableForDeviceToHost(8192)) { pooled =>
+              assert(PageableMemoryPool.isPageablePoolBuffer(pooled))
+              assert(HostAlloc.getUsageRatio() == 0.5)
+              withResource(HostAlloc.allocPageableForDeviceToHost(4096)) { raw =>
+                assert(!PageableMemoryPool.isPageablePoolBuffer(raw))
+                assert(HostAlloc.getUsageRatio() == 0.75)
+                // Exhausted pageable/raw budgets must not borrow available pinned capacity.
+                assert(HostAlloc.tryAllocPageableForDeviceToHost(1).isEmpty)
+                withResource(PinnedMemoryPool.tryAllocate(4096)) { pinned =>
+                  assert(pinned != null)
+                }
+                for (destination <- Seq(pooled, raw)) {
+                  CopyPipeline.copyToHostAsync(destination, 0, device, 0,
+                    pattern.length, Cuda.DEFAULT_STREAM)
+                  Cuda.DEFAULT_STREAM.sync()
+                  val actual = new Array[Byte](pattern.length)
+                  destination.getBytes(actual, 0, 0, actual.length)
+                  assert(actual.sameElements(pattern))
+                  // Offset copies on a non-default stream exercise ordering and completion
+                  // for sync/async, staged/direct, and pooled/raw H2D eligibility.
+                  withResource(new Cuda.Stream(true)) { stream =>
+                    val length = pattern.length - 32
+                    for (async <- Seq(false, true)) {
+                      destination.setBytes(0, pattern, 0, pattern.length)
+                      if (async) {
+                        CopyPipeline.copyToDeviceAsync(device, 7, destination, 11, length, stream)
+                      } else {
+                        CopyPipeline.copyToDevice(device, 7, destination, 11, length, stream)
+                      }
+                      // Queue the D2H consumer behind the producer on the same stream.
+                      if (async) {
+                        CopyPipeline.copyToHostAsync(input, 13, device, 7, length, stream)
+                        stream.sync()
+                      } else {
+                        CopyPipeline.copyToHost(input, 13, device, 7, length, stream)
+                      }
+                      val copied = new Array[Byte](length)
+                      input.getBytes(copied, 0, 13, length)
+                      assert(copied.sameElements(pattern.slice(11, 11 + length)))
+                    }
+                  }
+                  // Restore the source before testing the next destination.
+                  input.setBytes(0, pattern, 0, pattern.length)
+                  device.copyFromHostBuffer(input)
+
+                }
+              }
+              assert(HostAlloc.getUsageRatio() == 0.5)
+            }
+          }
+        }
+        assert(HostAlloc.getUsageRatio() == 0.0)
+        HostAlloc.initialize(0)
+        withResource(HostAlloc.allocPageableForDeviceToHost(8192)) { pooled =>
+          assert(PageableMemoryPool.isPageablePoolBuffer(pooled))
+          assert(HostAlloc.getUsageRatio() == 8192.0 / 12288)
+        }
+        assert(HostAlloc.tryAllocPageableForDeviceToHost(8193).isEmpty)
+        // Exercise explicit column materialization, including nested buffers and nulls.
+        HostAlloc.initialize(1024 * 1024)
+        val stringType = new HostColumnVector.BasicType(true, DType.STRING)
+        val listType = new HostColumnVector.ListType(true, stringType)
+        val values = java.util.Arrays.asList("first", null, "")
+        withResource(HostColumnVector.fromLists(listType, values, null,
+            java.util.Collections.emptyList[String]())) { input =>
+          withResource(input.copyToDevice()) { device =>
+            if (stagingEnabled) {
+              withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { actual =>
+                assert(actual.getList(0) == values)
+                assert(actual.isNull(1))
+                assert(actual.getList(2).isEmpty)
+              }
+            } else {
+              intercept[IllegalStateException] {
+                withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { _ => () }
+              }
+            }
+          }
+        }
+        assert(HostAlloc.getUsageRatio() == 0.0)
+        if (stagingEnabled) {
+          val structType = new HostColumnVector.StructType(true, stringType, listType)
+          withResource(HostColumnVector.fromStructs(structType,
+              new HostColumnVector.StructData("row", values),
+              null.asInstanceOf[HostColumnVector.StructData])) { input =>
+            withResource(input.copyToDevice()) { device =>
+              withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { actual =>
+                assert(actual.getStruct(0).getField(0) == "row")
+                assert(actual.getStruct(0).getField(1) == values)
+                assert(actual.isNull(1))
+              }
+            }
+          }
+          for (strings <- Seq(Array.empty[String], Array[String](null, null),
+              Array("", "text", null))) {
+            withResource(HostColumnVector.fromStrings(strings: _*)) { input =>
+              withResource(input.copyToDevice()) { device =>
+                withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { actual =>
+                  assert(actual.getRowCount == strings.length)
+                  strings.indices.foreach { i =>
+                    if (strings(i) == null) assert(actual.isNull(i))
+                    else assert(actual.getJavaString(i) == strings(i))
+                  }
+                }
+              }
+            }
+          }
+          assert(HostAlloc.getUsageRatio() == 0.0)
+        }
+
+      } finally {
+        PageableMemoryPool.shutdown()
+        previous.foreach {
+          case (key, Some(value)) => System.setProperty(key, value)
+          case (key, None) => System.clearProperty(key)
+        }
+      }
+    }
   }
 
   test("simple pinned tryAlloc") {
