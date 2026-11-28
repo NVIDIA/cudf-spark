@@ -86,7 +86,21 @@ def _assert_published_driver_value(metric):
                  else spark._jvm.org.apache.spark.sql.execution.metric.SQLMetrics)
     expected = formatter.stringValue(
         metric.metricType(), values, gateway.new_array(spark._jvm.long, 0))
-    assert _published_values(metric) == [expected]
+
+    def _matches_expected(actual):
+        if actual == expected:
+            return True
+        # Spark renders an aggregate display ("total (min, med, max ...)\n<total> (...)")
+        # when multiple values (such as zero-valued task updates) are recorded alongside
+        # the driver. Verify the reported total matches the expected published driver value.
+        lines = actual.strip().splitlines()
+        return len(lines) == 2 and lines[0].startswith('total (') and \
+            lines[1].split(' (', 1)[0] == expected
+
+    published = _published_values(metric)
+    assert len(published) == 1 and _matches_expected(published[0]), \
+        f"Published metric {metric.id()} value {published!r} does not " \
+        f"match expected {[expected]!r}"
 
 
 def _assert_aqe_build_metric_owner(join):
