@@ -143,6 +143,7 @@ object GpuFileFormatWriter extends Logging {
     val description = new GpuWriteJobDescription(
       uuid = UUID.randomUUID.toString,
       serializableHadoopConf = new SerializableConfiguration(job.getConfiguration),
+      fileIOConfig = RapidsConf.fileIOConfig(sparkSession.sessionState.conf),
       outputWriterFactory = outputWriterFactory,
       allColumns = finalOutputSpec.outputColumns,
       dataColumns = dataColumns,

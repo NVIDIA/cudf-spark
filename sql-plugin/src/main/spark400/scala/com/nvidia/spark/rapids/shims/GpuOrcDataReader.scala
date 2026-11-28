@@ -21,13 +21,13 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids.GpuMetric
-import org.apache.hadoop.conf.Configuration
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import org.apache.orc.impl.DataReaderProperties
 
 class GpuOrcDataReader(
     props: DataReaderProperties,
-    conf: Configuration,
-    metrics: Map[String, GpuMetric]) extends GpuOrcDataReader320Plus(props, conf, metrics) {
+    inputFile: RapidsInputFile,
+    metrics: Map[String, GpuMetric]) extends GpuOrcDataReader320Plus(props, inputFile, metrics) {
   override def releaseAllBuffers(): Unit = {
     throw new IllegalStateException("should not be trying to release buffers")
   }

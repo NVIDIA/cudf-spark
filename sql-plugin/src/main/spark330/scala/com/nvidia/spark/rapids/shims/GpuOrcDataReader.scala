@@ -19,13 +19,13 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids.GpuMetric
-import org.apache.hadoop.conf.Configuration
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import org.apache.orc.impl.DataReaderProperties
 
 class GpuOrcDataReader(
     props: DataReaderProperties,
-    conf: Configuration,
-    metrics: Map[String, GpuMetric]) extends GpuOrcDataReader320Plus(props, conf, metrics)
+    inputFile: RapidsInputFile,
+    metrics: Map[String, GpuMetric]) extends GpuOrcDataReader320Plus(props, inputFile, metrics)
 
 object GpuOrcDataReader {
   // File cache is being used, so we want read ranges that can be cached separately

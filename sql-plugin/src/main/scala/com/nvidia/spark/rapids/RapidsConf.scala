@@ -22,6 +22,8 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
 
 import ai.rapids.cudf.Cuda
+import com.nvidia.spark.rapids.fileio.FileIOConfig
+import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
@@ -61,6 +63,9 @@ object RapidsConf extends Logging with RapidsConfEntries {
   def conf(key: String): ConfBuilder = {
     new ConfBuilder(key, register)
   }
+
+  def fileIOConfig(conf: SQLConf): FileIOConfig =
+    new FileIOConfig(FILE_IO_IMPL.get(conf), conf.getAllConfs.asJava, classOf[HadoopFileIO])
 
   private[rapids] def shouldExplain(explain: String): Boolean =
     !explain.equalsIgnoreCase("NONE")
