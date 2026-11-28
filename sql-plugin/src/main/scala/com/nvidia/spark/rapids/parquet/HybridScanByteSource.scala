@@ -95,7 +95,7 @@ private[parquet] class HybridScanFileByteSource(
     fileIO: RapidsFileIO,
     filePath: Path,
     execMetrics: Map[String, GpuMetric],
-    rangeReader: HybridScanRangeReader) extends HybridScanByteSource {
+    private[parquet] val rangeReader: HybridScanRangeReader) extends HybridScanByteSource {
 
   override def fetchToHostBuffer(
       ranges: Array[ByteRange],

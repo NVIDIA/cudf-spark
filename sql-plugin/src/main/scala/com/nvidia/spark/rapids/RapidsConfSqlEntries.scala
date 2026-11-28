@@ -591,11 +591,11 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
           s"(${PARQUET_HYBRID_SCAN_ENABLED.key}) uses GPUDirect Storage. OFF reads through " +
           "host memory. ON reads straight to device memory where it can. AUTO does the same " +
           "when the task holds the GPU semaphore or can take it without waiting, and otherwise " +
-          "reads through host memory. Only the PERFILE reader type, set explicitly, reads to " +
-          "the device: MULTITHREADED reads through host memory, and the AUTO reader type picks " +
-          "MULTITHREADED for cloud files and COALESCING, which falls back to parquet-mr, for " +
-          "local ones. No file is read with GPUDirect Storage yet, so every mode reads through " +
-          "host memory.")
+          "reads through host memory. Only an explicit PERFILE or MULTITHREADED reader type " +
+          "reads to the device, and MULTITHREADED only in ON mode: AUTO reads through host " +
+          "memory there. The AUTO reader type picks MULTITHREADED for cloud files and " +
+          "COALESCING, which falls back to parquet-mr, for local ones. No file is read with " +
+          "GPUDirect Storage yet, so every mode reads through host memory.")
       .internal()
       .stringConf
       .transform(_.toUpperCase(java.util.Locale.ROOT))
