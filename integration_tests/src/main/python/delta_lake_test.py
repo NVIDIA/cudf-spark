@@ -19,7 +19,7 @@ import pytest
 from conftest import spark_jvm
 from pyspark.sql import Row
 from asserts import assert_gpu_fallback_collect, assert_gpu_and_cpu_are_equal_collect, \
-    assert_cpu_and_gpu_are_equal_collect_with_capture
+    assert_cpu_and_gpu_are_equal_collect_with_capture, collect_plan_nodes, plan_metric
 from data_gen import *
 import delta_lake_utils
 from delta_lake_utils import delta_meta_allow, setup_delta_dest_table, \
@@ -1059,6 +1059,61 @@ def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable
     with_cpu_session(create_delta, conf=confs)
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.read.format("delta").load(data_path),
                                          conf=confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="Mapped filter pushdown requires OSS Delta 3.3 or later")
+def test_delta_renamed_column_range_or_null_pushdown(spark_tmp_path):
+    path = spark_tmp_path + "/renamed_column"
+    conf = {
+        "spark.sql.parquet.filterPushdown": "true",
+        "spark.rapids.sql.format.parquet.reader.type": "PERFILE",
+        "spark.rapids.sql.metrics.level": "MODERATE",
+    }
+
+    def setup(spark):
+        rows = [(1, None), (2, 9), (3, 10), (4, 15), (5, 20), (6, 25)]
+        # Each file contains one row group. Disable Delta statistics so only Parquet
+        # predicate pushdown can rule out the three nonmatching groups.
+        spark.createDataFrame(rows, "id int, score int").coalesce(1).write.format("delta") \
+            .option("delta.columnMapping.mode", "name") \
+            .option("delta.enableDeletionVectors", "false") \
+            .option("delta.dataSkippingNumIndexedCols", 0) \
+            .option("maxRecordsPerFile", 1).save(path)
+        spark.sql(f"ALTER TABLE delta.`{path}` RENAME COLUMN score TO rating")
+        files = spark.read.format("delta").load(path).inputFiles()
+        assert len(files) == len(rows)
+        jvm = spark.sparkContext._jvm
+        footer = jvm.org.apache.parquet.hadoop.ParquetFileReader.readFooter(
+            spark.sparkContext._jsc.hadoopConfiguration(), jvm.org.apache.hadoop.fs.Path(files[0]))
+        physical_columns = {field.getName()
+                            for field in footer.getFileMetaData().getSchema().getFields()}
+        assert {"score", "rating"}.isdisjoint(physical_columns), physical_columns
+
+    with_cpu_session(setup, conf=conf)
+
+    def read(spark):
+        return spark.read.format("delta").load(path) \
+            .where("rating IS NULL OR (rating >= 10 AND rating < 20)").select("id")
+
+    expected = [Row(id=1), Row(id=3), Row(id=4)]
+    assert sorted(with_cpu_session(lambda spark: read(spark).collect(), conf=conf)) == expected
+
+    def check_pushdown(_cpu_plan, gpu_plan):
+        scans = [node for node in collect_plan_nodes(gpu_plan)
+                 if node.getClass().getSimpleName() == "GpuFileSourceScanExec"]
+        assert len(scans) == 1, gpu_plan
+        scan = scans[0]
+        pushed = scan.metadata().apply("PushedFilters").replace(" ", "")
+        assert "Or(IsNull(rating),And(GreaterThanOrEqual(rating,10),LessThan(rating,20)))" in pushed
+        assert plan_metric(scan, "numFiles") == 6
+        assert plan_metric(scan, "rowGroupsFetched") == 3
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, conf=conf, gpu_plan_assertion=check_pushdown)
 
 
 @allow_non_gpu(*delta_meta_allow)
