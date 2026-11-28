@@ -413,7 +413,6 @@ def test_delta_deletion_vector_read_with_cdf(spark_tmp_path, chunk_size, parquet
                     reason="Delta Lake deletion vector feature is required")
 @pytest.mark.skipif(gpu_supports_delta_dv_scan(),
                     reason="GPU Delta deletion vector scans are supported")
-@pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/cudf-spark/issues/15365")
 def test_delta_deletion_vector_read_with_cdf_fallback(
         spark_tmp_path, chunk_size, parquet_reader_type):
     _test_delta_deletion_vector_read_with_cdf(
