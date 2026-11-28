@@ -417,7 +417,7 @@ as follows:
 | Iceberg CPU | Reads valid shredded Variant data. |
 | RAPIDS Iceberg GPU | Fails during execution with `UnsupportedOperationException`. |
 
-Set `spark.sql.variant.allowReadingShredded=false` with the Iceberg v3 opt-in only
+Set `spark.sql.variant.allowReadingShredded=false` for Iceberg v3 only
 when the requested Variant columns are stored in unshredded files. The GPU execution
 reader validates every projected Variant leaf against the physical-layout predicate
 used by the Raw Parquet reader. Exactly two children named `value` and `metadata`,
