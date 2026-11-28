@@ -52,7 +52,7 @@ case class GpuCustomShuffleReaderExec(
     PARTITION_SIZE -> createSizeMetric(ESSENTIAL_LEVEL, DESCRIPTION_PARTITION_SIZE),
     NUM_PARTITIONS -> createMetric(ESSENTIAL_LEVEL, DESCRIPTION_NUM_PARTITIONS),
     OP_TIME_NEW_SHUFFLE_READ ->
-      createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW_SHUFFLE_READ),
+      createOpTimeMetric(DESCRIPTION_OP_TIME_NEW_SHUFFLE_READ),
   )
 
   override def getOpTimeNewMetric: Option[GpuMetric] = allMetrics.get(OP_TIME_NEW_SHUFFLE_READ)
