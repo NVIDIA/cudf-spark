@@ -38,6 +38,8 @@ import org.apache.spark.sql.types.StructType
 
 /** Native cuDF Parquet deletion-vector support shared by the Iceberg readers. */
 private[parquet] object GpuIcebergDeletionVector extends Logging {
+  private[parquet] final val PARQUET_SUFFIX = ".parquet"
+
   def rowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) = {
     val offsets = blocks.map(GpuParquetUtilsShims.getRowIndexOffset)
     require(!offsets.exists(_ < 0), "Found invalid deletion-vector row-group offset")
@@ -75,7 +77,7 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
         s"Iceberg deletion-vector reads require one Parquet buffer, found ${buffers.length}")
       debugDumpPrefix.foreach { prefix =>
         if (debugDumpAlways) {
-          val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+          val path = DumpUtils.dumpBuffer(conf, buffers, prefix, PARQUET_SUFFIX)
           logWarning(s"Wrote data for ${splits.mkString(", ")} to $path")
         }
       }
@@ -104,7 +106,7 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
             case NonFatal(e) =>
               val dumpMessage = debugDumpPrefix.map { prefix =>
                 if (!debugDumpAlways) {
-                  val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+                  val path = DumpUtils.dumpBuffer(conf, buffers, prefix, PARQUET_SUFFIX)
                   s", data dumped to $path"
                 } else {
                   ""
@@ -202,7 +204,8 @@ private class ChunkedDeletionVectorProducer(
       case NonFatal(e) =>
         val dumpMessage = debugDumpPrefix.map { prefix =>
           if (!debugDumpAlways) {
-            val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+            val path = DumpUtils.dumpBuffer(
+              conf, buffers, prefix, GpuIcebergDeletionVector.PARQUET_SUFFIX)
             s", data dumped to $path"
           } else {
             ""

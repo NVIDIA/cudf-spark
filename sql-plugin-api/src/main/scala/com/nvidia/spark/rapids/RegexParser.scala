@@ -1037,6 +1037,9 @@ class CudfRegexTranspiler(mode: RegexMode) {
       })
     }
 
+    val endAnchorUnsupportedPrefix =
+      "End of line/string anchor is not supported in this context: "
+
     // check a pair of regex ast nodes for unsupported combinations
     // of end string/line anchors and newlines or optional items
     def checkEndAnchorContext(r1: RegexAST, r2: RegexAST): Unit = {
@@ -1045,7 +1048,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
         (containsEndAnchor(r2) &&
           (containsNewline(r1) || containsBeginAnchor(r1)))) {
         throw new RegexUnsupportedException(
-          s"End of line/string anchor is not supported in this context: " +
+          endAnchorUnsupportedPrefix +
             s"${toReadableString(r1.toRegexString)}" +
             s"${toReadableString(r2.toRegexString)}", r1.position)
       }
@@ -1057,7 +1060,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
         (containsEndAnchor(r2) &&
           (containsNewline(r1) || containsEmpty(r1) || containsBeginAnchor(r1)))) {
         throw new RegexUnsupportedException(
-          s"End of line/string anchor is not supported in this context: " +
+          endAnchorUnsupportedPrefix +
             s"${toReadableString(r1.toRegexString)}" +
             s"${toReadableString(r2.toRegexString)}", r1.position)
       }
@@ -1077,7 +1080,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
         if (prefixContainsEmpty && containsEndAnchor(part)) {
           val prefix = parts.take(index).map(_.toRegexString).mkString
           throw new RegexUnsupportedException(
-            s"End of line/string anchor is not supported in this context: " +
+            endAnchorUnsupportedPrefix +
               s"${toReadableString(prefix)}${toReadableString(part.toRegexString)}",
             part.position)
         }

@@ -26,6 +26,8 @@ import org.apache.spark.sql.types._
 
 
 private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
+  private final val NONZERO_SCALE_ROUNDING_NOTE = "nonzero scales may round differently"
+
   val rules: Seq[ExprRule[_ <: Expression]] = Seq(
     expr[Pmod](
       "Pmod",
@@ -350,8 +352,8 @@ private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
       ExprChecks.binaryProject(
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "nonzero scales may round differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "nonzero scales may round differently"),
+            TypeSig.psNote(TypeEnum.FLOAT, NONZERO_SCALE_ROUNDING_NOTE) +
+            TypeSig.psNote(TypeEnum.DOUBLE, NONZERO_SCALE_ROUNDING_NOTE),
             TypeSig.cpuNumeric),
         ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
       BRoundRuleMeta),
@@ -360,8 +362,8 @@ private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
       ExprChecks.binaryProject(
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "nonzero scales may round differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "nonzero scales may round differently"),
+            TypeSig.psNote(TypeEnum.FLOAT, NONZERO_SCALE_ROUNDING_NOTE) +
+            TypeSig.psNote(TypeEnum.DOUBLE, NONZERO_SCALE_ROUNDING_NOTE),
             TypeSig.cpuNumeric),
         ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
       RoundRuleMeta),

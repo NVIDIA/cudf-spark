@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ case class GpuBucketExpression(numBuckets: Expression, value: Expression)
   private lazy val sanityCheckResult: Unit = sanityCheck()
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): CudfColumnVector = {
-    throw new IllegalStateException("GpuBucketExpression requires first argument to be scalar, " +
+    throw new IllegalStateException(GpuBucketExpression.SCALAR_FIRST_ARG_ERROR +
       "second to be column, but both are columns")
   }
 
@@ -51,12 +51,12 @@ case class GpuBucketExpression(numBuckets: Expression, value: Expression)
   }
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): CudfColumnVector = {
-    throw new IllegalStateException("GpuBucketExpression requires first argument to be scalar, " +
+    throw new IllegalStateException(GpuBucketExpression.SCALAR_FIRST_ARG_ERROR +
       "second to be column, but first is column, second is scalar")
   }
 
   override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): CudfColumnVector = {
-    throw new IllegalStateException("GpuBucketExpression requires first argument to be scalar, " +
+    throw new IllegalStateException(GpuBucketExpression.SCALAR_FIRST_ARG_ERROR +
       "second to be column, but both are scalars")
   }
 
@@ -68,6 +68,8 @@ case class GpuBucketExpression(numBuckets: Expression, value: Expression)
 }
 
 object GpuBucketExpression {
+  private final val SCALAR_FIRST_ARG_ERROR =
+    "GpuBucketExpression requires first argument to be scalar, "
 
   /**
    * Supported Iceberg Bucket function classes and their corresponding Iceberg types:

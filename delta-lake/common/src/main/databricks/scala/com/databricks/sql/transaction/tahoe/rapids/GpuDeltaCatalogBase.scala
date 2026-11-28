@@ -51,6 +51,8 @@ trait GpuDeltaSupportsWrite extends SupportsWrite
 trait GpuDeltaV1Write extends V1Write
 
 trait GpuDeltaCatalogBase extends StagingTableCatalog {
+  private final val CANNOT_CREATE_NON_DELTA_TABLES = "Cannot create non-Delta tables"
+
   val spark: SparkSession = SparkSession.active
 
   val cpuCatalog: StagingTableCatalog
@@ -222,7 +224,7 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
         TableCreationModes.Create
       )
     } else {
-      throw new IllegalStateException(s"Cannot create non-Delta tables")
+      throw new IllegalStateException(CANNOT_CREATE_NON_DELTA_TABLES)
     }
   }
 
@@ -240,7 +242,7 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
         TableCreationModes.Replace
       )
     } else {
-      throw new IllegalStateException(s"Cannot create non-Delta tables")
+      throw new IllegalStateException(CANNOT_CREATE_NON_DELTA_TABLES)
     }
   }
 
@@ -258,7 +260,7 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
         TableCreationModes.CreateOrReplace
       )
     } else {
-      throw new IllegalStateException(s"Cannot create non-Delta tables")
+      throw new IllegalStateException(CANNOT_CREATE_NON_DELTA_TABLES)
     }
   }
 
@@ -276,7 +278,7 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
         TableCreationModes.Create
       )
     } else {
-      throw new IllegalStateException(s"Cannot create non-Delta tables")
+      throw new IllegalStateException(CANNOT_CREATE_NON_DELTA_TABLES)
     }
   }
 
@@ -323,12 +325,13 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
       val props = new util.HashMap[String, String]()
       // Options passed in through the SQL API will show up both with an "option." prefix and
       // without in Spark 3.1, so we need to remove those from the properties
+      val optionPrefix = "option."
       val optionsThroughProperties = properties.asScala.collect {
-        case (k, _) if k.startsWith("option.") => k.stripPrefix("option.")
+        case (k, _) if k.startsWith(optionPrefix) => k.stripPrefix(optionPrefix)
       }.toSet
       val sqlWriteOptions = new util.HashMap[String, String]()
       properties.asScala.foreach { case (k, v) =>
-        if (!k.startsWith("option.") && !optionsThroughProperties.contains(k)) {
+        if (!k.startsWith(optionPrefix) && !optionsThroughProperties.contains(k)) {
           // Do not add to properties
           props.put(k, v)
         } else if (optionsThroughProperties.contains(k)) {

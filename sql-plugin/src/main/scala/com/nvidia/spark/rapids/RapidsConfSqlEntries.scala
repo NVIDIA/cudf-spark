@@ -21,6 +21,48 @@ import org.apache.spark.network.util.ByteUnit
 
 private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
+  private final val MAX_NUM_FILES_POSITIVE_ERROR =
+    "The maximum number of files must be greater than 0."
+  private final val ONLY_INPUT_SUPPORTED_NOTE = "(only input is currently supported anyways)"
+
+  private def readerTypeDoc(format: String, maxNumFilesConfKey: String): String =
+    s"Sets the $format reader type. We support different types that are optimized for " +
+      "different environments. The original Spark style reader can be selected by setting this " +
+      "to PERFILE which individually reads and copies files to the GPU. Loading many small files " +
+      "individually has high overhead, and using either COALESCING or MULTITHREADED is " +
+      "recommended instead. The COALESCING reader is good when using a local file system where " +
+      "the executors are on the same nodes or close to the nodes the data is being read on. " +
+      "This reader coalesces all the files assigned to a task into a single host buffer before " +
+      "sending it down to the GPU. It copies blocks from a single file into a host buffer in " +
+      s"separate threads in parallel, see $MULTITHREAD_READ_NUM_THREADS. " +
+      "MULTITHREADED is good for cloud environments where you are reading from a blobstore " +
+      "that is totally separate and likely has a higher I/O read cost. Many times the cloud " +
+      "environments also get better throughput when you have multiple readers in parallel. " +
+      "This reader uses multiple threads to read each file in parallel and each file is sent " +
+      "to the GPU separately. This allows the CPU to keep reading while GPU is also doing work. " +
+      s"See $MULTITHREAD_READ_NUM_THREADS and " +
+      s"$maxNumFilesConfKey to control " +
+      "the number of threads and amount of memory used. " +
+      "By default this is set to AUTO so we select the reader we think is best. This will " +
+      "either be the COALESCING or the MULTITHREADED based on whether we think the file is " +
+      "in the cloud. See spark.rapids.cloudSchemes."
+
+  private def maxNumFilesParallelDoc(readerTypeConf: ConfEntry[_]): String =
+    "A limit on the maximum number of files per task processed in parallel on the CPU " +
+      "side before the file is sent to the GPU. This affects the amount of host memory used " +
+      "when reading the files in parallel. Used with MULTITHREADED reader, see " +
+      s"$readerTypeConf."
+
+  private def rangeWindowOverflowDoc(typeName: String): String =
+    s"When the order-by column of a range based window is $typeName type and " +
+      "the range boundary calculated for a value has overflow, CPU and GPU will get " +
+      "the different results. When set to false disables the range window acceleration for the " +
+      s"$typeName type order-by column"
+
+  private def rangeWindowDisableDoc(typeName: String): String =
+    "When set to false, this disables the range window acceleration for the " +
+      s"$typeName type order-by column"
+
   // ENABLE/DISABLE PROCESSING
 
   val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
@@ -531,26 +573,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .createWithDefault(false)
 
   val PARQUET_READER_TYPE = conf("spark.rapids.sql.format.parquet.reader.type")
-    .doc("Sets the Parquet reader type. We support different types that are optimized for " +
-      "different environments. The original Spark style reader can be selected by setting this " +
-      "to PERFILE which individually reads and copies files to the GPU. Loading many small files " +
-      "individually has high overhead, and using either COALESCING or MULTITHREADED is " +
-      "recommended instead. The COALESCING reader is good when using a local file system where " +
-      "the executors are on the same nodes or close to the nodes the data is being read on. " +
-      "This reader coalesces all the files assigned to a task into a single host buffer before " +
-      "sending it down to the GPU. It copies blocks from a single file into a host buffer in " +
-      s"separate threads in parallel, see $MULTITHREAD_READ_NUM_THREADS. " +
-      "MULTITHREADED is good for cloud environments where you are reading from a blobstore " +
-      "that is totally separate and likely has a higher I/O read cost. Many times the cloud " +
-      "environments also get better throughput when you have multiple readers in parallel. " +
-      "This reader uses multiple threads to read each file in parallel and each file is sent " +
-      "to the GPU separately. This allows the CPU to keep reading while GPU is also doing work. " +
-      s"See $MULTITHREAD_READ_NUM_THREADS and " +
-      "spark.rapids.sql.format.parquet.multiThreadedRead.maxNumFilesParallel to control " +
-      "the number of threads and amount of memory used. " +
-      "By default this is set to AUTO so we select the reader we think is best. This will " +
-      "either be the COALESCING or the MULTITHREADED based on whether we think the file is " +
-      "in the cloud. See spark.rapids.cloudSchemes.")
+    .doc(readerTypeDoc("Parquet",
+      "spark.rapids.sql.format.parquet.multiThreadedRead.maxNumFilesParallel"))
     .stringConf
     .transform(_.toUpperCase(java.util.Locale.ROOT))
     .checkValues(RapidsReaderType.values.map(_.toString))
@@ -755,12 +779,9 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val PARQUET_MULTITHREAD_READ_MAX_NUM_FILES_PARALLEL =
     conf("spark.rapids.sql.format.parquet.multiThreadedRead.maxNumFilesParallel")
-      .doc("A limit on the maximum number of files per task processed in parallel on the CPU " +
-        "side before the file is sent to the GPU. This affects the amount of host memory used " +
-        "when reading the files in parallel. Used with MULTITHREADED reader, see " +
-        s"$PARQUET_READER_TYPE.")
+      .doc(maxNumFilesParallelDoc(PARQUET_READER_TYPE))
       .integerConf
-      .checkValue(v => v > 0, "The maximum number of files must be greater than 0.")
+      .checkValue(v => v > 0, MAX_NUM_FILES_POSITIVE_ERROR)
       .createWithDefault(Integer.MAX_VALUE)
 
   val ENABLE_PARQUET_READ = conf("spark.rapids.sql.format.parquet.read.enabled")
@@ -847,26 +868,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .createWithDefault(true)
 
   val ORC_READER_TYPE = conf("spark.rapids.sql.format.orc.reader.type")
-    .doc("Sets the ORC reader type. We support different types that are optimized for " +
-      "different environments. The original Spark style reader can be selected by setting this " +
-      "to PERFILE which individually reads and copies files to the GPU. Loading many small files " +
-      "individually has high overhead, and using either COALESCING or MULTITHREADED is " +
-      "recommended instead. The COALESCING reader is good when using a local file system where " +
-      "the executors are on the same nodes or close to the nodes the data is being read on. " +
-      "This reader coalesces all the files assigned to a task into a single host buffer before " +
-      "sending it down to the GPU. It copies blocks from a single file into a host buffer in " +
-      s"separate threads in parallel, see $MULTITHREAD_READ_NUM_THREADS. " +
-      "MULTITHREADED is good for cloud environments where you are reading from a blobstore " +
-      "that is totally separate and likely has a higher I/O read cost. Many times the cloud " +
-      "environments also get better throughput when you have multiple readers in parallel. " +
-      "This reader uses multiple threads to read each file in parallel and each file is sent " +
-      "to the GPU separately. This allows the CPU to keep reading while GPU is also doing work. " +
-      s"See $MULTITHREAD_READ_NUM_THREADS and " +
-      "spark.rapids.sql.format.orc.multiThreadedRead.maxNumFilesParallel to control " +
-      "the number of threads and amount of memory used. " +
-      "By default this is set to AUTO so we select the reader we think is best. This will " +
-      "either be the COALESCING or the MULTITHREADED based on whether we think the file is " +
-      "in the cloud. See spark.rapids.cloudSchemes.")
+    .doc(readerTypeDoc("ORC",
+      "spark.rapids.sql.format.orc.multiThreadedRead.maxNumFilesParallel"))
     .stringConf
     .transform(_.toUpperCase(java.util.Locale.ROOT))
     .checkValues(RapidsReaderType.values.map(_.toString))
@@ -884,17 +887,14 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val ORC_MULTITHREAD_READ_MAX_NUM_FILES_PARALLEL =
     conf("spark.rapids.sql.format.orc.multiThreadedRead.maxNumFilesParallel")
-      .doc("A limit on the maximum number of files per task processed in parallel on the CPU " +
-        "side before the file is sent to the GPU. This affects the amount of host memory used " +
-        "when reading the files in parallel. Used with MULTITHREADED reader, see " +
-        s"$ORC_READER_TYPE.")
+      .doc(maxNumFilesParallelDoc(ORC_READER_TYPE))
       .integerConf
-      .checkValue(v => v > 0, "The maximum number of files must be greater than 0.")
+      .checkValue(v => v > 0, MAX_NUM_FILES_POSITIVE_ERROR)
       .createWithDefault(Integer.MAX_VALUE)
 
   val ENABLE_CSV = conf("spark.rapids.sql.format.csv.enabled")
     .doc("When set to false disables all csv input and output acceleration. " +
-      "(only input is currently supported anyways)")
+      ONLY_INPUT_SUPPORTED_NOTE)
     .booleanConf
     .createWithDefault(true)
 
@@ -920,7 +920,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val ENABLE_JSON = conf("spark.rapids.sql.format.json.enabled")
     .doc("When set to true enables all json input and output acceleration. " +
-      "(only input is currently supported anyways)")
+      ONLY_INPUT_SUPPORTED_NOTE)
     .booleanConf
     .createWithDefault(true)
 
@@ -952,7 +952,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val ENABLE_AVRO = conf("spark.rapids.sql.format.avro.enabled")
     .doc("When set to true enables all avro input and output acceleration. " +
-      "(only input is currently supported anyways)")
+      ONLY_INPUT_SUPPORTED_NOTE)
     .booleanConf
     .createWithDefault(false)
 
@@ -962,26 +962,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .createWithDefault(false)
 
   val AVRO_READER_TYPE = conf("spark.rapids.sql.format.avro.reader.type")
-    .doc("Sets the Avro reader type. We support different types that are optimized for " +
-      "different environments. The original Spark style reader can be selected by setting this " +
-      "to PERFILE which individually reads and copies files to the GPU. Loading many small files " +
-      "individually has high overhead, and using either COALESCING or MULTITHREADED is " +
-      "recommended instead. The COALESCING reader is good when using a local file system where " +
-      "the executors are on the same nodes or close to the nodes the data is being read on. " +
-      "This reader coalesces all the files assigned to a task into a single host buffer before " +
-      "sending it down to the GPU. It copies blocks from a single file into a host buffer in " +
-      s"separate threads in parallel, see $MULTITHREAD_READ_NUM_THREADS. " +
-      "MULTITHREADED is good for cloud environments where you are reading from a blobstore " +
-      "that is totally separate and likely has a higher I/O read cost. Many times the cloud " +
-      "environments also get better throughput when you have multiple readers in parallel. " +
-      "This reader uses multiple threads to read each file in parallel and each file is sent " +
-      "to the GPU separately. This allows the CPU to keep reading while GPU is also doing work. " +
-      s"See $MULTITHREAD_READ_NUM_THREADS and " +
-      "spark.rapids.sql.format.avro.multiThreadedRead.maxNumFilesParallel to control " +
-      "the number of threads and amount of memory used. " +
-      "By default this is set to AUTO so we select the reader we think is best. This will " +
-      "either be the COALESCING or the MULTITHREADED based on whether we think the file is " +
-      "in the cloud. See spark.rapids.cloudSchemes.")
+    .doc(readerTypeDoc("Avro",
+      "spark.rapids.sql.format.avro.multiThreadedRead.maxNumFilesParallel"))
     .stringConf
     .transform(_.toUpperCase(java.util.Locale.ROOT))
     .checkValues(RapidsReaderType.values.map(_.toString))
@@ -999,12 +981,9 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val AVRO_MULTITHREAD_READ_MAX_NUM_FILES_PARALLEL =
     conf("spark.rapids.sql.format.avro.multiThreadedRead.maxNumFilesParallel")
-      .doc("A limit on the maximum number of files per task processed in parallel on the CPU " +
-        "side before the file is sent to the GPU. This affects the amount of host memory used " +
-        "when reading the files in parallel. Used with MULTITHREADED reader, see " +
-        s"$AVRO_READER_TYPE.")
+      .doc(maxNumFilesParallelDoc(AVRO_READER_TYPE))
       .integerConf
-      .checkValue(v => v > 0, "The maximum number of files must be greater than 0.")
+      .checkValue(v => v > 0, MAX_NUM_FILES_POSITIVE_ERROR)
       .createWithDefault(Integer.MAX_VALUE)
 
   val ENABLE_DELTA_WRITE = conf("spark.rapids.sql.format.delta.write.enabled")
@@ -1082,55 +1061,40 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .createWithDefault(true)
 
   val ENABLE_RANGE_WINDOW_BYTES = conf("spark.rapids.sql.window.range.byte.enabled")
-    .doc("When the order-by column of a range based window is byte type and " +
-      "the range boundary calculated for a value has overflow, CPU and GPU will get " +
-      "the different results. When set to false disables the range window acceleration for the " +
-      "byte type order-by column")
+    .doc(rangeWindowOverflowDoc("byte"))
     .booleanConf
     .createWithDefault(false)
 
   val ENABLE_RANGE_WINDOW_SHORT = conf("spark.rapids.sql.window.range.short.enabled")
-    .doc("When the order-by column of a range based window is short type and " +
-      "the range boundary calculated for a value has overflow, CPU and GPU will get " +
-      "the different results. When set to false disables the range window acceleration for the " +
-      "short type order-by column")
+    .doc(rangeWindowOverflowDoc("short"))
     .booleanConf
     .createWithDefault(false)
 
   val ENABLE_RANGE_WINDOW_INT = conf("spark.rapids.sql.window.range.int.enabled")
-    .doc("When the order-by column of a range based window is int type and " +
-      "the range boundary calculated for a value has overflow, CPU and GPU will get " +
-      "the different results. When set to false disables the range window acceleration for the " +
-      "int type order-by column")
+    .doc(rangeWindowOverflowDoc("int"))
     .booleanConf
     .createWithDefault(true)
 
   val ENABLE_RANGE_WINDOW_LONG = conf("spark.rapids.sql.window.range.long.enabled")
-    .doc("When the order-by column of a range based window is long type and " +
-      "the range boundary calculated for a value has overflow, CPU and GPU will get " +
-      "the different results. When set to false disables the range window acceleration for the " +
-      "long type order-by column")
+    .doc(rangeWindowOverflowDoc("long"))
     .booleanConf
     .createWithDefault(true)
 
   val ENABLE_RANGE_WINDOW_FLOAT: ConfEntryWithDefault[Boolean] =
     conf("spark.rapids.sql.window.range.float.enabled")
-      .doc("When set to false, this disables the range window acceleration for the " +
-        "FLOAT type order-by column")
+      .doc(rangeWindowDisableDoc("FLOAT"))
       .booleanConf
       .createWithDefault(true)
 
   val ENABLE_RANGE_WINDOW_DOUBLE: ConfEntryWithDefault[Boolean] =
     conf("spark.rapids.sql.window.range.double.enabled")
-      .doc("When set to false, this disables the range window acceleration for the " +
-        "double type order-by column")
+      .doc(rangeWindowDisableDoc("double"))
       .booleanConf
       .createWithDefault(true)
 
   val ENABLE_RANGE_WINDOW_DECIMAL: ConfEntryWithDefault[Boolean] =
     conf("spark.rapids.sql.window.range.decimal.enabled")
-    .doc("When set to false, this disables the range window acceleration for the " +
-      "DECIMAL type order-by column")
+    .doc(rangeWindowDisableDoc("DECIMAL"))
     .booleanConf
     .createWithDefault(true)
 

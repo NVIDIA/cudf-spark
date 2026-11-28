@@ -107,8 +107,8 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
 
   private lazy val isRapidsShuffleConfigured: Boolean = {
     val conf = SparkEnv.get.conf
-    conf.contains("spark.shuffle.manager") &&
-      conf.get("spark.shuffle.manager") == GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS
+    conf.contains(GpuShuffleEnv.SHUFFLE_MANAGER_CONF) &&
+      conf.get(GpuShuffleEnv.SHUFFLE_MANAGER_CONF) == GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS
   }
 
   lazy val rapidsShuffleCodec: Option[TableCompressionCodec] = {
@@ -133,14 +133,14 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
       // 3. Off-heap memory limits are enabled (prevents OOM from unbounded buffer growth)
       if (rapidsConf.isMultiThreadedShuffleManagerMode) {
         if (!rapidsConf.isMultithreadedShuffleSkipMergeEnabled) {
-          logInfo("MultithreadedShuffleBufferCatalog disabled - " +
+          logInfo(GpuShuffleEnv.MT_SHUFFLE_CATALOG_DISABLED_PREFIX +
             "spark.rapids.shuffle.multithreaded.skipMerge is false")
         } else if (GpuShuffleEnv.isExternalShuffleEnabled) {
-          logWarning("MultithreadedShuffleBufferCatalog disabled - " +
+          logWarning(GpuShuffleEnv.MT_SHUFFLE_CATALOG_DISABLED_PREFIX +
             "External Shuffle Service (ESS) is enabled. ESS cannot access in-memory catalog. " +
             "Disable ESS (spark.shuffle.service.enabled=false) to use skipMerge feature.")
         } else if (!rapidsConf.offHeapLimitEnabled) {
-          logWarning("MultithreadedShuffleBufferCatalog disabled - " +
+          logWarning(GpuShuffleEnv.MT_SHUFFLE_CATALOG_DISABLED_PREFIX +
             "spark.rapids.memory.host.offHeapLimit.enabled is false. " +
             "Without off-heap memory limits, shuffle buffers could grow unbounded and cause OOM. " +
             "Set spark.rapids.memory.host.offHeapLimit.enabled=true to use skipMerge feature.")
@@ -167,6 +167,10 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
 
 @scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
 object GpuShuffleEnv extends Logging {
+  private final val SHUFFLE_MANAGER_CONF = "spark.shuffle.manager"
+  private final val MT_SHUFFLE_CATALOG_DISABLED_PREFIX =
+    "MultithreadedShuffleBufferCatalog disabled - "
+
   def isUCXShuffleAndEarlyStart(conf: RapidsConf): Boolean = {
     conf.isUCXShuffleManagerMode &&
       conf.shuffleTransportEarlyStart
@@ -180,8 +184,8 @@ object GpuShuffleEnv extends Logging {
    * to be instantiated yet.
    */
   def isRapidsShuffleConfigured(sparkConf: SparkConf): Boolean = {
-    sparkConf.contains("spark.shuffle.manager") &&
-      sparkConf.get("spark.shuffle.manager") == RAPIDS_SHUFFLE_CLASS
+    sparkConf.contains(SHUFFLE_MANAGER_CONF) &&
+      sparkConf.get(SHUFFLE_MANAGER_CONF) == RAPIDS_SHUFFLE_CLASS
   }
 
   @volatile private var env: GpuShuffleEnv = _

@@ -38,6 +38,7 @@ import org.apache.spark.sql.types._
 object ParquetSchemaUtils {
   // Copied from Spark
   private val SPARK_PARQUET_SCHEMA_NAME = "spark_schema"
+  private final val INVALID_PARQUET_SCHEMA_PREFIX = "Invalid Parquet schema. "
   // Copied from Spark
   val EMPTY_MESSAGE: MessageType = Types.buildMessage().named(SPARK_PARQUET_SCHEMA_NAME)
 
@@ -254,13 +255,13 @@ object ParquetSchemaUtils {
         // TODO: When we drop Spark 3.1.x, this should use Parquet's LogicalTypeAnnotation
         //parquetList.getLogicalTypeAnnotation.isInstanceOf[ListLogicalTypeAnnotation],
         parquetList.getOriginalType == OriginalType.LIST,
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "Logical type annotation of annotated Parquet lists must be " +
             "ListLogicalTypeAnnotation: " + parquetList.toString)
 
       assert(
         parquetList.getFieldCount == 1 && parquetList.getType(0).isRepetition(Repetition.REPEATED),
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "LIST-annotated group should only have exactly one repeated field: " +
             parquetList)
 
@@ -617,14 +618,14 @@ object ParquetSchemaUtils {
         // TODO: When we drop Spark 3.1.x, this should use Parquet's LogicalTypeAnnotation
         //parquetList.getLogicalTypeAnnotation.isInstanceOf[ListLogicalTypeAnnotation],
         parquetList.getOriginalType == OriginalType.LIST,
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "Logical type annotation of annotated Parquet lists must be " +
             "ListLogicalTypeAnnotation: " + parquetList.toString)
 
       assert(
         parquetListGroup.getFieldCount == 1 &&
             parquetListGroup.getType(0).isRepetition(Repetition.REPEATED),
-        "Invalid Parquet schema. " +
+        INVALID_PARQUET_SCHEMA_PREFIX +
             "LIST-annotated group should only have exactly one repeated field: " +
             parquetList)
 

@@ -138,22 +138,25 @@ abstract class GpuWindowExpressionMetaBase(
                   s" range function, found ${unsupportedOrderTypes.mkString(", ")}")
               }
 
+              val rangeIncompatibleOrderByPrefix =
+                "Range window frame is not 100% compatible when the order by type is "
+
               def checkRangeBoundaryConfig(dt: DataType): Unit = {
                 dt match {
                   case ByteType => if (!conf.isRangeWindowByteEnabled) willNotWorkOnGpu(
-                    s"Range window frame is not 100% compatible when the order by type is " +
+                    rangeIncompatibleOrderByPrefix +
                       s"byte and the range value calculated has overflow. " +
                       s"To enable it please set ${RapidsConf.ENABLE_RANGE_WINDOW_BYTES} to true.")
                   case ShortType => if (!conf.isRangeWindowShortEnabled) willNotWorkOnGpu(
-                    s"Range window frame is not 100% compatible when the order by type is " +
+                    rangeIncompatibleOrderByPrefix +
                       s"short and the range value calculated has overflow. " +
                       s"To enable it please set ${RapidsConf.ENABLE_RANGE_WINDOW_SHORT} to true.")
                   case IntegerType => if (!conf.isRangeWindowIntEnabled) willNotWorkOnGpu(
-                    s"Range window frame is not 100% compatible when the order by type is " +
+                    rangeIncompatibleOrderByPrefix +
                       s"int and the range value calculated has overflow. " +
                       s"To enable it please set ${RapidsConf.ENABLE_RANGE_WINDOW_INT} to true.")
                   case LongType => if (!conf.isRangeWindowLongEnabled) willNotWorkOnGpu(
-                    s"Range window frame is not 100% compatible when the order by type is " +
+                    rangeIncompatibleOrderByPrefix +
                       s"long and the range value calculated has overflow. " +
                       s"To enable it please set ${RapidsConf.ENABLE_RANGE_WINDOW_LONG} to true.")
                   case FloatType => if (!conf.isRangeWindowFloatEnabled) willNotWorkOnGpu(

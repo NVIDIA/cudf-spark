@@ -54,6 +54,8 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
 
   // Native Delta inserts use this internal option to fill omitted nullable columns.
   private val USE_NULL_AS_DEFAULT_OPTION = "__use_null_as_default"
+  private final val DELTA_WRITE_DISABLED_PREFIX =
+    "Delta Lake output acceleration has been disabled. To enable set "
 
   override def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean = {
     // We need to check if the DeltaParquetFileFormat class is loadable
@@ -93,7 +95,7 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     require(isSupportedCatalog(cpuExec.catalog.getClass))
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     checkDeltaProvider(meta, cpuExec.properties, cpuExec.conf)
@@ -106,7 +108,7 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     require(isSupportedCatalog(cpuExec.catalog.getClass))
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     checkDeltaProvider(meta, cpuExec.properties, cpuExec.conf)
@@ -223,7 +225,7 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
       cpuExec: AppendDataExecV1,
       meta: AppendDataExecV1Meta): Unit = {
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
@@ -252,7 +254,7 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
       cpuExec: OverwriteByExpressionExecV1,
       meta: OverwriteByExpressionExecV1Meta): Unit = {
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]

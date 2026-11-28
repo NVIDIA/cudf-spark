@@ -24,14 +24,16 @@ import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.types.DecimalType
 
 object RoundingShims {
+  private final val ROUNDING_DIFFERENCE_NOTE = "result may round slightly differently"
+
   def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
     GpuOverrides.expr[RoundCeil](
       "Computes the ceiling of the given expression to d decimal places",
       ExprChecks.binaryProject(
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
+            TypeSig.psNote(TypeEnum.FLOAT, ROUNDING_DIFFERENCE_NOTE) +
+            TypeSig.psNote(TypeEnum.DOUBLE, ROUNDING_DIFFERENCE_NOTE),
             TypeSig.cpuNumeric),
         ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
       (ceil, conf, p, r) => new BinaryExprMeta[RoundCeil](ceil, conf, p, r) {
@@ -63,8 +65,8 @@ object RoundingShims {
       ExprChecks.binaryProject(
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
+            TypeSig.psNote(TypeEnum.FLOAT, ROUNDING_DIFFERENCE_NOTE) +
+            TypeSig.psNote(TypeEnum.DOUBLE, ROUNDING_DIFFERENCE_NOTE),
             TypeSig.cpuNumeric),
         ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
       (floor, conf, p, r) => new BinaryExprMeta[RoundFloor](floor, conf, p, r) {

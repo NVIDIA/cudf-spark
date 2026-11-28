@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,10 +30,17 @@ import org.apache.spark.sql.types._
 
 
 private[udf] object Repr {
+  private final val COMPILER_INTERNAL_PREFIX = "Compiler internal representation of "
+  private[udf] final val STRING_BUILDER_CLASS = "java.lang.StringBuilder"
+  private[udf] final val SPARK_EXCEPTION_CLASS = "org.apache.spark.SparkException"
+  private[udf] final val ARRAY_BUFFER_CLASS = "scala.collection.mutable.ArrayBuffer"
+  private[udf] final val ARRAY_BUFFER_OBJECT_CLASS = "scala.collection.mutable.ArrayBuffer$"
+  private[udf] final val ARGUMENTS_WORD = "argument(s)"
+  private[udf] final val UNSUPPORTED_ARG_TYPE_PREFIX = "Unsupported argument type for "
 
   abstract class CompilerInternal(name: String) extends ShimExpression {
     override def dataType: DataType = {
-      throw new SparkException(s"Compiler internal representation of " +
+      throw new SparkException(COMPILER_INTERNAL_PREFIX +
           s"${name} cannot be evaluated")
     }
 
@@ -43,24 +50,24 @@ private[udf] object Repr {
     }
 
     override def eval(input: org.apache.spark.sql.catalyst.InternalRow): Any = {
-      throw new SparkException(s"Compiler internal representation of " +
+      throw new SparkException(COMPILER_INTERNAL_PREFIX +
           s"${name} cannot be evaluated")
     }
 
     override def nullable: Boolean = {
-      throw new SparkException(s"Compiler internal representation of " +
+      throw new SparkException(COMPILER_INTERNAL_PREFIX +
           s"${name} cannot be evaluated")
     }
 
     override def children: Seq[Expression] = {
-      throw new SparkException(s"Compiler internal representation of " +
+      throw new SparkException(COMPILER_INTERNAL_PREFIX +
           s"${name} cannot be evaluated")
     }
   }
 
   // Internal representation of java.lang.StringBuilder.
   case class StringBuilder(var string: Expression = Literal.default(StringType))
-      extends CompilerInternal("java.lang.StringBuilder") {
+      extends CompilerInternal(STRING_BUILDER_CLASS) {
     override def dataType: DataType = string.dataType
 
     def invoke(methodName: String, args: List[Expression]): Option[(Expression, Boolean)] = {
@@ -76,7 +83,7 @@ private[udf] object Repr {
 
   // Internal representation of org.apache.spark.SparkException
   case class SparkExcept(var message: Expression = Literal.default(StringType))
-      extends CompilerInternal("org.apache.spark.SparkException") {
+      extends CompilerInternal(SPARK_EXCEPTION_CLASS) {
 
     def invoke(methodName: String, args: List[Expression]): Option[(Expression, Boolean)] = {
       methodName match {
@@ -113,7 +120,7 @@ private[udf] object Repr {
       extends CompilerInternal("scala.collection.generic.CanBuildFrom")
 
   case class ArrayBuffer(var arrayBuffer: Expression = CreateArray(Seq.empty[Expression]))
-      extends CompilerInternal("scala.collection.mutable.ArrayBuffer") {
+      extends CompilerInternal(ARRAY_BUFFER_CLASS) {
     override def dataType: DataType = arrayBuffer.dataType
 
     def invoke(methodName: String, args: List[Expression]): Option[(Expression, Boolean)] = {
@@ -137,7 +144,7 @@ private[udf] object Repr {
                   s"but instead got ${args.length} argument(s)")
               } else if (!args.last.isInstanceOf[Repr.CanBuildFrom] ||
                          !args.last.asInstanceOf[Repr.CanBuildFrom].objref.getTypeName
-                           .equals("scala.collection.mutable.ArrayBuffer$")) {
+                           .equals(Repr.ARRAY_BUFFER_OBJECT_CLASS)) {
                 throw new SparkException(
                   s"ArrayBuffer.:+ operation expects CanBuildFrom for the last argument")
               }
@@ -394,13 +401,13 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
   private def newObj(lambdaReflection: LambdaReflection,
       state: State): State = {
     val typeName = lambdaReflection.lookupClassName(operand)
-    if (typeName.equals("java.lang.StringBuilder")) {
+    if (typeName.equals(Repr.STRING_BUILDER_CLASS)) {
       val State(locals, stack, cond, expr) = state
       State(locals, Repr.StringBuilder() :: stack, cond, expr)
-    } else if (typeName.equals("org.apache.spark.SparkException")) {
+    } else if (typeName.equals(Repr.SPARK_EXCEPTION_CLASS)) {
       val State(locals, stack, cond, expr) = state
       State(locals, Repr.SparkExcept() :: stack, cond, expr)
-    } else if (typeName.equals("scala.collection.mutable.ArrayBuffer")) {
+    } else if (typeName.equals(Repr.ARRAY_BUFFER_CLASS)) {
       val State(locals, stack, cond, expr) = state
       State(locals, Repr.ArrayBuffer() :: stack, cond, expr)
     } else {
@@ -496,7 +503,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
         Some((arrayOp(method.getName, args), false))
       } else if (declaringClassName.equals("scala.reflect.ClassTag$")) {
         Some((classTagOp(method.getName, args), false))
-      } else if (declaringClassName.equals("scala.collection.mutable.ArrayBuffer$")) {
+      } else if (declaringClassName.equals(Repr.ARRAY_BUFFER_OBJECT_CLASS)) {
         Some((arrayBufferOp(method.getName, args), false))
       } else if (declaringClassName.equals("java.lang.Double")) {
         Some((doubleOp(method.getName, args), false))
@@ -504,17 +511,17 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
         Some((floatOp(method.getName, args), false))
       } else if (declaringClassName.equals("java.lang.String")) {
         Some((stringOp(method.getName, args), false))
-      } else if (declaringClassName.equals("java.lang.StringBuilder")) {
+      } else if (declaringClassName.equals(Repr.STRING_BUILDER_CLASS)) {
         if (!args.head.isInstanceOf[Repr.StringBuilder]) {
           throw new SparkException("Internal error with StringBuilder")
         }
         args.head.asInstanceOf[Repr.StringBuilder].invoke(method.getName, args.tail)
-      } else if (declaringClassName.equals("org.apache.spark.SparkException")) {
+      } else if (declaringClassName.equals(Repr.SPARK_EXCEPTION_CLASS)) {
         if (!args.head.isInstanceOf[Repr.SparkExcept]) {
           throw new SparkException("Internal error with SparkException")
         }
         args.head.asInstanceOf[Repr.SparkExcept].invoke(method.getName, args.tail)
-      } else if (declaringClassName.equals("scala.collection.mutable.ArrayBuffer") ||
+      } else if (declaringClassName.equals(Repr.ARRAY_BUFFER_CLASS) ||
                  ((args.nonEmpty && args.head.isInstanceOf[Repr.ArrayBuffer]) &&
                   ((declaringClassName.equals("scala.collection.AbstractSeq") &&
                     opcode == Opcode.INVOKEVIRTUAL) ||
@@ -575,7 +582,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
       throw new SparkException(
         s"${methodName} operation expects ${expectedTypes.length} " +
             s"argument(s), including an objref, but instead got ${args.length} " +
-            s"argument(s)")
+            Repr.ARGUMENTS_WORD)
     }
     args.view.zip(expectedTypes.view).foreach { case (arg, expectedType) =>
       if (arg.dataType != expectedType) {
@@ -725,7 +732,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
     // Make sure that the objref is scala.math.package$.
     args.head match {
       case getstatic: Repr.GetStatic =>
-        if (!getstatic.getTypeName.equals("scala.collection.mutable.ArrayBuffer$")) {
+        if (!getstatic.getTypeName.equals(Repr.ARRAY_BUFFER_OBJECT_CLASS)) {
           throw new SparkException("Unsupported arrayBuffer function objref: " + args.head)
         }
       case _ =>
@@ -801,7 +808,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
           throw new SparkException(
             s"String.${methodName} operation expects 3 argument(s), " +
                 s"including an objref, but instead got ${args.length} " +
-                s"argument(s)")
+                Repr.ARGUMENTS_WORD)
         }
         if (args(1).dataType == StringType &&
             args(2).dataType == StringType) {
@@ -810,7 +817,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
             args(2).dataType == IntegerType) {
           StringReplace(args(0), Chr(args(1)), Chr(args(2)))
         } else {
-          throw new SparkException(s"Unsupported argument type for " +
+          throw new SparkException(Repr.UNSUPPORTED_ARG_TYPE_PREFIX +
               s"String.${methodName}: " +
               s"${args(0).dataType}, " +
               s"${args(1).dataType}, and " +
@@ -829,10 +836,10 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
           throw new SparkException(
             s"String.${methodName} operation expects 1 " +
                 s"argument(s), including an objref, but instead got ${args.length} " +
-                s"argument(s)")
+                Repr.ARGUMENTS_WORD)
         }
         if (!supportedArgs.contains(args.head.dataType)) {
-          throw new SparkException(s"Unsupported argument type for " +
+          throw new SparkException(Repr.UNSUPPORTED_ARG_TYPE_PREFIX +
               s"String.${methodName}: " +
               s"${args.head.dataType}")
         }
@@ -842,7 +849,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
           if (args(1).dataType == StringType) {
             Subtract(StringInstr(args(0), args(1)), Literal(1))
           } else {
-            throw new SparkException(s"Unsupported argument type for " +
+            throw new SparkException(Repr.UNSUPPORTED_ARG_TYPE_PREFIX +
                 s"String.${methodName}: " +
                 s"${args(0).dataType} and " +
                 s"${args(1).dataType}")
@@ -853,7 +860,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
             Subtract(StringLocate(args(1), args(0), Add(args(2), Literal(1))),
               Literal(1))
           } else {
-            throw new SparkException(s"Unsupported argument type for " +
+            throw new SparkException(Repr.UNSUPPORTED_ARG_TYPE_PREFIX +
                 s"String.${methodName}: " +
                 s"${args(0).dataType}, " +
                 s"${args(1).dataType}, and " +
@@ -863,7 +870,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
           throw new SparkException(
             s"String.${methodName} operation expects 2 or 3 argument(s), " +
                 s"including an objref, but instead got ${args.length} " +
-                s"argument(s)")
+                Repr.ARGUMENTS_WORD)
         }
       case "replaceAll" =>
         checkArgs(methodName, List(StringType, StringType, StringType), args)
@@ -879,7 +886,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
           throw new SparkException(
             s"String.${methodName} operation expects 2 or 3 argument(s), " +
                 s"including an objref, but instead got ${args.length} " +
-                s"argument(s)")
+                Repr.ARGUMENTS_WORD)
         }
       case "getBytes" =>
         if (args.length == 1) {
@@ -892,7 +899,7 @@ case class Instruction(opcode: Int, operand: Int, instructionStr: String) extend
           throw new SparkException(
             s"String.${methodName} operation expects 1 or 2 argument(s), " +
                 s"including an objref, but instead got ${args.length} " +
-                s"argument(s)")
+                Repr.ARGUMENTS_WORD)
         }
       case _ =>
         throw new SparkException(s"Unsupported string function: " +

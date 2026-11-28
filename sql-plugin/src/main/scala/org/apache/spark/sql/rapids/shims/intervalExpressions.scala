@@ -29,6 +29,7 @@ import org.apache.spark.sql.rapids.GpuDivModLike.makeZeroScalar
 import org.apache.spark.sql.types._
 
 object IntervalUtils {
+  private[shims] final val OVERFLOW_OCCURS_MSG = "overflow occurs"
 
   /**
    * Convert long cv to int cv, throws exception if any value in `longCv` exceeds the int limits.
@@ -38,7 +39,7 @@ object IntervalUtils {
     withResource(longCv.castTo(DType.INT32)) { intResult =>
       withResource(longCv.notEqualTo(intResult)) { notEquals =>
         if (BoolUtils.isAnyValidTrue(notEquals)) {
-          throw RapidsErrorUtils.arithmeticOverflowError("overflow occurs")
+          throw RapidsErrorUtils.arithmeticOverflowError(IntervalUtils.OVERFLOW_OCCURS_MSG)
         } else {
           intResult.incRefCount()
         }
@@ -51,7 +52,7 @@ object IntervalUtils {
     withResource(Scalar.fromLong(minValue)) { minScalar =>
       withResource(decimal128Cv.lessThan(minScalar)) { lessThanMin =>
         if (BoolUtils.isAnyValidTrue(lessThanMin)) {
-          throw RapidsErrorUtils.arithmeticOverflowError("overflow occurs")
+          throw RapidsErrorUtils.arithmeticOverflowError(IntervalUtils.OVERFLOW_OCCURS_MSG)
         }
       }
     }
@@ -60,7 +61,7 @@ object IntervalUtils {
     withResource(Scalar.fromLong(maxValue)) { maxScalar =>
       withResource(decimal128Cv.greaterThan(maxScalar)) { greaterThanMax =>
         if (BoolUtils.isAnyValidTrue(greaterThanMax)) {
-          throw RapidsErrorUtils.arithmeticOverflowError("overflow occurs")
+          throw RapidsErrorUtils.arithmeticOverflowError(IntervalUtils.OVERFLOW_OCCURS_MSG)
         }
       }
     }
@@ -274,13 +275,13 @@ object IntervalUtils {
           case (lCv: ColumnVector, rS: Scalar) =>
             withResource(lCv.equalTo(minScalar)) { isMin =>
               if (getLong(rS) == -1L && BoolUtils.isAnyValidTrue(isMin)) {
-                throw RapidsErrorUtils.arithmeticOverflowError("overflow occurs")
+                throw RapidsErrorUtils.arithmeticOverflowError(IntervalUtils.OVERFLOW_OCCURS_MSG)
               }
             }
           case (lS: Scalar, rCv: ColumnVector) =>
             withResource(rCv.equalTo(negOneScalar)) { isNegOne =>
               if (getLong(lS) == min && BoolUtils.isAnyValidTrue(isNegOne)) {
-                throw RapidsErrorUtils.arithmeticOverflowError("overflow occurs")
+                throw RapidsErrorUtils.arithmeticOverflowError(IntervalUtils.OVERFLOW_OCCURS_MSG)
               }
             }
           case (lS: Scalar, rS: Scalar) =>

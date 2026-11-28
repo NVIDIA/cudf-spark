@@ -34,6 +34,8 @@ import org.apache.spark.unsafe.types.UTF8String
 abstract class CudfUnsafeRowBase(
    protected val attributes: Array[Attribute],
    protected val remapping: Array[Int]) extends InternalRow {
+  private final val NOT_IMPLEMENTED_YET = "NOT IMPLEMENTED YET"
+
   protected var address: Long = _
   private var startOffsets: Array[Int] = _
   private var fixedWidthSizeInBytes: Int = _
@@ -192,23 +194,23 @@ abstract class CudfUnsafeRowBase(
   }
 
   override def getInterval(ordinal: Int): CalendarInterval = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def getStruct(ordinal: Int, numFields: Int): CudfUnsafeRow = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def getArray(ordinal: Int): ArrayData = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def getMap(ordinal: Int): MapData = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def copy(): CudfUnsafeRow = {
-    throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+    throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
   }
 
   override def hashCode(): Int = {
@@ -235,7 +237,7 @@ abstract class CudfUnsafeRowBase(
     build.toString()
   }
 
-  override def anyNull: Boolean = throw new IllegalArgumentException("NOT IMPLEMENTED YET")
+  override def anyNull: Boolean = throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)
 
   private def getFieldAddressFromOrdinal(ordinal: Int): Long = {
     assertIndexIsValid(ordinal)

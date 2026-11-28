@@ -25,6 +25,8 @@ import org.apache.spark.sql.catalyst.optimizer.NormalizeNaNAndZero
 
 
 private[rapids] object GpuMathAndDateExpressionOverrides {
+  private final val LIMITED_FORMATS_NOTE = "A limited number of formats are supported"
+
   val rules: Seq[ExprRule[_ <: Expression]] = Seq(
     expr[PreciseTimestampConversion](
       "Expression used internally to convert the TimestampType to Long and back without losing " +
@@ -390,7 +392,7 @@ private[rapids] object GpuMathAndDateExpressionOverrides {
       ExprChecks.binaryProject(TypeSig.STRING, TypeSig.STRING,
         ("timestamp", TypeSig.TIMESTAMP, TypeSig.TIMESTAMP),
         ("strfmt", TypeSig.lit(TypeEnum.STRING)
-            .withPsNote(TypeEnum.STRING, "A limited number of formats are supported"),
+            .withPsNote(TypeEnum.STRING, LIMITED_FORMATS_NOTE),
             TypeSig.STRING)),
       DateFormatClassRuleMeta
     ),
@@ -401,7 +403,7 @@ private[rapids] object GpuMathAndDateExpressionOverrides {
             TypeSig.STRING + TypeSig.DATE + TypeSig.TIMESTAMP,
             TypeSig.STRING + TypeSig.DATE + TypeSig.TIMESTAMP),
         ("format", TypeSig.lit(TypeEnum.STRING)
-            .withPsNote(TypeEnum.STRING, "A limited number of formats are supported"),
+            .withPsNote(TypeEnum.STRING, LIMITED_FORMATS_NOTE),
             TypeSig.STRING)),
       ToUnixTimestampRuleMeta),
     expr[UnixTimestamp](
@@ -411,7 +413,7 @@ private[rapids] object GpuMathAndDateExpressionOverrides {
             TypeSig.STRING + TypeSig.DATE + TypeSig.TIMESTAMP,
             TypeSig.STRING + TypeSig.DATE + TypeSig.TIMESTAMP),
         ("format", TypeSig.lit(TypeEnum.STRING)
-            .withPsNote(TypeEnum.STRING, "A limited number of formats are supported"),
+            .withPsNote(TypeEnum.STRING, LIMITED_FORMATS_NOTE),
             TypeSig.STRING)),
       UnixTimestampRuleMeta),
     expr[Hour](

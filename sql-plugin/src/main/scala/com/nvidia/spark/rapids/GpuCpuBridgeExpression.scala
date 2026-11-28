@@ -308,6 +308,8 @@ case class GpuCpuBridgeExpression(
       abortRequested: AtomicBoolean)
       extends Callable[SpillableColumnarBatch] with AutoCloseable {
 
+    private final val SUB_BATCH_ABORTED_MSG = "Sub-batch evaluation aborted"
+
     override def close(): Unit = spillableInputRef.close()
 
     override def call(): SpillableColumnarBatch = {
@@ -355,7 +357,7 @@ case class GpuCpuBridgeExpression(
             // Wrap the result column in a spillable batch.
             if (abortRequested.get()) {
               withResource(result) { _ =>
-                throw new CancellationException("Sub-batch evaluation aborted")
+                throw new CancellationException(SUB_BATCH_ABORTED_MSG)
               }
             }
             val spillableResult = closeOnExcept(result) { result =>
@@ -364,7 +366,7 @@ case class GpuCpuBridgeExpression(
             }
             if (abortRequested.get()) {
               withResource(spillableResult) { _ =>
-                throw new CancellationException("Sub-batch evaluation aborted")
+                throw new CancellationException(SUB_BATCH_ABORTED_MSG)
               }
             }
             spillableResult
@@ -378,7 +380,7 @@ case class GpuCpuBridgeExpression(
 
     private def throwIfAborted(): Unit = {
       if (abortRequested.get()) {
-        throw new CancellationException("Sub-batch evaluation aborted")
+        throw new CancellationException(SUB_BATCH_ABORTED_MSG)
       }
     }
   }

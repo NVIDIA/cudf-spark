@@ -1071,6 +1071,10 @@ case class GpuLike(left: Expression, right: Expression, escapeChar: Char)
 }
 
 object GpuRegExpUtils {
+  private[rapids] final val NON_NULL_LITERAL_STRINGS_ONLY_MSG =
+    "only non-null literal strings are supported on GPU"
+  private[rapids] final val MISSING_CUDF_REGEX_PATTERN_MSG =
+    "Expression has not been tagged with cuDF regex pattern"
   private def parseAST(pattern: String): RegexAST = {
     new RegexParser(pattern).parse()
   }
@@ -1295,7 +1299,7 @@ class GpuRLikeMeta(
               willNotWorkOnGpu(e.getMessage)
           }
         case _ =>
-          willNotWorkOnGpu(s"only non-null literal strings are supported on GPU")
+          willNotWorkOnGpu(GpuRegExpUtils.NON_NULL_LITERAL_STRINGS_ONLY_MSG)
       }
     }
 
@@ -1303,7 +1307,7 @@ class GpuRLikeMeta(
       rewriteOptimizationType match {
         case NoOptimization => {
           val patternStr = pattern.getOrElse(throw new IllegalStateException(
-            "Expression has not been tagged with cuDF regex pattern"))
+            GpuRegExpUtils.MISSING_CUDF_REGEX_PATTERN_MSG))
           GpuRLike(lhs, rhs, patternStr)
         }
         case StartsWith(s) => GpuStartsWith(lhs, GpuLiteral(s, StringType))
@@ -1557,7 +1561,7 @@ class GpuRegExpExtractMeta(
             willNotWorkOnGpu(e.getMessage)
         }
       case _ =>
-        willNotWorkOnGpu(s"only non-null literal strings are supported on GPU")
+        willNotWorkOnGpu(GpuRegExpUtils.NON_NULL_LITERAL_STRINGS_ONLY_MSG)
     }
 
     groupIdx.foreach { idx =>
@@ -1576,7 +1580,7 @@ class GpuRegExpExtractMeta(
       regexp: Expression,
       idx: Expression): GpuExpression = {
     val cudfPattern = pattern.getOrElse(
-      throw new IllegalStateException("Expression has not been tagged with cuDF regex pattern"))
+      throw new IllegalStateException(GpuRegExpUtils.MISSING_CUDF_REGEX_PATTERN_MSG))
     GpuRegExpExtract(str, regexp, idx)(cudfPattern)
   }
 }
@@ -1685,7 +1689,7 @@ class GpuRegExpExtractAllMeta(
             willNotWorkOnGpu(e.getMessage)
         }
       case _ =>
-        willNotWorkOnGpu(s"only non-null literal strings are supported on GPU")
+        willNotWorkOnGpu(GpuRegExpUtils.NON_NULL_LITERAL_STRINGS_ONLY_MSG)
     }
 
     groupIdx.foreach { idx =>
@@ -1704,7 +1708,7 @@ class GpuRegExpExtractAllMeta(
       regexp: Expression,
       idx: Expression): GpuExpression = {
     val cudfPattern = pattern.getOrElse(
-      throw new IllegalStateException("Expression has not been tagged with cuDF regex pattern"))
+      throw new IllegalStateException(GpuRegExpUtils.MISSING_CUDF_REGEX_PATTERN_MSG))
     GpuRegExpExtractAll(str, regexp, idx)(cudfPattern)
   }
 }
@@ -1977,6 +1981,8 @@ case class GpuStringSplit(str: Expression, regex: Expression, limit: Expression,
     pattern: String, isRegExp: Boolean)
   extends GpuTernaryExpression with ImplicitCastInputTypes {
 
+  private final val NOT_SUPPORTED_YET_MSG = "This is not supported yet"
+
   override def dataType: DataType = ArrayType(StringType, containsNull = false)
   override def inputTypes: Seq[DataType] = Seq(StringType, StringType, IntegerType)
   override def first: Expression = str
@@ -2026,37 +2032,37 @@ case class GpuStringSplit(str: Expression, regex: Expression, limit: Expression,
       str: GpuColumnVector,
       regex: GpuColumnVector,
       limit: GpuColumnVector): ColumnVector =
-    throw new IllegalStateException("This is not supported yet")
+    throw new IllegalStateException(NOT_SUPPORTED_YET_MSG)
 
   override def doColumnar(
       str: GpuScalar,
       regex: GpuColumnVector,
       limit: GpuColumnVector): ColumnVector =
-    throw new IllegalStateException("This is not supported yet")
+    throw new IllegalStateException(NOT_SUPPORTED_YET_MSG)
 
   override def doColumnar(
       str: GpuScalar,
       regex: GpuScalar,
       limit: GpuColumnVector): ColumnVector =
-    throw new IllegalStateException("This is not supported yet")
+    throw new IllegalStateException(NOT_SUPPORTED_YET_MSG)
 
   override def doColumnar(
       str: GpuScalar,
       regex: GpuColumnVector,
       limit: GpuScalar): ColumnVector =
-    throw new IllegalStateException("This is not supported yet")
+    throw new IllegalStateException(NOT_SUPPORTED_YET_MSG)
 
   override def doColumnar(
       str: GpuColumnVector,
       regex: GpuScalar,
       limit: GpuColumnVector): ColumnVector =
-    throw new IllegalStateException("This is not supported yet")
+    throw new IllegalStateException(NOT_SUPPORTED_YET_MSG)
 
   override def doColumnar(
       str: GpuColumnVector,
       regex: GpuColumnVector,
       limit: GpuScalar): ColumnVector =
-    throw new IllegalStateException("This is not supported yet")
+    throw new IllegalStateException(NOT_SUPPORTED_YET_MSG)
 }
 
 class GpuStringToMapMeta(expr: StringToMap,

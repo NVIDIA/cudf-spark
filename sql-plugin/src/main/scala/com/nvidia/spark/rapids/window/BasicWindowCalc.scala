@@ -342,6 +342,8 @@ object GroupedAggregations {
  * its input columns, along with the output columns it should write the result to.
  */
 class GroupedAggregations {
+  private final val OVERWRITE_WINDOW_OUTPUT_MSG =
+    "Attempted to overwrite a window output column!!"
   import GroupedAggregations._
 
   // The window frame to a map of the window function to the output locations for the result
@@ -405,7 +407,7 @@ class GroupedAggregations {
 
                 outputIndexes.foreach { outIndex =>
                   require(outputColumns(outIndex) == null,
-                    "Attempted to overwrite a window output column!!")
+                    OVERWRITE_WINDOW_OUTPUT_MSG)
                   outputColumns(outIndex) = func.windowOutput(aggColumn)
                 }
             }
@@ -471,7 +473,7 @@ class GroupedAggregations {
         withResource(combined) { combined =>
           outputIndexes.foreach { outIndex =>
             require(outputColumns(outIndex) == null,
-              "Attempted to overwrite a window output column!!")
+              OVERWRITE_WINDOW_OUTPUT_MSG)
             outputColumns(outIndex) = combined.incRefCount()
           }
         }
@@ -601,7 +603,7 @@ class GroupedAggregations {
       withResource(func.scanCombine(isRunningBatched, columns)) { col =>
         outputLocations.foreach { outIndex =>
           require(outputColumns(outIndex) == null,
-            "Attempted to overwrite a window output column!!")
+            OVERWRITE_WINDOW_OUTPUT_MSG)
           outputColumns(outIndex) = col.incRefCount()
         }
       }

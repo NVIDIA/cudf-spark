@@ -126,6 +126,9 @@ object DeltaProvider {
 }
 
 object NoDeltaProvider extends DeltaProvider {
+  private final val CATALOG_NOT_SUPPORTED_MSG = "catalog not supported, should not be called"
+  private final val WRITE_NOT_SUPPORTED_MSG = "write not supported, should not be called"
+
   override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
       CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = Map.empty
 
@@ -151,44 +154,44 @@ object NoDeltaProvider extends DeltaProvider {
   override def tagForGpu(
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
-    throw new IllegalStateException("catalog not supported, should not be called")
+    throw new IllegalStateException(CATALOG_NOT_SUPPORTED_MSG)
   }
 
   override def convertToGpu(
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
-    throw new IllegalStateException("catalog not supported, should not be called")
+    throw new IllegalStateException(CATALOG_NOT_SUPPORTED_MSG)
   }
 
   override def tagForGpu(
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
-    throw new IllegalStateException("catalog not supported, should not be called")
+    throw new IllegalStateException(CATALOG_NOT_SUPPORTED_MSG)
   }
 
   override def convertToGpu(
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
-    throw new IllegalStateException("catalog not supported, should not be called")
+    throw new IllegalStateException(CATALOG_NOT_SUPPORTED_MSG)
   }
 
   override def tagForGpu(cpuExec: AppendDataExecV1, meta: AppendDataExecV1Meta): Unit = {
-    throw new IllegalStateException("write not supported, should not be called")
+    throw new IllegalStateException(WRITE_NOT_SUPPORTED_MSG)
   }
 
   override def convertToGpu(cpuExec: AppendDataExecV1, meta: AppendDataExecV1Meta): GpuExec = {
-    throw new IllegalStateException("write not supported, should not be called")
+    throw new IllegalStateException(WRITE_NOT_SUPPORTED_MSG)
   }
 
   override def tagForGpu(
       cpuExec: OverwriteByExpressionExecV1,
       meta: OverwriteByExpressionExecV1Meta): Unit = {
-    throw new IllegalStateException("write not supported, should not be called")
+    throw new IllegalStateException(WRITE_NOT_SUPPORTED_MSG)
   }
 
   override def convertToGpu(
       cpuExec: OverwriteByExpressionExecV1,
       meta: OverwriteByExpressionExecV1Meta): GpuExec = {
-    throw new IllegalStateException("write not supported, should not be called")
+    throw new IllegalStateException(WRITE_NOT_SUPPORTED_MSG)
   }
 }

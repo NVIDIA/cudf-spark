@@ -139,6 +139,8 @@ object CoalesceReadOption extends Logging {
 }
 
 object GpuShuffleCoalesceUtils {
+  private[rapids] final val NO_TABLES_TO_CONCAT_MSG = "no tables to be concatenated"
+
   /**
    * Creates a split policy that divides a sequence of tables based on target byte size.
    * splitTargetSizeInHalfGpu uses dataSize/2 when dataSize is known and smaller than
@@ -315,7 +317,7 @@ class JCudfTableOperator
   override def getNumRows(table: SerializedTableColumn): Int = table.header.getNumRows
 
   override def concat(tables: Array[SerializedTableColumn]): CoalescedHostResult = {
-    assert(tables.nonEmpty, "no tables to be concatenated")
+    assert(tables.nonEmpty, GpuShuffleCoalesceUtils.NO_TABLES_TO_CONCAT_MSG)
     val numCols = tables.head.header.getNumColumns
     val ret = if (numCols == 0) {
       val totalRowsNum = tables.map(getNumRows).sum
@@ -351,7 +353,7 @@ class KudoTableOperator(kudo: Option[KudoSerializer])
     .getNumRows
 
   override def concat(columns: Array[KudoSerializedTableColumn]): CoalescedHostResult = {
-    require(columns.nonEmpty, "no tables to be concatenated")
+    require(columns.nonEmpty, GpuShuffleCoalesceUtils.NO_TABLES_TO_CONCAT_MSG)
     val numCols = columns.head.spillableKudoTable.header.getNumColumns
     if (numCols == 0) {
       val totalRowsNum = columns.map(getNumRows).sum
@@ -379,7 +381,7 @@ class KudoGpuTableOperator(dataTypes: Array[DataType])
       .getNumRows
 
   override def concat(columns: Array[KudoSerializedTableColumn]): ColumnarBatch = {
-    require(columns.nonEmpty, "no tables to be concatenated")
+    require(columns.nonEmpty, GpuShuffleCoalesceUtils.NO_TABLES_TO_CONCAT_MSG)
     val numCols = columns.head.spillableKudoTable.header.getNumColumns
     if (numCols == 0) {
       val totalRowsNum = columns.map(getNumRows).sum

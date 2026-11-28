@@ -38,6 +38,11 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
 import org.apache.spark.sql.types.{DateType, TimestampType}
 
 abstract class IcebergProviderBase extends IcebergProvider {
+  private final val ICEBERG_IO_DISABLED_PREFIX =
+    "Iceberg input and output has been disabled. To enable set "
+  private final val ICEBERG_OUTPUT_DISABLED_PREFIX =
+    "Iceberg output has been disabled. To enable set "
+
   override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
     val cpuBatchQueryScanClass = ShimReflectionUtils.loadClass(
       IcebergProvider.cpuBatchQueryScanClassName)
@@ -167,12 +172,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG.key} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE.key} to true")
     }
 
@@ -200,12 +205,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG.key} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE.key} to true")
     }
 
@@ -232,12 +237,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
 
   private def tagForGpu(cpuExec: AppendDataExec, meta: AppendDataExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE} to true")
     }
 
@@ -256,12 +261,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
   private def tagForGpu(cpuExec: OverwritePartitionsDynamicExec,
                          meta: OverwritePartitionsDynamicExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE} to true")
     }
 
@@ -281,12 +286,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
   private def tagForGpu(cpuExec: OverwriteByExpressionExec,
                          meta: OverwriteByExpressionExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE} to true")
     }
 
@@ -348,12 +353,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
 
   private def tagForGpu(cpuExec: ReplaceDataExec, meta: ReplaceDataExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE} to true")
     }
 
@@ -371,12 +376,12 @@ abstract class IcebergProviderBase extends IcebergProvider {
 
   private def tagForGpu(cpuExec: WriteDeltaExec, meta: WriteDeltaExecMeta): Unit = {
     if (!meta.conf.isIcebergEnabled) {
-      meta.willNotWorkOnGpu("Iceberg input and output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_IO_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG} to true")
     }
 
     if (!meta.conf.isIcebergWriteEnabled) {
-      meta.willNotWorkOnGpu("Iceberg output has been disabled. To enable set " +
+      meta.willNotWorkOnGpu(ICEBERG_OUTPUT_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_ICEBERG_WRITE} to true")
     }
 

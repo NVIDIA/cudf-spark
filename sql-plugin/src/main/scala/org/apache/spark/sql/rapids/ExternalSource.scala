@@ -43,6 +43,8 @@ import org.apache.spark.util.Utils
  * exist at runtime. Details see: https://github.com/NVIDIA/spark-rapids/issues/5648
  */
 trait ExternalSourceBase extends Logging {
+  private final val NO_GPU_CONVERSION_MSG = "No GPU conversion"
+
   val avroScanClassName = "org.apache.spark.sql.v2.avro.AvroScan"
   lazy val hasSparkAvroJar = {
     /** spark-avro is an optional package for Spark, so the RAPIDS Accelerator
@@ -287,7 +289,7 @@ trait ExternalSourceBase extends Logging {
     } else if (hasIcebergJar && icebergProvider.isSupportedCatalog(catalogClass)) {
       icebergProvider.convertToGpuPlan(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -313,7 +315,7 @@ trait ExternalSourceBase extends Logging {
     } else if (hasIcebergJar && icebergProvider.isSupportedCatalog(catalogClass)) {
       icebergProvider.convertToGpuPlan(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -335,7 +337,7 @@ trait ExternalSourceBase extends Logging {
     if (deltaProvider.isSupportedWrite(writeClass)) {
       deltaProvider.convertToGpu(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -357,7 +359,7 @@ trait ExternalSourceBase extends Logging {
     if (deltaProvider.isSupportedWrite(writeClass)) {
       deltaProvider.convertToGpu(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
@@ -399,7 +401,7 @@ trait ExternalSourceBase extends Logging {
     if (hasIcebergJar && icebergProvider.isSupportedWrite(writeClass)) {
       icebergProvider.convertToGpuPlan(cpuExec, meta)
     } else {
-      throw new IllegalStateException("No GPU conversion")
+      throw new IllegalStateException(NO_GPU_CONVERSION_MSG)
     }
   }
 
