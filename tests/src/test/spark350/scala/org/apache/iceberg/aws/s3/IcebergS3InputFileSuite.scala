@@ -21,7 +21,7 @@ spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.aws.s3
 
 import java.io.IOException
-import java.util.Collections
+import java.util.{Collections, OptionalLong}
 
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.IcebergS3RangeCopier
@@ -43,6 +43,7 @@ class IcebergS3InputFileSuite extends AnyFunSuite with Matchers {
   private def newInputFile(readBytes: Counter): IcebergS3InputFile = {
     val constructor = classOf[IcebergS3InputFile].getDeclaredConstructor(
       classOf[InputFile],
+      classOf[OptionalLong],
       classOf[String],
       classOf[String],
       classOf[IcebergS3Client],
@@ -50,6 +51,7 @@ class IcebergS3InputFileSuite extends AnyFunSuite with Matchers {
     constructor.setAccessible(true)
     constructor.newInstance(
       mock(classOf[InputFile]),
+      OptionalLong.empty(),
       "bucket",
       "key",
       mock(classOf[IcebergS3Client]),

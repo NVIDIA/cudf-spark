@@ -24,6 +24,7 @@ import org.apache.iceberg.io.FileIO;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.OptionalLong;
 
 /**
  * Implementation of {@link RapidsFileIO} using the Iceberg {@link FileIO}.
@@ -50,6 +51,21 @@ public class IcebergFileIO implements RapidsFileIO {
   @Override
   public IcebergInputFile newInputFile(String path) throws IOException {
     return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path), delegate);
+  }
+
+  /**
+   * Creates an input file with an exact, positive length.
+   * Use {@link #newInputFile(String)} when the length is unknown.
+   *
+   * @throws IllegalArgumentException if length is zero or negative, before accessing the delegate
+   */
+  @Override
+  public IcebergInputFile newInputFile(String path, long length) throws IOException {
+    if (length <= 0) {
+      throw new IllegalArgumentException("length must be positive");
+    }
+    return IcebergS3InputFile.maybeCreate(
+        delegate.newInputFile(path, length), delegate, OptionalLong.of(length));
   }
 
   @Override

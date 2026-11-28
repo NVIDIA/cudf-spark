@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import org.apache.iceberg.io.InputFile;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.OptionalLong;
 
 /**
  * Implementation of {@link RapidsInputFile} using the Iceberg {@link InputFile}.
@@ -31,10 +32,24 @@ import java.util.Objects;
  */
 public class IcebergInputFile implements RapidsInputFile {
   private final InputFile delegate;
+  private final OptionalLong length;
 
   public IcebergInputFile(InputFile delegate) {
+    this(delegate, OptionalLong.empty());
+  }
+
+  /**
+   * Wrap an input file with its exact, positive length, or an empty optional if unknown.
+   *
+   * @throws IllegalArgumentException if the supplied length is zero or negative
+   */
+  public IcebergInputFile(InputFile delegate, OptionalLong length) {
     Objects.requireNonNull(delegate, "delegate can't be null");
     this.delegate = delegate;
+    this.length = Objects.requireNonNull(length, "length can't be null");
+    if (length.isPresent() && length.getAsLong() <= 0) {
+      throw new IllegalArgumentException("length must be positive");
+    }
   }
 
   @Override
@@ -44,7 +59,7 @@ public class IcebergInputFile implements RapidsInputFile {
 
   @Override
   public long getLength() throws IOException {
-    return delegate.getLength();
+    return length.isPresent() ? length.getAsLong() : delegate.getLength();
   }
 
   @Override

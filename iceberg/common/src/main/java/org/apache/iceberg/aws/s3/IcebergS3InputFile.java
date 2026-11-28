@@ -33,6 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.OptionalLong;
 
 /**
  * S3-backed {@link RapidsInputFile} that delegates byte-range reads to
@@ -51,11 +52,12 @@ public final class IcebergS3InputFile extends IcebergInputFile {
 
   private IcebergS3InputFile(
       InputFile delegate,
+      OptionalLong length,
       String s3Bucket,
       String s3Key,
       IcebergS3Client icebergS3Client,
       Counter readBytes) {
-    super(delegate);
+    super(delegate, length);
     this.s3Bucket = s3Bucket;
     this.s3Key = s3Key;
     this.icebergS3Client = icebergS3Client;
@@ -63,9 +65,14 @@ public final class IcebergS3InputFile extends IcebergInputFile {
   }
 
   public static IcebergInputFile maybeCreate(InputFile inputFile, FileIO fileIO) {
+    return maybeCreate(inputFile, fileIO, OptionalLong.empty());
+  }
+
+  public static IcebergInputFile maybeCreate(
+      InputFile inputFile, FileIO fileIO, OptionalLong length) {
     // When the gating conf is off (or the file is not an S3 file), return the
     // default IcebergInputFile so the standard Iceberg SeekableInputStream path is used.
-    IcebergInputFile delegate = new IcebergInputFile(inputFile);
+    IcebergInputFile delegate = new IcebergInputFile(inputFile, length);
     if (!RapidsInputFiles.isS3PerfEnabled()) {
       return delegate;
     }
@@ -91,7 +98,7 @@ public final class IcebergS3InputFile extends IcebergInputFile {
     LOG.debug("IcebergS3RangeCopier path active for {}", inputFile.location());
     Counter readBytes = IcebergS3InputFileAccess.readBytesCounter(inputFile);
     return new IcebergS3InputFile(
-        inputFile, s3Bucket, s3Key, icebergS3Client, readBytes);
+        inputFile, length, s3Bucket, s3Key, icebergS3Client, readBytes);
   }
 
   @Override
