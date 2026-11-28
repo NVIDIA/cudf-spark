@@ -4,9 +4,7 @@
     ".github/workflows/ci-images/select.py",
     ".github/workflows/build-docker-image.yml"
   ],
-  "validation": [
-    ".github/workflows/cpu-ci.yml"
-  ],
+  "validation": [],
   "publication": [
     ".github/workflows/docker-images.yml",
     ".github/workflows/ci-images/publish-tag.sh"
@@ -19,6 +17,7 @@
   "unit-tests": {
     "include": [
       ".github/workflows/ci-images/",
+      ".github/workflows/cpu-ci.yml",
       ".github/workflows/docker-images.yml",
       ".github/workflows/ci-image-cleanup.yml"
     ],

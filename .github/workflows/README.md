@@ -2,36 +2,35 @@
 
 ## CPU CI
 
-[CPU CI](cpu-ci.yml) runs the checks affected by a PR to `main` or
-`release/YY.MM`. The gate passes when selection and all selected checks pass.
-Currently it checks [Docker images](ci-images/README.md). Markdown-only PRs
-and PRs titled with `[skip ci]` pass without building images.
+PR CPU and GPU checks start from a `copy-pr-bot` push after `/ok to test`,
+not from opening or updating a PR. Use `/ok to test <full-head-SHA>` for a new
+revision. Scheduled and post-merge jobs keep their own triggers.
+
+[CPU CI](cpu-ci.yml) gates the selected [Maven Verify](mvn-verify-check.yml)
+and [Docker image](ci-images/README.md) checks on PRs to `main` or `release/YY.MM`.
+Standalone pytest-only changes need a license check instead of the Maven build
+matrix. Documentation used by Maven still gets verified. The Docker title
+skip does not bypass Maven checks. A Maven failure does not cancel its siblings.
+
+## GPU CI
+
+[GPU CI](gpu-ci.yml) runs on PRs targeting `main` or `release/27.02` and later.
+Documentation-only or Skills-only edits skip standalone tests. UT and IT are
+selected independently: an isolated ScalaTest suite or pytest case runs on its
+assigned shims; a UT-only runner change can require full UT without widening
+an unrelated pytest edit. Shared or uncertain changes run all eight standalone
+groups. See the [impact rules](gpu-ci/AGENTS.md). The same GPU gate requires
+[Databricks](databricks-ci/README.md) when the title includes `[databricks]`
+or the Databricks detector selects the change; otherwise it allocates no clusters.
+A `[skip ci]` title takes precedence over all three.
+
+[Selected UT, IT and Databricks groups](gpu-ci/AGENTS.md) run in parallel as
+runners and clusters become available. A terminal failure cancels outstanding
+groups; cluster cleanup still runs.
 
 ## Shared dependency caches
 
-[Cache preparation](cache.yml) seeds Maven dependencies for [Maven Verify](mvn-verify-check.yml)
-and future standalone premerge jobs using the [Maven cache action](../actions/maven-cache/action.yml).
-The seed includes the Scala compiler bridge and standalone integration-test dependencies.
-When no current seed is available, Verify can save a smaller cache on the PR.
-Later commits on that PR reuse it; if dependencies change, the previous cache is a starting point.
-Hosted Maven jobs use [public settings](../actions/maven-cache/settings.xml) for Central,
-including transitive and plugin dependencies. Local builds are unchanged. To opt in for
-one command, pass `-gs .github/actions/maven-cache/settings.xml` from the repo root.
-Relevant pushes warm `main` and release branches; a daily check on `main` also
-detects upstream SNAPSHOTs published without a repository change.
-
-The key separates branch, platform and Scala version. JNI, private and history-metrics
-SNAPSHOTs track their own publications; fixed versions use their coordinates.
-PRs can reuse their target branch's cache. A copied-branch workflow can pass
-`base-branch` to compute the same key, but GitHub's cache visibility still applies:
-a push on a sibling branch cannot read a release-only cache by naming it.
-GPU workers testing a PR should restore the exact Maven key as the Verify matrix does,
-and build normally on a miss. `premerge: true` is for the branch warmer: an exact hit
-checks that the cache exists without downloading it. Do not save PR-built artifacts to a branch cache.
-
-The same warmer seeds the standalone [Apache Spark distributions](../actions/spark-archive-cache/releases.json).
-Future GHA premerge workers can use the [archive action](../actions/spark-archive-cache/action.yml)
-to restore a checksum-verified tarball by Scala version. Extract its `path` output
-instead of downloading Spark again. When a standalone lane changes Spark version,
-update its archive version and checksum together. The warmer does not cache locally
-built plugin JARs, test outputs or native objects.
+[Cache preparation](cache.yml) warms Maven dependencies and standalone IT Spark
+archives on relevant pushes to `main` and release branches. A daily check on
+`main` also picks up upstream SNAPSHOTs. Databricks smoke tests use the
+workspace cache, not the standalone archive cache.

@@ -182,6 +182,23 @@ class ImageSelectorTest(unittest.TestCase):
         self.assertCountEqual([c["image"] for c in jobs["validate"]],
                               ["spark-build", "shuffle-ubuntu-rdma"])
         self.assertEqual(jobs["publish"], [])
+        for target in ("main", RELEASE_BRANCH):
+            with self.subTest(target=target):
+                self.assertEqual(self.invoke("--pr-base", target, ref="pull-request/17",
+                                             base_ref="", payload={"before": "0" * 40}), jobs)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.invoke("--pr-base", NEXT_RELEASE_BRANCH, ref="pull-request/17")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.invoke("--pr-base", "main", ref="main")
+
+    def test_cpu_coordinator_runs_selector_tests_without_selecting_every_image(self):
+        self.git("switch", "-qc", "topic")
+        self.write(".github/workflows/cpu-ci.yml", "# change a sibling CPU check\n")
+        self.commit("Change the coordinator")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
+        self.assertEqual(self.invoke(event="pull_request", ref="17/merge"),
+                         {"validate": [], "publish": [], "run-tests": True})
 
     def test_push_selects_only_recipes_using_changed_input(self):
         before = self.git("rev-parse", "HEAD")

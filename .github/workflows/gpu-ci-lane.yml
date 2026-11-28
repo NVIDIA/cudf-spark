@@ -1,0 +1,64 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI lane
+on:
+  workflow_call:
+    inputs:
+      row: {type: string, required: true}
+      base-branch: {type: string, required: true}
+      base-sha: {type: string, required: true}
+      head-sha: {type: string, required: true}
+      merge-sha: {type: string, required: true}
+      pull-number: {type: string, required: true}
+      approval-run-id: {type: string, required: true}
+      approval-run-attempt: {type: string, required: true}
+      title-policy: {type: string, required: true}
+
+permissions: {}
+
+jobs:
+  standalone:
+    name: Standalone
+    if: fromJSON(inputs.row).kind != 'databricks'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.row).kind == 'integration' && 360 || fromJSON(inputs.row).shims[1] && 300 || 270 }}
+    permissions: {contents: read, actions: write, pull-requests: read}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            .github/workflows/gpu-ci/standalone.py
+            .github/workflows/databricks-ci/source.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Check PR revision
+        id: workload
+        env:
+          INPUTS: ${{ toJSON(inputs) }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I .github/workflows/gpu-ci/standalone.py dispatch
+      - name: Run the shim group
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+        with:
+          workflow: gpu-ci-worker.yml
+          workflow-ref: pull-request/${{ inputs.pull-number }}
+          source-ref: refs/heads/pull-request/${{ inputs.pull-number }}
+          source-sha: ${{ inputs.head-sha }}
+          workload: ${{ steps.workload.outputs.payload }}
+          runner-type: gpu-${{ fromJSON(inputs.row).arch }}
+          queue-timeout-minutes: '15'
+          execution-timeout-minutes: ${{ fromJSON(inputs.row).kind == 'integration' && '240' || fromJSON(inputs.row).shims[1] && '180' || '150' }}
+
+  databricks:
+    name: Databricks
+    if: fromJSON(inputs.row).kind == 'databricks'
+    permissions: {contents: read, actions: read, pull-requests: read}
+    uses: ./.github/workflows/databricks-ci-cell.yml
+    with:
+      row: ${{ inputs.row }}
+      base-sha: ${{ inputs.base-sha }}
+      head-sha: ${{ inputs.head-sha }}
+      merge-sha: ${{ inputs.merge-sha }}
+      title-policy: ${{ inputs.title-policy }}

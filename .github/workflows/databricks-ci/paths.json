@@ -1,0 +1,30 @@
+{
+  "helper_tests": [
+    ".github/workflows/cpu-ci.yml",
+    ".github/workflows/cpu-ci.sh",
+    ".github/workflows/databricks-ci.yml",
+    ".github/workflows/databricks-ci-cell.yml",
+    ".github/workflows/databricks-cleanup.yml",
+    ".github/workflows/databricks-ci/",
+    ".github/workflows/gpu-ci.yml",
+    ".github/workflows/gpu-ci-lane.yml",
+    ".github/workflows/gpu-ci/",
+    ".github/gpu-ci-suites.json",
+    "jenkins/databricks/"
+  ],
+  "cluster": {
+    "exclusive_files": [
+      "jenkins/databricks/build.sh",
+      "jenkins/databricks/test.sh",
+      "jenkins/databricks/https_transport_v2.py",
+      "jenkins/databricks/workload_v2.py",
+      "jenkins/databricks/maven_seed_v2.py"
+    ],
+    "include_regex": [
+      "sql-plugin/src/main/.*[0-9x-]db[0-9]*/",
+      "(^|/)delta-lake/",
+      "databricks"
+    ],
+    "skip_if_all_under": ["skills/"]
+  }
+}

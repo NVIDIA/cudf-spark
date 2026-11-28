@@ -1,0 +1,129 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI validation
+on:
+  workflow_run:
+    workflows: ['GPU CI']
+    types: [in_progress, completed]
+    branches: ['pull-request/[0-9]+']
+
+permissions: {}
+
+env:
+  DB_RUNNER_GROUP: ${{ vars.DATABRICKS_CI_RUNNER_GROUP }}
+  DB_ENABLED: ${{ vars.DATABRICKS_CI_ENABLED }}
+
+jobs:
+  pending:
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark' && github.event.workflow_run.actor.login == 'copy-pr-bot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency: &status-lock
+      group: db-result-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    permissions: {contents: read, actions: read, pull-requests: read, statuses: write}
+    steps:
+      - uses: &checkout actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - run: python3 -I .github/workflows/databricks-ci/source.py --status pending
+        env: {GH_TOKEN: '${{ github.token }}'}
+
+  select:
+    needs: pending
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark' &&
+      github.event.action == 'completed' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'copy-pr-bot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {contents: read, actions: read, pull-requests: read}
+    outputs:
+      base: ${{ steps.plan.outputs.base }}
+      head: ${{ steps.plan.outputs.head }}
+      merge: ${{ steps.plan.outputs.merge }}
+      base-branch: ${{ steps.plan.outputs.base_branch }}
+      pull-number: ${{ steps.plan.outputs.pull_number }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      selection-attempt: ${{ steps.plan.outputs.selection_attempt }}
+      policy: ${{ steps.plan.outputs.policy }}
+    steps:
+      - uses: *checkout
+        with: {ref: '${{ github.sha }}', path: control, persist-credentials: false}
+      - id: source
+        run: python3 -I control/.github/workflows/databricks-ci/source.py
+        env: {GH_TOKEN: '${{ github.token }}'}
+      - uses: *checkout
+        with:
+          ref: ${{ steps.source.outputs.merge }}
+          path: candidate
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: *checkout
+        continue-on-error: true
+        if: steps.source.outputs.eligible == 'true'
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: common
+          sparse-checkout: workflow-suite-selector
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        continue-on-error: true
+        if: steps.source.outputs.eligible == 'true'
+        with: {node-version: '24', package-manager-cache: false}
+      - id: plan
+        run: python3 -I control/.github/workflows/databricks-ci/source.py --candidate candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_MERGE: ${{ steps.source.outputs.merge }}
+
+  lane:
+    name: Lane ${{ matrix.group }}
+    needs: select
+    if: needs.select.outputs.matrix != '' && needs.select.outputs.matrix != '{"include":[]}'
+    # Only validated registrations compete; a manual retry does not displace a newer automatic run.
+    concurrency:
+      group: gpu-validation-${{ needs.select.outputs.pull-number }}-${{ matrix.group }}-${{ (github.run_attempt > 1 || github.event.workflow_run.run_attempt > 1) && github.run_id || 'auto' }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[]}') }}
+    uses: ./.github/workflows/gpu-ci-lane.yml
+    permissions: {contents: read, actions: write, pull-requests: read}
+    with:
+      row: ${{ toJSON(matrix) }}
+      base-branch: ${{ needs.select.outputs.base-branch }}
+      base-sha: ${{ needs.select.outputs.base }}
+      head-sha: ${{ needs.select.outputs.head }}
+      merge-sha: ${{ needs.select.outputs.merge }}
+      pull-number: ${{ needs.select.outputs.pull-number }}
+      approval-run-id: ${{ format('{0}', github.event.workflow_run.id) }}
+      approval-run-attempt: ${{ format('{0}', github.event.workflow_run.run_attempt) }}
+      title-policy: ${{ needs.select.outputs.policy }}
+
+  result:
+    if: >-
+      always() && github.repository == 'NVIDIA/cudf-spark' &&
+      github.event.action == 'completed' && github.event.workflow_run.actor.login == 'copy-pr-bot[bot]'
+    needs: [select, lane]
+    concurrency: *status-lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {contents: read, actions: read, pull-requests: read, statuses: write}
+    steps:
+      - uses: *checkout
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - name: Report GPU CI result
+        run: python3 -I .github/workflows/databricks-ci/source.py --status result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RESULT: ${{ needs.select.result }}
+          LANE_RESULT: ${{ needs.lane.result }}
+          MATRIX: ${{ needs.select.outputs.matrix }}
+          SELECTION_ATTEMPT: ${{ needs.select.outputs.selection-attempt }}
+          EXPECTED_BASE: ${{ needs.select.outputs.base }}
+          EXPECTED_HEAD: ${{ needs.select.outputs.head }}
+          EXPECTED_MERGE: ${{ needs.select.outputs.merge }}
+          EXPECTED_POLICY: ${{ needs.select.outputs.policy }}

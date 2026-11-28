@@ -1,7 +1,10 @@
-# Standalone Spark test runtimes
+# Maintaining GitHub Actions
 
-When a premerge test starts using, changes, or drops a Spark binary distribution,
-update the [archive manifest](../actions/spark-archive-cache/releases.json) in the same
-change. Use Apache's published SHA-512 for the exact tarball. Keep an archive
-until its last test consumer is removed. A shim compiled only through Maven
-does not need a Spark tarball.
+- **CPU CI:** [cpu-ci.yml](cpu-ci.yml) gates the selected Maven and image checks.
+  Keep Maven path policy in [mvn-verify-paths.json](mvn-verify-paths.json) and
+  its matrices non-fail-fast. Keep existing check names until branch rules change.
+- [Standalone GPU tests](gpu-ci/AGENTS.md) and [Databricks](databricks-ci/AGENTS.md)
+  share one GPU result. Keep cloud credentials out of standalone workers.
+- For cache keys and inputs, see [Maven dependencies](../actions/maven-cache/AGENTS.md)
+  or [standalone Spark archives](../actions/spark-archive-cache/AGENTS.md).
+- For Docker recipes, publication and cleanup, see [ci-images/AGENTS.md](ci-images/AGENTS.md).

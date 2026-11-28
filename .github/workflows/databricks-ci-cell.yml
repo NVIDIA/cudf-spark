@@ -1,0 +1,90 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Databricks cell
+on:
+  workflow_call:
+    inputs:
+      row: {required: true, type: string}
+      base-sha: {required: true, type: string}
+      head-sha: {required: true, type: string}
+      merge-sha: {required: true, type: string}
+      title-policy: {required: true, type: string}
+
+permissions: {}
+
+jobs:
+  cell:
+    name: Cell
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark' && github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'NVIDIA/cudf-spark/.github/workflows/databricks-ci.yml@refs/heads/main' &&
+      github.event_name == 'workflow_run' && github.event.action == 'completed' &&
+      github.event.workflow_run.actor.login == 'copy-pr-bot[bot]' && vars.DATABRICKS_CI_ENABLED == 'true'
+    runs-on:
+      group: ${{ vars.DATABRICKS_CI_RUNNER_GROUP }}
+    environment: databricks-ci
+    concurrency:
+      group: db-cell-${{ github.event.workflow_run.head_branch }}-${{ fromJSON(inputs.row).runtime }}-${{ fromJSON(inputs.row).mode }}
+      cancel-in-progress: false
+    timeout-minutes: 380
+    permissions: {contents: read, actions: read, pull-requests: read}
+    env:
+      DB_ENABLED: ${{ vars.DATABRICKS_CI_ENABLED }}
+      DB_RUNNER_GROUP: ${{ vars.DATABRICKS_CI_RUNNER_GROUP }}
+      DB_RUNTIME: ${{ fromJSON(inputs.row).runtime }}
+      DB_MODE: ${{ fromJSON(inputs.row).mode }}
+      EXPECTED_BASE: ${{ inputs.base-sha }}
+      EXPECTED_HEAD: ${{ inputs.head-sha }}
+      EXPECTED_MERGE: ${{ inputs.merge-sha }}
+      EXPECTED_POLICY: ${{ inputs.title-policy }}
+    steps:
+      - uses: &checkout actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {ref: '${{ github.sha }}', path: control, persist-credentials: false}
+      - uses: *checkout
+        with: {ref: '${{ inputs.merge-sha }}', path: candidate, fetch-depth: 2, persist-credentials: false}
+      - name: Verify the selected revision
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          python3 -I control/.github/workflows/databricks-ci/source.py --candidate candidate --cell
+          python3 -I control/.github/workflows/databricks-ci/prior-cleanup.py --runtime "$DB_RUNTIME" --mode "$DB_MODE"
+          python3 -I -c 'import requests'
+          bash control/.github/workflows/databricks-ci/submodules.sh candidate
+      - name: Look up the trusted Maven seed digest
+        id: seed
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .db-ci-maven-seed/sha256
+          key: db-ci-maven-receipt-v1-latest
+          restore-keys: db-ci-maven-receipt-v1-
+      - name: Select verified seed or use a cold Maven repository
+        if: steps.seed.outcome == 'success' && steps.seed.outputs.cache-matched-key != ''
+        shell: bash
+        run: |
+          if read -r sha < .db-ci-maven-seed/sha256 && [[ $sha =~ ^[0-9a-f]{64}$ ]]; then
+            echo "DB_MAVEN_SEED_SHA256=$sha" >> "$GITHUB_ENV"
+          fi
+      - name: Build and test on Databricks
+        id: attempts
+        timeout-minutes: 330
+        env: &db-credentials
+          DATABRICKS_PROFILES_JSON: ${{ vars.DATABRICKS_PROFILES_JSON }}
+          DATABRICKS_AWS2_TOKEN: ${{ secrets.DATABRICKS_AWS2_TOKEN }}
+          DATABRICKS_AWS_TOKEN: ${{ secrets.DATABRICKS_AWS_TOKEN }}
+          DATABRICKS_AZURE3_TOKEN: ${{ secrets.DATABRICKS_AZURE3_TOKEN }}
+        run: |
+          args=()
+          if [[ ${EXPECTED_POLICY:2:1} == 1 ]]; then args+=(--reduced); fi
+          python3 -I control/.github/workflows/databricks-ci/attempts.py run \
+            --runtime "$DB_RUNTIME" --mode "$DB_MODE" --candidate candidate --merge-sha "$EXPECTED_MERGE" \
+            --state-dir "$RUNNER_TEMP/db-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DB_RUNTIME-$DB_MODE" "${args[@]}"
+      - name: Confirm cluster cleanup
+        if: always() && steps.attempts.outcome != 'skipped' && steps.attempts.outcome != ''
+        timeout-minutes: 15
+        env: *db-credentials
+        run: |
+          python3 -I control/.github/workflows/databricks-ci/attempts.py cleanup \
+            --runtime "$DB_RUNTIME" --mode "$DB_MODE" \
+            --state-dir "$RUNNER_TEMP/db-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DB_RUNTIME-$DB_MODE"

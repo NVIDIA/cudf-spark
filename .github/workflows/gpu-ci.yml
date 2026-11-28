@@ -1,0 +1,18 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI
+on:
+  push:
+    branches: ['pull-request/[0-9]+']
+
+permissions: {}
+
+# The default-branch controller checks the PR and runs the selected lanes.
+jobs:
+  register:
+    if: github.repository == 'NVIDIA/cudf-spark' && github.actor == 'copy-pr-bot[bot]' && !github.event.deleted
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "GPU CI requested for $GITHUB_SHA"

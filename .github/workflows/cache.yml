@@ -11,6 +11,9 @@ on:
       - '.github/workflows/mvn-verify-check.yml'
       - '.github/actions/maven-cache/**'
       - '.github/actions/spark-archive-cache/**'
+      - 'jenkins/databricks/maven_seed_v2.py'
+      - '.github/workflows/databricks-ci/*maven_seed*.py'
+      - '.github/workflows/databricks-ci/prime_legacy_maven.sh'
       - '**/pom.xml'
       - 'build/get_buildvers.py'
       - 'dist/build/package-parallel-worlds.py'
@@ -47,6 +50,7 @@ jobs:
   test:
     name: Test cache preparation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: NVIDIA/spark-rapids-common/checkout@main
         with:
@@ -54,6 +58,8 @@ jobs:
       - run: |
           python3 -B -m unittest discover -s .github/actions/maven-cache
           python3 -B -m unittest discover -s .github/actions/spark-archive-cache
+          python3 -B -m unittest discover -s .github/workflows/databricks-ci -p 'test_maven_seed.py'
+          bash -n .github/workflows/databricks-ci/prime_legacy_maven.sh
 
   prepare:
     name: Prepare Scala ${{ matrix.scala }} caches
@@ -63,6 +69,8 @@ jobs:
       github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
+    # A cold standalone Spark archive can take two hour-long transfers.
+    timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
@@ -95,3 +103,51 @@ jobs:
         with:
           scala: ${{ matrix.scala }}
           save: 'true'
+
+  databricks-dependencies:
+    name: Seed released Maven dependencies in Databricks
+    needs: prepare
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark' && github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'NVIDIA/cudf-spark/.github/workflows/cache.yml@refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      vars.DATABRICKS_CI_ENABLED == 'true'
+    environment: databricks-ci
+    runs-on:
+      group: ${{ vars.DATABRICKS_CI_RUNNER_GROUP }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {persist-credentials: false}
+      - name: Restore the existing Scala 2.13 Maven warm-up
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: spark-maven-Linux-X64-2.13-main-for-db-seed
+          restore-keys: spark-maven-Linux-X64-2.13-main-
+          fail-on-cache-miss: true
+      - name: Prime released plugin dependencies for the Databricks Maven version
+        timeout-minutes: 10
+        run: bash .github/workflows/databricks-ci/prime_legacy_maven.sh
+      - name: Read previous trusted seed digest
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .db-ci-maven-seed/sha256
+          key: db-ci-maven-receipt-v1-latest
+          restore-keys: db-ci-maven-receipt-v1-
+      - id: publish
+        name: Publish released dependencies to workspace storage
+        env:
+          DATABRICKS_PROFILES_JSON: ${{ vars.DATABRICKS_PROFILES_JSON }}
+          DATABRICKS_AWS2_TOKEN: ${{ secrets.DATABRICKS_AWS2_TOKEN }}
+          DATABRICKS_AWS_TOKEN: ${{ secrets.DATABRICKS_AWS_TOKEN }}
+          DATABRICKS_AZURE3_TOKEN: ${{ secrets.DATABRICKS_AZURE3_TOKEN }}
+        run: |
+          args=()
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then args+=(--force); fi
+          python3 -IB .github/workflows/databricks-ci/publish_maven_seed.py --receipt .db-ci-maven-seed/sha256 "${args[@]}"
+      - name: Save trusted digest for DB drivers
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .db-ci-maven-seed/sha256
+          key: db-ci-maven-receipt-v1-${{ github.run_id }}-${{ github.run_attempt }}

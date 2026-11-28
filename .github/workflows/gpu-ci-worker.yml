@@ -1,0 +1,177 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI worker
+run-name: ${{ inputs.request-id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request-id: {required: true, type: string}
+      parent-run-id: {required: true, type: string}
+      parent-run-attempt: {required: true, type: string}
+      source-ref: {required: true, type: string}
+      source-sha: {required: true, type: string}
+      runner: {required: true, type: string}
+      workload: {required: true, type: string}
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  worker:
+    name: worker
+    if: github.repository == 'NVIDIA/cudf-spark'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: &worker-minutes ${{ fromJSON(inputs.workload).kind == 'integration' && 240 || fromJSON(inputs.workload).shims[1] && 180 || 150 }}
+    env:
+      SCALA: ${{ fromJSON(inputs.workload).scala }}
+      GROUP: ${{ fromJSON(inputs.workload).group }}
+      KIND: ${{ fromJSON(inputs.workload).kind }}
+    steps:
+      - name: Verify coordinator and source
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
+        with:
+          request-id: ${{ inputs.request-id }}
+          parent-run-id: ${{ inputs.parent-run-id }}
+          parent-run-attempt: ${{ inputs.parent-run-attempt }}
+          source-ref: ${{ inputs.source-ref }}
+          source-sha: ${{ inputs.source-sha }}
+
+      # No candidate code or checkout until the coordinator, runner and live PR all match.
+      - name: Locate controller code
+        id: controller
+        uses: actions/github-script@v9
+        env:
+          PARENT: ${{ inputs.parent-run-id }}
+        with:
+          script: |
+            const {data: parent} = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: Number(process.env.PARENT),
+            });
+            if (parent.path !== '.github/workflows/databricks-ci.yml' || parent.event !== 'workflow_run' ||
+                parent.head_branch !== 'main' || parent.head_repository?.full_name !== process.env.GITHUB_REPOSITORY ||
+                !/^[0-9a-f]{40}$/.test(parent.head_sha)) throw new Error('Invalid GPU CI controller');
+            core.setOutput('sha', parent.head_sha);
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.controller.outputs.sha }}
+          path: control
+          sparse-checkout: |
+            .github/workflows/gpu-ci/standalone.py
+            .github/workflows/databricks-ci/source.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Check PR revision
+        env:
+          SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          WORKLOAD: ${{ inputs.workload }}
+          WORKER_MINUTES: *worker-minutes
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I control/.github/workflows/gpu-ci/standalone.py worker
+
+      - name: Checkout tested merge and pinned submodules
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ fromJSON(inputs.workload).merge-sha }}
+          fetch-depth: 2
+          submodules: true
+          persist-credentials: false
+      - name: Verify merge parents, Parquet test data and requested group
+        id: group
+        env:
+          MERGE_SHA: ${{ fromJSON(inputs.workload).merge-sha }}
+          BASE_SHA: ${{ fromJSON(inputs.workload).base-sha }}
+          HEAD_SHA: ${{ inputs.source-sha }}
+          WORKLOAD: ${{ inputs.workload }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$MERGE_SHA" || "$(git show -s --format=%P HEAD)" != "$BASE_SHA $HEAD_SHA" ]]; then
+            echo "::error::Checkout does not match the expected revision and parents."
+            exit 1
+          fi
+          bash .github/workflows/gpu-ci/verify-group.sh
+      - name: Checkout the shared image recipe helper
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          sparse-checkout: container-image
+          persist-credentials: false
+      - name: Select Spark build image
+        id: image
+        timeout-minutes: 15
+        env:
+          CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
+          BASE_BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
+        run: python3 .github/workflows/gpu-ci/select-image.py
+      - name: Build missing Spark image locally
+        if: steps.image.outputs.build != ''
+        id: local-image
+        timeout-minutes: 60
+        env:
+          IMAGE_CONFIG: ${{ steps.image.outputs.build }}
+        run: bash .github/workflows/gpu-ci/build-local-image.sh
+
+      - name: Identify Maven cache
+        id: key
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          IMAGE: ${{ steps.local-image.outputs.image || steps.image.outputs.image }}
+          BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
+          INPUT_HASH: >-
+            ${{ hashFiles('**/pom.xml', 'build/get_buildvers.py', 'dist/build/package-parallel-worlds.py',
+                          'scripts/get_iceberg_versions.py', '.github/actions/maven-cache/*.sh',
+                          '.github/actions/maven-cache/dependency-key.py',
+                          '.github/actions/maven-cache/action.yml',
+                          '.github/workflows/mvn-verify-check.yml', '.github/actions/maven-cache/settings.xml') }}
+          PREMERGE_HASH: ${{ hashFiles('integration_tests/run_unity_catalog_server.sh') }}
+        run: bash .github/workflows/gpu-ci/cache-key.sh >> "$GITHUB_OUTPUT"
+      - name: Restore Maven dependencies
+        id: cache
+        if: steps.key.outcome == 'success' && steps.key.outputs.full != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 40
+        with:
+          path: ~/.m2/repository
+          key: ${{ env.KIND == 'integration' && steps.key.outputs.full || format('{0}-verify', steps.key.outputs.stem) }}
+          restore-keys: ${{ env.KIND == 'unit' && format('{0}-premerge-', steps.key.outputs.stem) || '' }}
+      - name: Prepare verified Spark distribution for integration tests
+        if: env.KIND == 'integration'
+        id: spark
+        uses: ./.github/actions/spark-archive-cache
+        with:
+          scala: ${{ env.SCALA }}
+      - name: Run GPU tests for ${{ env.GROUP }}
+        id: test
+        env:
+          IMAGE: ${{ steps.local-image.outputs.image || steps.image.outputs.image }}
+          CACHE_HIT: ${{ steps.cache.outcome == 'success' && (steps.cache.outputs.cache-hit == 'true' || (env.KIND == 'unit' && startsWith(steps.cache.outputs.cache-matched-key, format('{0}-premerge-', steps.key.outputs.stem)))) }}
+          PARALLEL_UT: ${{ fromJSON(inputs.workload).parallel-ut }}
+          SHIMS: ${{ toJSON(fromJSON(inputs.workload).shims) }}
+          SPARK_SHIM: ${{ fromJSON(inputs.workload).shim }}
+          SHARD: ${{ fromJSON(inputs.workload).shard }}
+          SPARK_TARBALL: ${{ steps.spark.outputs.path }}
+          REDUCED_IT: ${{ fromJSON(inputs.workload).reduced-it }}
+          TARGETS_JSON: ${{ steps.group.outputs.targets }}
+        run: bash .github/workflows/gpu-ci/run-group.sh
+      - name: Upload group JUnit results
+        if: ${{ !cancelled() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ env.GROUP }}-junit-${{ github.run_id }}
+          path: ${{ env.KIND == 'unit' && format('{0}/unit-junit/', runner.temp) || format('target/gpu-it-junit/{0}-{1}/*.xml', env.SCALA, fromJSON(inputs.workload).shard) }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove local build tag
+        if: always() && steps.image.outputs.build != ''
+        timeout-minutes: 1
+        run: |
+          tag="image-validation:gpu-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker image rm "$tag" || echo "::warning::Local build tag absent or could not be removed: $tag"
