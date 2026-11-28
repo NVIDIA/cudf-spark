@@ -440,6 +440,19 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .integerConf
       .createWithDefault(20)
 
+  val SHUFFLE_MULTITHREADED_WRITER_BUFFER_SEGMENT_SIZE =
+    conf("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize")
+      .doc("Size of each host memory segment used to buffer a compressed partition record in the " +
+        "MULTITHREADED shuffle writer. Segments are allocated on demand. The partial output " +
+        "takes ownership of whole segments and reads only the written bytes. Accepts byte " +
+        "counts or binary size suffixes such as 8k, 128k, and 32m. The size must be a " +
+        "multiple of 8 KiB from 8 KiB through 32 MiB, inclusive. The default is 128 KiB.")
+      .startupOnly()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v > 0 && v <= 32 * 1024 * 1024 && v % (8 * 1024) == 0,
+        "writer.buffer.segmentSize must be a multiple of 8 KiB from 8 KiB through 32 MiB.")
+      .createWithDefault(128 * 1024)
+
   val SHUFFLE_PARTITIONING_MAX_CPU_BATCH_SIZE =
     conf("spark.rapids.shuffle.partitioning.maxCpuBatchSize")
       .doc("The maximum size of a sliced batch output to the CPU side " +

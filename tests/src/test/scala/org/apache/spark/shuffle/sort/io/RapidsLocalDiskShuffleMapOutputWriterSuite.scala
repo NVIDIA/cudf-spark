@@ -20,7 +20,9 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.file.Files
 
-import com.nvidia.spark.rapids.ShimLoader
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedHostOutputStream, ShimLoader}
+import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
@@ -82,6 +84,56 @@ class RapidsLocalDiskShuffleMapOutputWriterSuite extends AnyFunSuite with Mockit
       assert(shuffled.count() == 1000)
     } finally {
       sparkContext.stop()
+    }
+  }
+
+  for ((retain, forceFile) <- Seq((false, false), (true, false), (true, true))) {
+    test(s"partition output under host pressure: retain=$retain forceFile=$forceFile") {
+      HostAlloc.initialize(512L * 1024 * 1024)
+      val directory = Files.createTempDirectory("shuffle-buffer-selection-").toFile
+      try withResource(HostAlloc.alloc(1024, false)) { _ =>
+        val conf = new SparkConf(false)
+          .set("spark.rapids.memory.host.partialFileBufferInitialSize", "1k")
+          .set("spark.rapids.memory.host.partialFileBufferMaxSize", "1k")
+          .set("spark.rapids.memory.host.partialFileBufferMemoryThreshold",
+            (HostAlloc.getUsageRatio() / 2).toString)
+          .set("spark.shuffle.sync", forceFile.toString)
+        SpillFramework.initialize(new RapidsConf(conf))
+        val resolver = mock[IndexShuffleBlockResolver]
+        when(resolver.getDataFile(1, 2L)).thenReturn(new File(directory, "shuffle.data"))
+        val writer = new RapidsLocalDiskShuffleMapOutputWriter(1, 2L, 2, resolver, conf)
+        try {
+          if (retain) writer.setRecordBufferMode()
+          if (forceFile) writer.setForceFileOnlyMode()
+          val partition = writer.getPartitionWriter(0)
+          val handle = writer.getPartialFileHandle().get
+          assert(handle.isMemoryBased == (retain && !forceFile))
+          intercept[IllegalStateException](writer.setRecordBufferMode())
+          val expected = Array.tabulate[Byte](8193)(_.toByte)
+          withResource(partition.openStream()) { stream =>
+            withResource(new SegmentedHostOutputStream(8192)) { buffer =>
+              buffer.write(expected)
+              withResource(buffer.takeBuffer()) { record =>
+                stream.asInstanceOf[SegmentedHostOutputStream.Sink].writeRecord(record)
+                intercept[IllegalStateException](record.takeBuffer())
+              }
+            }
+            assert(partition.getNumBytesWritten == expected.length)
+          }
+          writer.finishWritePhase()
+          assert(!handle.isSpilled)
+          assert(writer.getPartitionLengths().sameElements(Array[Long](expected.length, 0)))
+          val actual = new Array[Byte](expected.length)
+          assert(handle.read(actual, 0, actual.length) == actual.length)
+          assert(actual.sameElements(expected))
+        } finally {
+          writer.abort(null)
+        }
+      } finally {
+        SpillFramework.shutdown()
+        HostAlloc.initialize(-1)
+        directory.delete()
+      }
     }
   }
 }

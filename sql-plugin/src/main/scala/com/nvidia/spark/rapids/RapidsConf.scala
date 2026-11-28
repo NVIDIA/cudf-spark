@@ -960,6 +960,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleMultiThreadedWriterThreads: Int = get(SHUFFLE_MULTITHREADED_WRITER_THREADS)
 
+  lazy val shuffleMultiThreadedWriterBufferSegmentSize: Int =
+    get(SHUFFLE_MULTITHREADED_WRITER_BUFFER_SEGMENT_SIZE).toInt
+
   lazy val shuffleMultiThreadedReaderThreads: Int = get(SHUFFLE_MULTITHREADED_READER_THREADS)
 
   lazy val shuffleParitioningMaxCpuBatchSize: Long = get(SHUFFLE_PARTITIONING_MAX_CPU_BATCH_SIZE)

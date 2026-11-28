@@ -35,6 +35,7 @@ import scala.util.control.NonFatal
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{MapOutputSegments, MultithreadedShuffleBufferCatalog, RapidsConf,
   SlicedSerializedColumnVector}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.spill.{SpillablePartialFileHandle, SpillFramework}
 import org.mockito.{Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
@@ -68,12 +69,14 @@ class TestColumnarBatchSerializer extends Serializer with Serializable {
   override def supportsRelocationOfSerializedObjects: Boolean = true
 }
 
-class FailingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
+class FailingTestColumnarBatchSerializer(
+    failure: Throwable = new IOException("injected serialization failure"))
+    extends TestColumnarBatchSerializer {
   override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
     override def serializeStream(s: OutputStream): SerializationStream =
       new TestColumnarBatchSerializationStream(s) {
         override def writeValue[T: ClassTag](value: T): SerializationStream =
-          throw new IOException("injected serialization failure")
+          throw failure
       }
   }
 }
@@ -247,8 +250,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   private val numWriterThreads = 2
 
-  private def createTestBatch(value: Int): ColumnarBatch = {
-    val bufferSize = 64 + (value % 64)
+  private def createTestBatch(value: Int, extraBytes: Int = 0): ColumnarBatch = {
+    val bufferSize = 64 + (value % 64) + extraBytes
     val hmb = HostMemoryBuffer.allocate(bufferSize)
     for (i <- 0 until bufferSize) {
       hmb.setByte(i, (value + i).toByte)
@@ -457,6 +460,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     TaskContext.setTaskContext(taskContext)
     MockitoAnnotations.openMocks(this).close()
     conf.set("spark.shuffle.compress", "true")
+    // Existing ordering/cancellation tests exercise the default segmented path.
+    conf.remove("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize")
     tempDir = Utils.createTempDir()
     outputFile = File.createTempFile("shuffle", null, tempDir)
     taskMetrics = spy(new TaskMetrics)
@@ -538,6 +543,82 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     writer.write(createTestRecords(Iterator(0, 1, 2, 3, 4, 5, 6)))
     writer.stop(true)
     verifyWrite(writer, expectedRecords = 7, partitionsWithData = Set(0, 1, 2, 3, 4, 5, 6))
+  }
+
+  test("a finished batch stays in memory and becomes spillable while input is still arriving") {
+    useUncompressedShuffleOutput()
+    val firstBatchFinished = new CountDownLatch(1)
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def finishWritePhase(): Unit = {
+            super.finishWritePhase()
+            val handle = getPartialFileHandle().get
+            assert(handle.isMemoryBased && !handle.isSpilled && handle.approxSizeInBytes > 0)
+            firstBatchFinished.countDown()
+          }
+        }
+      }
+    }
+    val writer = createWriter()
+    try {
+      val keys = Iterator(0, 1, 0, 1).zipWithIndex.map { case (key, index) =>
+        if (index == 3) {
+          // Starting batch 1 sealed batch 0. Its partial can be read directly from memory.
+          assert(firstBatchFinished.await(10, TimeUnit.SECONDS))
+          assert(tempDir.listFiles().toSet == Set(outputFile))
+        }
+        key
+      }
+      writer.write(createTestRecords(keys))
+      writer.stop(true)
+      assert(readPartitionKeys(writer, 0) == Seq(0, 0))
+      assert(readPartitionKeys(writer, 1) == Seq(1, 1))
+    } finally {
+      writer.stop(false)
+    }
+  }
+
+  for (compress <- Seq(false, true)) {
+    test(s"partition payload roundtrip with compression=$compress") {
+      conf.set("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize", "8k")
+      conf.set("spark.shuffle.compress", compress.toString)
+      val manager = new SerializerManager(new TestColumnarBatchSerializer(), conf)
+      when(blockManager.serializerManager).thenReturn(manager)
+      val writer = createWriter()
+      // Uncompressed records cross multiple segments.
+      // Partition 0 reappears in a second batch, exercising the partial-file merge too.
+      val extraBytes = 24 * 1024
+      writer.write(Iterator(0, 1, 7).map(key => (key, createTestBatch(key, extraBytes))))
+      writer.stop(true)
+      verifyWrite(writer, 3, Set(0, 1))
+      withResource(new RandomAccessFile(outputFile, "r")) { file =>
+        for ((partition, expectedKeys) <- Seq(0 -> Seq(0, 7), 1 -> Seq(1))) {
+          val lengths = writer.getPartitionLengths
+          file.seek(lengths.take(partition).sum)
+          val bytes = new Array[Byte](lengths(partition).toInt)
+          file.readFully(bytes)
+          withResource(new DataInputStream(manager.wrapStream(
+              ShuffleBlockId(0, 0, partition), new ByteArrayInputStream(bytes)))) { input =>
+            expectedKeys.foreach { key =>
+              assert(input.readInt() == key)
+              assert(input.readInt() == 1)
+              val size = 64 + key % 64 + extraBytes
+              assert(input.readInt() == size)
+              val payload = new Array[Byte](size)
+              input.readFully(payload)
+              assert(payload.sameElements(Array.tabulate[Byte](size)(i => (key + i).toByte)))
+            }
+            assert(input.read() == -1)
+          }
+        }
+      }
+    }
   }
 
   // ==================== Skip-merge catalog ====================
@@ -908,7 +989,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     val producersBlocked = new CountDownLatch(numWriterThreads)
     val releaseProducers = new CountDownLatch(1)
     val blockedWriters = (0 until numWriterThreads).map(_ => createWriter())
-    val blockedRecords = (0 until numWriterThreads).map(createTestBatch)
+    val blockedRecords = (0 until numWriterThreads).map(value => createTestBatch(value))
     val blockedThreads = blockedWriters.zip(blockedRecords).map { case (writer, batch) =>
       val input = new Iterator[(Int, ColumnarBatch)] {
         private var hasNextCalls = 0
@@ -1090,13 +1171,13 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
   }
 
   // Regression test for https://github.com/NVIDIA/cudf-spark/issues/15611
-  test("compression failure must release bytes-in-flight quota or producer deadlocks") {
+  private def assertCompressionFailure(failure: Throwable): Unit = {
     // Scenario: producer acquires quota for record 0 (64 bytes), queues its compression task.
     // maxBytesInFlight=100 means record 1 (65 bytes) cannot be acquired: 64+65=129>100, so
     // the producer blocks on acquireOrBlock. The compression task for record 0 then fails.
     // Bug: the failure path did not release the 64-byte quota, so the producer blocked forever.
     // Fix: on compression failure the stranded quota must be released to wake the producer.
-    when(dependency.serializer).thenReturn(new FailingTestColumnarBatchSerializer())
+    when(dependency.serializer).thenReturn(new FailingTestColumnarBatchSerializer(failure))
     val writer = new RapidsShuffleThreadedWriter[Int, ColumnarBatch](
       blockManager, shuffleHandle, 0L, conf,
       new ThreadSafeShuffleWriteMetricsReporter(taskContext.taskMetrics().shuffleWriteMetrics),
@@ -1111,25 +1192,25 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
         case t: Throwable => writeFailure = t
       }
     })
-
+    writeThread.setDaemon(true)
     try {
       writeThread.start()
       writeThread.join(5000)
       assert(!writeThread.isAlive,
         "producer deadlocked: compression failure did not release bytes-in-flight quota")
-      assert(writeFailure != null,
-        "expected write() to throw IOException after compression failure")
-      assert(writeFailure.isInstanceOf[IOException],
-        s"expected IOException but got ${writeFailure.getClass.getName}: " +
-          writeFailure.getMessage)
+      assert(causeDepth(writeFailure, failure) >= 0)
+      if (failure.isInstanceOf[IOException]) assert(writeFailure.isInstanceOf[IOException])
       assert(writer.getBytesInFlight == 0,
         s"bytes in flight leaked after failure: ${writer.getBytesInFlight}")
     } finally {
       writer.stop(false)
-      if (writeThread.isAlive) {
-        writeThread.join(5000)
-      }
+      writeThread.interrupt()
+      writeThread.join(5000)
     }
+  }
+
+  test("compression failure must release bytes-in-flight quota or producer deadlocks") {
+    assertCompressionFailure(new IOException("injected serialization failure"))
   }
 
   // Number of getCause hops from `t` to `target` (compared by reference), or -1 if `target` is
@@ -1146,6 +1227,10 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       depth += 1
     }
     -1
+  }
+
+  test("heap allocation failure releases bytes-in-flight quota") {
+    assertCompressionFailure(new OutOfMemoryError("injected heap allocation failure"))
   }
 
   test("InterruptedException in compression releases bytes-in-flight quota") {
