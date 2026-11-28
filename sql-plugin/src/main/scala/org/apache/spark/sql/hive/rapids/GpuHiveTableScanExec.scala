@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.CastStrings
-import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitTotals}
+import com.nvidia.spark.rapids.perf.{PlanKey, ScanSplitHeuristic, SplitTotals}
 import com.nvidia.spark.rapids.shims.{ShimFilePartitionReaderFactory, ShimSparkPlan, SparkShimImpl}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
@@ -283,6 +283,8 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     val filePartitions = FilePartition.getFilePartitions(sparkSession, splitFiles, maxSplitBytes)
     splitBytes.foreach { _ =>
       plannedSplits = filePartitions.map(p => FilePartitionShims.getFiles(p).length).sum
+      plannedListedBytes =
+        filePartitions.map(p => FilePartitionShims.getFiles(p).map(_.length).sum).sum
     }
 
     // TODO [future]: Handle small-file optimization.
@@ -342,8 +344,11 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
       dirsWithPartValues, readSchema, sparkSession, hadoopConf)
   }
 
-  @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
-    Some(hiveTableRelation.tableMeta.identifier.unquotedString), Nil)
+  @transient private lazy val historyKey: Option[PlanKey] =
+    ScanSplitHeuristic.historyKey(PlanKey.forFileScan(
+      Some(hiveTableRelation.tableMeta.identifier.unquotedString), Nil,
+      StructType(requestedAttributes.map(a => StructField(a.name, a.dataType, a.nullable))),
+      partitionPruningPredicate, Seq.empty))
 
   /** Decoded bytes and partitions read. */
   @transient private lazy val splitBytes: Option[SplitTotals] =
@@ -351,6 +356,9 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
 
   /** Files planned to be read; 0 while history is off. */
   @transient private var plannedSplits: Int = 0
+
+  /** On-disk bytes of the planned reads, the size of the recorded key; 0 while history is off. */
+  @transient private var plannedListedBytes: Long = 0L
 
   lazy val inputRDD: RDD[ColumnarBatch] = {
     // Assume Delimited text.
@@ -391,7 +399,8 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
     val rdd = inputRDD
     // Per execution: a re-run plan reuses `inputRDD`.
-    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, plannedListedBytes,
+      splitBytes, sparkContext)
     rdd.mapPartitionsInternal { batches =>
       new Iterator[ColumnarBatch] {
 

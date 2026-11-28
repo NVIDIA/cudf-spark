@@ -586,6 +586,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val historyScanSplitMinBytes: Long = get(HISTORY_SCAN_SPLIT_MIN_BYTES)
 
+  lazy val historyScanSplitAggregate: String = get(HISTORY_SCAN_SPLIT_AGGREGATE)
+
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
   lazy val isWindowCollectSetEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_SET)

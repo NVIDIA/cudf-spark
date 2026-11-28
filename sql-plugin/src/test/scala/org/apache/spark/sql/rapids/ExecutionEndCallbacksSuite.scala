@@ -19,7 +19,7 @@ package org.apache.spark.sql.rapids
 import java.time.Duration
 
 import com.nvidia.spark.rapids.perf.{ExecutionEndCallbacks, FakeMetricStore, HistoryPolicy,
-  ReadTotals, ScanContext, ScanSplitHeuristic}
+  PlanKey, ReadTotals, ScanContext, ScanHistoryKey, ScanSplitHeuristic}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -43,8 +43,9 @@ class ExecutionEndCallbacksSuite extends AnyFunSuite with BeforeAndAfterEach {
   override def afterEach(): Unit = ExecutionEndCallbacks.shutdown()
 
   /** A one-split scan of `cat.ns.events` that decoded 4x its 100 MiB on disk. */
-  private def scan: ScanContext =
-    ScanContext.forObservation("cat.ns.events", 1, () => ReadTotals(400 * MiB, 100 * MiB, 1L))
+  private def scan: ScanContext = ScanContext.forObservation(
+    ScanHistoryKey.of(PlanKey(1L, PlanKey.NONE), 100 * MiB).get, 1,
+    () => ReadTotals(400 * MiB, 100 * MiB, 1L))
 
   test("records when the execution ends, once") {
     heuristic.register(Some(41L), scan)

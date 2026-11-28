@@ -22,8 +22,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.history.{DimValue, MetricStore, Observation, SchemaStatus, Status,
-  SummaryRequest, SummaryResponse}
+import com.nvidia.spark.history.{DimMatch, DimValue, LookupRequest, LookupResponse, MetricStore,
+  Observation, SchemaStatus, Status}
 import com.nvidia.spark.rapids.HistoryMetricsManager
 
 import org.apache.spark.internal.Logging
@@ -37,7 +37,7 @@ import org.apache.spark.internal.Logging
 case class HistoryPolicy(planningTimeout: Duration, declareTimeout: Duration)
 
 /**
- * One metric family over the installed `MetricStore`: declare, record, read the latest value.
+ * One metric family over the installed `MetricStore`: declare, record, look up readings.
  * Never manages the provider.
  *
  * Every failure abstains (caller keeps its static decision) and is logged once per JVM per
@@ -56,20 +56,18 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
   def declare(policy: HistoryPolicy): Boolean = declaredIn(store(), policy)
 
   /**
-   * Latest value for `key` within the planning age, or None (untrackable, no data, error).
-   *
-   * @param key a value for each of the family's dimensions; evaluated here, so a value the API
-   *            rejects is contained as an untrackable key
-   * @param maxAge how old a value may be; defaults to the family's declared planning age. It is
-   *               a lookup window only, never declared, and never longer than the storage
-   *               retention, past which the store no longer holds values.
+   * One call to the store for several `tiers`, from the most specific to the most general (each
+   * names the dimensions that must match; one it leaves out matches any value): the readings of
+   * every tier within `maxAge`, newest first, each reading in the first tier that matches it.
+   * None if the lookup could not be made (untrackable tier, not declared, error); else one
+   * sequence per tier, empty when the tier has no usable reading.
    */
-  def latest(
-      key: => Map[String, DimValue],
+  def lookup(
+      tiers: => Seq[Map[String, DimMatch]],
       nowMs: Long,
       policy: HistoryPolicy,
-      maxAge: Option[Duration] = None): Option[Double] = {
-    boundKey(key).flatMap { dims =>
+      maxAge: Option[Duration] = None): Option[IndexedSeq[IndexedSeq[Double]]] = {
+    checkedTiers(tiers).flatMap { all =>
       val current = store()
       if (!declaredIn(current, policy)) {
         None
@@ -78,13 +76,11 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
           val ageMs = math.min(
             maxAge.getOrElse(family.retention.planningMaxAge()).toMillis,
             family.retention.storageRetention().toMillis)
-          val request = SummaryRequest.builder(family.metric)
-            .bound(dims.asJava)
+          val builder = LookupRequest.builder(family.metric)
             .window(nowMs - ageMs, nowMs + 1)
-            .limit(1)
-            .build()
-          summarized(current.summarize(Collections.singletonList(request),
-            policy.planningTimeout))
+          all.foreach(tier => builder.tier(tier.asJava))
+          looked(current.lookup(Collections.singletonList(builder.build()),
+            policy.planningTimeout), all.size)
         } catch {
           case t: Throwable if MetricHistory.isContained(t) =>
             abstain(s"lookup-${t.getClass.getName}", s"lookup failed (${t.getClass.getName})")
@@ -118,7 +114,10 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
   /** For tests. */
   private[perf] def reportedReasons: Set[String] = reported.asScala.toSet
 
-  private def summarized(responses: JList[SummaryResponse]): Option[Double] = {
+  /** The usable readings of each of the `tierCount` tiers of a lookup's response. */
+  private def looked(
+      responses: JList[LookupResponse],
+      tierCount: Int): Option[IndexedSeq[IndexedSeq[Double]]] = {
     if (responses == null || responses.size() != 1 || responses.get(0) == null ||
         responses.get(0).status() == null) {
       abstain("lookup-malformed", "lookup returned a malformed response")
@@ -130,11 +129,15 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
         abstain(s"lookup-${status.code()}", s"lookup returned ${status.code()}")
         None
       } else {
-        // OK with no summary means no evidence, not an error.
-        Option(response.summary()).filter(_.count() > 0)
-          // limit(1): the mean is the single latest observation.
-          .map(_.mean())
-          .filter(MetricHistory.isUsable)
+        val read = response.tiers()
+        if (read.size() != tierCount) {
+          abstain("lookup-malformed", "lookup returned a malformed response")
+          None
+        } else {
+          // Empty tiers are no evidence, not an error.
+          Some(read.asScala.map(_.asScala.map(_.value())
+            .filter(MetricHistory.isUsable).toIndexedSeq).toIndexedSeq)
+        }
       }
     }
   }
@@ -199,6 +202,37 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
         None
       } else {
         Some(dims)
+      }
+    } catch {
+      case _: IllegalArgumentException =>
+        report("untrackable-key", s"History metric ${family.name} v${family.version}: keys " +
+          s"over ${DimValue.MAX_CANONICAL_BYTES - 3} UTF-8 bytes or with malformed characters " +
+          "are not tracked; their decisions stay static")
+        None
+    }
+  }
+
+  /**
+   * The tiers, or None if the family cannot track one (as boundKey, reported the same way). A
+   * tier may name fewer dimensions than the family has; the rest match any value.
+   */
+  private def checkedTiers(
+      tiers: => Seq[Map[String, DimMatch]]): Option[Seq[Map[String, DimMatch]]] = {
+    try {
+      val all = tiers
+      val declared = family.dimensions.map(d => d.name() -> d.kind()).toMap
+      val matched = all.flatMap(_.toSeq)
+      if (!matched.forall { case (name, match_) =>
+          declared.contains(name) && match_.values().asScala.forall(_.kind() == declared(name)) }) {
+        report("key-mismatch", s"History metric ${family.name} v${family.version}: the key does " +
+          "not match the declared dimensions; its decisions stay static")
+        None
+      } else if (matched.exists { case (_, match_) =>
+          match_.values().asScala.exists(v => v.kind() == DimValue.Kind.STRING &&
+            v.stringValue().isEmpty) }) {
+        None
+      } else {
+        Some(all)
       }
     } catch {
       case _: IllegalArgumentException =>

@@ -17,11 +17,17 @@
 package org.apache.iceberg.spark.source
 
 import java.util.Objects
+import java.util.concurrent.atomic.AtomicBoolean
 
+import scala.util.control.NonFatal
+
+import com.nvidia.spark.rapids.perf.ScanSplitHeuristic
 import org.apache.iceberg.SchemaParser
 
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory}
+import org.apache.spark.internal.Logging
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory, Scan}
 import org.apache.spark.util.SerializableConfiguration
 
 class GpuSparkBatch(
@@ -32,7 +38,8 @@ class GpuSparkBatch(
     new GpuReaderFactory(
       parentScan.metrics,
       parentScan.rapidsConf,
-      parentScan.queryUsesInputFile)
+      parentScan.queryUsesInputFile,
+      parentScan.splitTotals)
   }
 
   override def planInputPartitions(): Array[InputPartition] = {
@@ -45,12 +52,26 @@ class GpuSparkBatch(
     val hadoopConf = sparkContext.broadcast(
       new SerializableConfiguration(sparkContext.hadoopConfiguration))
 
-    cpuBatch.planInputPartitions().map { partition =>
+    // The same key and size are used to decide and to record.
+    val key = parentScan.historyKey()
+    lazy val listedBytes =
+      GpuSparkScanAccess.dataBytes(GpuSparkScanAccess.tasks(parentScan.cpuScan))
+    val cpuPartitions = key.flatMap { k =>
+      GpuSparkBatch.regroup(parentScan.cpuScan, cpuBatch, listedBytes, (listed, icebergSplit) =>
+        // Planning can run without an active session.
+        SparkSession.getActiveSession.orElse(SparkSession.getDefaultSession)
+          .fold(icebergSplit) { spark =>
+            ScanSplitHeuristic.learnedFileSplit(Some(k), spark, listed, icebergSplit)
+          })
+    }.getOrElse(cpuBatch.planInputPartitions())
+    val partitions: Array[InputPartition] = cpuPartitions.map { partition =>
       new GpuSparkInputPartition(partition,
         parentScan.rapidsConf,
         hadoopConf,
         expectedSchemaString)
     }
+    parentScan.registerPlanning(partitions.length, listedBytes, key)
+    partitions
   }
 
   override def hashCode(): Int = {
@@ -62,6 +83,52 @@ class GpuSparkBatch(
       case that: GpuSparkBatch =>
         this.cpuBatch == that.cpuBatch && this.parentScan == that.parentScan
       case _ => false
+    }
+  }
+}
+
+object GpuSparkBatch extends Logging {
+
+  private val warnedNotRegrouped = new AtomicBoolean(false)
+
+  /**
+   * The scan's tasks regrouped by `decide(listedBytes, icebergSplit)`, or None to keep Iceberg's
+   * groups. Scans with delete files are skipped: the GPU reader disables coalescing for any
+   * partition that has them.
+   */
+  def regroup(
+      cpuScan: Scan,
+      cpuBatch: Batch,
+      listedBytes: => Long,
+      decide: (Long, Long) => Long): Option[Array[InputPartition]] = {
+    try {
+      if (!GpuSparkScanAccess.isBatchQueryScan(cpuScan) ||
+          GpuSparkScanAccess.isMetadataScan(cpuScan) ||
+          !GpuSparkScanAccess.groupingKeyType(cpuScan).fields().isEmpty ||
+          GpuSparkScanAccess.hasExplicitSplitSize(cpuScan) ||
+          GpuSparkScanAccess.hasDeletes(GpuSparkScanAccess.tasks(cpuScan))) {
+        None
+      } else {
+        val icebergSplit = GpuSparkScanAccess.splitSize(cpuScan)
+        val split = decide(listedBytes, icebergSplit)
+        if (split == icebergSplit) {
+          None
+        } else {
+          val partitions = GpuSparkScanAccess.planInputPartitions(cpuScan, cpuBatch, split)
+          logInfo(s"scan.split: table=${GpuSparkScanAccess.table(cpuScan).name()} regrouped " +
+            s"into ${partitions.length} partitions, split=$split")
+          Some(partitions)
+        }
+      }
+    } catch {
+      case NonFatal(e) =>
+        if (warnedNotRegrouped.compareAndSet(false, true)) {
+          logWarning("Iceberg scan not regrouped, keeping Iceberg's groups; later failures " +
+            "are logged at debug level", e)
+        } else {
+          logDebug(s"Iceberg scan not regrouped, keeping Iceberg's groups: $e")
+        }
+        None
     }
   }
 }

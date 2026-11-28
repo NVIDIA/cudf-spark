@@ -17,7 +17,7 @@
 package org.apache.iceberg.spark.source
 
 import com.nvidia.spark.rapids.RapidsConf
-import org.apache.iceberg.{Schema, SchemaParser}
+import org.apache.iceberg.{ScanTask, ScanTaskGroup, Schema, SchemaParser}
 
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.catalyst.InternalRow
@@ -29,6 +29,9 @@ class GpuSparkInputPartition(val cpuPartition: InputPartition,
     val hadoopConf: Broadcast[SerializableConfiguration],
     val expectedSchemaStr: String) extends
   InputPartition with HasPartitionKey with Serializable {
+
+  /** The tasks this partition reads. */
+  def taskGroup: ScanTaskGroup[ScanTask] = GpuSparkScanAccess.taskGroup(cpuPartition)
 
   private val cpuPartitionWithKey: HasPartitionKey = cpuPartition match {
     case withKey: HasPartitionKey => withKey
