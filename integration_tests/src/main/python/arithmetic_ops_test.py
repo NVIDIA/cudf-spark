@@ -157,6 +157,20 @@ def test_addition_subtraction_mixed(lhs, rhs, addOrSub):
         lambda spark : two_col_df(spark, lhs, rhs).selectExpr(f"a {addOrSub} b")
     )
 
+@pytest.mark.parametrize('lhs,rhs', [
+    (DecimalGen(18, 0), DecimalGen(30, 30)),
+    (DecimalGen(38, 17), DecimalGen(31, 0)),
+    (DecimalGen(23, 0), DecimalGen(30, 30)),
+    (DecimalGen(38, 22), DecimalGen(31, 0)),
+], ids=idfn)
+@pytest.mark.parametrize('addOrSub', ['+', '-'])
+@disable_ansi_mode
+def test_decimal_addition_subtraction_large_scale_diff(lhs, rhs, addOrSub):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark : two_col_df(spark, lhs, rhs, length=600, num_slices=1).selectExpr(
+            f"a {addOrSub} b")
+    )
+
 # If it will not overflow for multiply it is good for subtract too
 @pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens, ids=idfn)
 def test_subtraction_ansi_no_overflow(data_gen):
@@ -345,6 +359,18 @@ def test_int_division(data_gen):
 def test_int_division_mixed(lhs, rhs):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : two_col_df(spark, lhs, rhs).selectExpr(
+                'a DIV b'))
+
+@pytest.mark.parametrize('lhs,rhs', [
+    (DecimalGen(12, 1), DecimalGen(20, 15)),
+    (DecimalGen(12, 1), DecimalGen(22, 17)),
+    (DecimalGen(18, 2), DecimalGen(24, 18)),
+    (DecimalGen(12, 1), DecimalGen(24, 19)),
+], ids=idfn)
+@disable_ansi_mode
+def test_decimal_int_division_large_scale_diff(lhs, rhs):
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark : two_col_df(spark, lhs, rhs, length=600, num_slices=1).selectExpr(
                 'a DIV b'))
 
 @pytest.mark.parametrize('data_gen', _arith_data_gens, ids=idfn)
