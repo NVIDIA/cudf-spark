@@ -20,6 +20,8 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids
 
+import java.io.IOException
+
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids._
@@ -53,28 +55,62 @@ abstract class RapidsShuffleWriter[K, V]()
     MapStatusWithStats(loc, uncompressedSizes, mapTaskId)
   }
 
-  override def stop(success: Boolean): Option[MapStatusWithStats] = {
-    if (stopping) {
-      None
-    } else {
-      stopping = true
-      if (success) {
-        if (myMapStatus.isEmpty) {
-          // should not happen, but adding it just in case (this differs from Spark)
-          cleanupTempData()
-          throw new IllegalStateException("Cannot call stop(true) without having called write()");
-        }
-        myMapStatus
+  protected def registerMapOutputWriter(writer: ShuffleMapOutputWriter): Unit = {
+    val alreadyStopping = mapOutputWriters.synchronized {
+      if (stopping) {
+        true
       } else {
-        cleanupTempData()
-        None
+        mapOutputWriters += writer
+        false
       }
     }
+    if (alreadyStopping) {
+      try {
+        writer.abort(null)
+      } catch {
+        case e: Exception =>
+          logWarning(s"Failed to abort map output writer: ${e.getMessage}")
+      }
+      throw new IOException("Shuffle writer has already been stopped")
+    }
   }
-  
+
+  /** Hook called before aborting map output writers so subclasses can stop background tasks. */
+  protected def onAbort(): Unit = ()
+
+  override def stop(success: Boolean): Option[MapStatusWithStats] = {
+    val shouldStop = mapOutputWriters.synchronized {
+      if (stopping) {
+        false
+      } else {
+        stopping = true
+        true
+      }
+    }
+    if (!shouldStop) {
+      None
+    } else if (success) {
+      if (myMapStatus.isEmpty) {
+        // should not happen, but adding it just in case (this differs from Spark)
+        cleanupTempData()
+        throw new IllegalStateException("Cannot call stop(true) without having called write()");
+      }
+      myMapStatus
+    } else {
+      cleanupTempData()
+      None
+    }
+  }
+
   private def cleanupTempData(): Unit = {
+    onAbort()
+    val writersToAbort = mapOutputWriters.synchronized {
+      val copy = mapOutputWriters.toArray
+      mapOutputWriters.clear()
+      copy
+    }
     // Abort all map output writers to clean up temp files
-    mapOutputWriters.foreach { writer =>
+    writersToAbort.foreach { writer =>
       try {
         writer.abort(null)
       } catch {
@@ -82,7 +118,6 @@ abstract class RapidsShuffleWriter[K, V]()
           logWarning(s"Failed to abort map output writer: ${e.getMessage}")
       }
     }
-    mapOutputWriters.clear()
   }
 }
 

@@ -18,10 +18,12 @@ package com.nvidia.spark.rapids.spill
 
 import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, CyclicBarrier, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
+import ai.rapids.cudf.{HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool}
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RapidsConf
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
@@ -797,6 +799,350 @@ class SpillablePartialFileHandleSuite
     withFinishedFileOnlyHandle() { (handle, _) =>
       assertThrows[IllegalStateException] {
         handle.releaseRead()
+      }
+    }
+  }
+
+  test("close() waits for an in-flight write() before freeing the HostMemoryBuffer") {
+    val tempFile = File.createTempFile("test-deterministic-write-close-", ".tmp")
+    val insideWrite = new CountDownLatch(1)
+    val releaseWrite = new CountDownLatch(1)
+    val writeError = new AtomicReference[Throwable](null)
+    val closeError = new AtomicReference[Throwable](null)
+
+    val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+      initialCapacity = 16,
+      maxBufferSize = 1024,
+      memoryThreshold = 0.99,
+      spillFile = tempFile,
+      capacityHintProvider = Some((_, required) => {
+        insideWrite.countDown()
+        assert(releaseWrite.await(5, TimeUnit.SECONDS))
+        required
+      }))
+
+    val chunk = new Array[Byte](64)
+    Arrays.fill(chunk, 0x5a.toByte)
+
+    val writerThread = new Thread(() => {
+      try {
+        handle.write(chunk, 0, chunk.length)
+      } catch {
+        case t: Throwable => writeError.set(t)
+      }
+    }, "partial-file-deterministic-writer")
+
+    val closeFinished = new AtomicBoolean(false)
+    val closeThread = new Thread(() => {
+      try {
+        handle.close()
+      } catch {
+        case t: Throwable => closeError.set(t)
+      } finally {
+        closeFinished.set(true)
+      }
+    }, "partial-file-deterministic-closer")
+
+    try {
+      writerThread.start()
+      assert(insideWrite.await(5, TimeUnit.SECONDS),
+        "writer thread did not enter write() expansion")
+
+      closeThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (closeThread.getState != Thread.State.WAITING && System.nanoTime() < deadline) {
+        Thread.`yield`()
+      }
+      assert(closeThread.getState == Thread.State.WAITING,
+        s"close() should wait while writeInProgress is set, state=${closeThread.getState}")
+      assert(!closeFinished.get(),
+        "close() must not complete while write() is still using HostMemoryBuffer")
+
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      closeThread.join(5000)
+      assert(!writerThread.isAlive, "writer thread did not finish")
+      assert(!closeThread.isAlive, "close thread did not finish")
+      assert(writeError.get() == null, s"in-flight write failed: ${writeError.get()}")
+      assert(closeError.get() == null, s"close failed: ${closeError.get()}")
+      assert(handle.isPhysicallyClosed)
+      assert(!tempFile.exists(), "temp file should be cleaned up on close")
+      assertThrows[IllegalStateException] {
+        handle.write(chunk, 0, 16)
+      }
+      assertThrows[IllegalStateException] {
+        handle.write(1)
+      }
+    } finally {
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      closeThread.join(5000)
+      handle.close()
+      if (tempFile.exists()) {
+        tempFile.delete()
+      }
+    }
+  }
+
+  test("finishWrite() waits for an in-flight write() before finalizing totalBytesWritten") {
+    val tempFile = File.createTempFile("test-deterministic-write-finish-", ".tmp")
+    val insideWrite = new CountDownLatch(1)
+    val releaseWrite = new CountDownLatch(1)
+    val writeError = new AtomicReference[Throwable](null)
+    val finishError = new AtomicReference[Throwable](null)
+    val finishCompleted = new AtomicBoolean(false)
+
+    val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+      initialCapacity = 16,
+      maxBufferSize = 1024,
+      memoryThreshold = 0.99,
+      spillFile = tempFile,
+      capacityHintProvider = Some((_, required) => {
+        insideWrite.countDown()
+        assert(releaseWrite.await(5, TimeUnit.SECONDS))
+        required
+      }))
+
+    val chunk = new Array[Byte](64)
+    Arrays.fill(chunk, 0x42.toByte)
+
+    val writerThread = new Thread(() => {
+      try {
+        handle.write(chunk, 0, chunk.length)
+      } catch {
+        case t: Throwable => writeError.set(t)
+      }
+    }, "partial-file-finish-writer")
+
+    val finishThread = new Thread(() => {
+      try {
+        handle.finishWrite()
+      } catch {
+        case t: Throwable => finishError.set(t)
+      } finally {
+        finishCompleted.set(true)
+      }
+    }, "partial-file-finish-caller")
+
+    try {
+      writerThread.start()
+      assert(insideWrite.await(5, TimeUnit.SECONDS),
+        "writer thread did not enter write() expansion")
+
+      finishThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (finishThread.getState != Thread.State.WAITING && System.nanoTime() < deadline) {
+        Thread.`yield`()
+      }
+      assert(finishThread.getState == Thread.State.WAITING,
+        s"finishWrite() should wait while writeInProgress is set, state=${finishThread.getState}")
+      assert(!finishCompleted.get(),
+        "finishWrite() must not complete while write() is still active")
+
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      finishThread.join(5000)
+      assert(!writerThread.isAlive, "writer thread did not finish")
+      assert(!finishThread.isAlive, "finishWrite thread did not finish")
+      assert(writeError.get() == null, s"in-flight write failed: ${writeError.get()}")
+      assert(finishError.get() == null, s"finishWrite failed: ${finishError.get()}")
+      assert(handle.getTotalBytesWritten == chunk.length)
+
+      val readBack = new Array[Byte](chunk.length)
+      assert(handle.read(readBack, 0, readBack.length) == chunk.length)
+      assert(Arrays.equals(readBack, chunk))
+    } finally {
+      releaseWrite.countDown()
+      writerThread.join(5000)
+      finishThread.join(5000)
+      handle.close()
+      if (tempFile.exists()) {
+        tempFile.delete()
+      }
+    }
+  }
+
+  test("concurrent buffer expansions under finite host-memory budget do not deadlock") {
+    // Ensure native pools cannot satisfy 256 KiB allocations behind HostAlloc's nonpinned limit.
+    assert(PinnedMemoryPool.getTotalPoolSizeBytes == 0L,
+      "test requires PinnedMemoryPool to be uninitialized so allocations enter host spill")
+    assert(PageableMemoryPool.getTotalPoolSizeBytes == 0L,
+      "test requires PageableMemoryPool to be uninitialized so allocations enter host spill")
+
+    // Two 64 KiB handles (128 KiB total, 44% < 99% threshold) concurrently request 256 KiB each
+    // under a 288 KiB budget. Even if one handle spills and frees its 64 KiB first, the other
+    // still holds its own 64 KiB during allocate(256 KiB) (320 KiB > 288 KiB), so both expansions
+    // deterministically enter SpillFramework host-spill selection regardless of scheduling order.
+    val budgetBytes = 288L * 1024L
+    HostAlloc.initialize(budgetBytes)
+    try {
+      val tempFileA = File.createTempFile("test-concurrent-expand-a-", ".tmp")
+      val tempFileB = File.createTempFile("test-concurrent-expand-b-", ".tmp")
+      var handleA: SpillablePartialFileHandle = null
+      var handleB: SpillablePartialFileHandle = null
+      var threadA: Thread = null
+      var threadB: Thread = null
+      val spillSelectionThreads = ConcurrentHashMap.newKeySet[Long]()
+      val probeHandle = new HostSpillableHandle[HostMemoryBuffer] {
+        override private[spill] var host: Option[HostMemoryBuffer] = None
+        override val approxSizeInBytes: Long = 1L
+        override private[spill] def spillable: Boolean = {
+          spillSelectionThreads.add(Thread.currentThread().getId)
+          false
+        }
+        override def spill(): Long = 0L
+        override private[spill] def doClose(): Unit = ()
+      }
+
+      try {
+        SpillFramework.stores.hostStore.trackNoSpill(probeHandle)
+        val bothInExpand = new CyclicBarrier(2)
+        val errorA = new AtomicReference[Throwable](null)
+        val errorB = new AtomicReference[Throwable](null)
+        val chunk = new Array[Byte](256 * 1024)
+        Arrays.fill(chunk, 0x3c.toByte)
+
+        handleA = SpillablePartialFileHandle.createMemoryWithSpill(
+          initialCapacity = 64 * 1024,
+          maxBufferSize = 384 * 1024,
+          memoryThreshold = 0.99,
+          spillFile = tempFileA,
+          capacityHintProvider = Some((_, required) => {
+            bothInExpand.await(5, TimeUnit.SECONDS)
+            required
+          }))
+        handleB = SpillablePartialFileHandle.createMemoryWithSpill(
+          initialCapacity = 64 * 1024,
+          maxBufferSize = 384 * 1024,
+          memoryThreshold = 0.99,
+          spillFile = tempFileB,
+          capacityHintProvider = Some((_, required) => {
+            bothInExpand.await(5, TimeUnit.SECONDS)
+            required
+          }))
+
+        threadA = new Thread(() => {
+          try {
+            handleA.write(chunk, 0, chunk.length)
+          } catch {
+            case t: Throwable => errorA.set(t)
+          }
+        }, "partial-file-concurrent-expand-a")
+        threadB = new Thread(() => {
+          try {
+            handleB.write(chunk, 0, chunk.length)
+          } catch {
+            case t: Throwable => errorB.set(t)
+          }
+        }, "partial-file-concurrent-expand-b")
+
+        threadA.start()
+        threadB.start()
+        threadA.join(10000)
+        threadB.join(10000)
+        assert(!threadA.isAlive, "threadA hung during concurrent expansion under tight host budget")
+        assert(!threadB.isAlive, "threadB hung during concurrent expansion under tight host budget")
+        assert(errorA.get() == null, s"threadA failed: ${errorA.get()}")
+        assert(errorB.get() == null, s"threadB failed: ${errorB.get()}")
+
+        assert(handleA.isSpilled && handleB.isSpilled,
+          s"both handles must spill when 64 KiB + 256 KiB > 288 KiB budget " +
+            s"(spilledA=${handleA.isSpilled}, spilledB=${handleB.isSpilled})")
+        assert(
+          spillSelectionThreads.contains(threadA.getId) &&
+            spillSelectionThreads.contains(threadB.getId),
+          s"expected both expansion threads to invoke host-spill selection, " +
+            s"observed threads=$spillSelectionThreads")
+
+        handleA.finishWrite()
+        handleB.finishWrite()
+        assert(handleA.getTotalBytesWritten == chunk.length)
+        assert(handleB.getTotalBytesWritten == chunk.length)
+      } finally {
+        Option(threadA).foreach { t =>
+          t.interrupt()
+          t.join(5000)
+        }
+        Option(threadB).foreach { t =>
+          t.interrupt()
+          t.join(5000)
+        }
+        try {
+          SpillFramework.removeFromHostStore(probeHandle)
+        } catch {
+          case _: Exception =>
+        }
+        Option(handleA).foreach { h =>
+          try { h.close() } catch { case _: Exception => }
+        }
+        Option(handleB).foreach { h =>
+          try { h.close() } catch { case _: Exception => }
+        }
+        if (tempFileA.exists()) {
+          tempFileA.delete()
+        }
+        if (tempFileB.exists()) {
+          tempFileB.delete()
+        }
+      }
+    } finally {
+      HostAlloc.initialize(-1)
+    }
+  }
+
+  test("concurrent write and close on MEMORY_WITH_SPILL handle fails safely without crashing") {
+    val chunk = new Array[Byte](16 * 1024)
+    Arrays.fill(chunk, 0x5a.toByte)
+
+    (0 until 40).foreach { iter =>
+      val tempFile = File.createTempFile(s"test-concurrent-close-$iter-", ".tmp")
+      val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+        initialCapacity = 32 * 1024,
+        maxBufferSize = 1024 * 1024,
+        memoryThreshold = 0.99,
+        spillFile = tempFile)
+      val writingStarted = new CountDownLatch(1)
+      val unexpectedError = new AtomicReference[Throwable](null)
+
+      val writerThread = new Thread(() => {
+        try {
+          writingStarted.countDown()
+          var i = 0
+          while (i < 512) {
+            handle.write(chunk, 0, chunk.length)
+            i += 1
+          }
+        } catch {
+          case _: IllegalStateException => // expected once close() wins
+          case t: Throwable => unexpectedError.set(t)
+        }
+      }, s"partial-file-writer-$iter")
+
+      try {
+        writerThread.start()
+        assert(writingStarted.await(5, TimeUnit.SECONDS))
+        if (iter % 2 == 0) {
+          Thread.`yield`()
+        }
+        handle.close()
+        writerThread.join(5000)
+        assert(!writerThread.isAlive, s"writer thread stuck on iteration $iter")
+        assert(unexpectedError.get() == null,
+          s"unexpected error on iteration $iter: ${unexpectedError.get()}")
+        assert(handle.isPhysicallyClosed)
+        assert(!tempFile.exists(), s"temp file leaked on iteration $iter")
+        assertThrows[IllegalStateException] {
+          handle.write(chunk, 0, 16)
+        }
+        assertThrows[IllegalStateException] {
+          handle.write(1)
+        }
+      } finally {
+        handle.close()
+        writerThread.join(5000)
+        if (tempFile.exists()) {
+          tempFile.delete()
+        }
       }
     }
   }
