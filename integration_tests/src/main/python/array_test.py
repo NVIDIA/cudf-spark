@@ -474,6 +474,74 @@ def test_array_slice_with_negative_length_fails_when_cpu_fails(data_gen, valid_s
         error_message=maybe_error)
 
 
+@pytest.mark.parametrize('data_gen', [ArrayGen(int_gen)], ids=idfn)
+def test_array_slice_invalid_args_on_rows_a_conditional_skips(data_gen):
+    # b is in [0, 10], so `b - 11` is always negative and `b` is zero for some rows, but the
+    # branch holding the slice is never taken. Spark on the CPU never evaluates slice for those
+    # rows, so the GPU must not fail the query either.
+    small_gen = IntegerGen(nullable=False, min_val=0, max_val=10, special_cases=[])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, data_gen, small_gen).selectExpr(
+            'CASE WHEN b > 1000 THEN slice(a, b, b - 11) END',
+            'CASE WHEN b > 1000 THEN slice(a, b, -5) END',
+            'CASE WHEN b > 1000 THEN slice(a, 0, b) END',
+            'if(b > 1000, slice(a, b, b - 11), NULL)',
+            'if(b > 1000, slice(a, 0, 5), NULL)'))
+
+
+@pytest.mark.parametrize('data_gen', [ArrayGen(int_gen)], ids=idfn)
+def test_array_slice_mixed_selected_and_skipped_rows(data_gen):
+    # b is in [0, 10], so every batch mixes rows the predicate selects, whose arguments are
+    # valid, with rows it skips, whose length is negative (b < 5) or whose start is zero
+    # (b = 0). The GPU must evaluate slice only on the selected rows and put each result back
+    # on its own row, with slice in both the THEN and the ELSE position.
+    small_gen = IntegerGen(nullable=False, min_val=0, max_val=10, special_cases=[])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, data_gen, small_gen).selectExpr(
+            'b',
+            'CASE WHEN b >= 5 THEN slice(a, 1, b - 5) END',
+            'CASE WHEN b >= 1 THEN slice(a, b, 2) END',
+            'CASE WHEN b < 5 THEN NULL ELSE slice(a, 1, b - 5) END',
+            'if(b >= 5, slice(a, 1, b - 5), NULL)',
+            'if(b >= 1, slice(a, b, 2), NULL)',
+            'if(b < 1, NULL, slice(a, b, 2))'))
+
+
+def test_array_slice_zero_start_only_on_null_list_rows():
+    # The list is null exactly on the rows where start is zero, and slice is null intolerant,
+    # so Spark never validates the start on those rows.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.range(0, 512, 1, 2).selectExpr(
+            'if(id % 2 = 0, NULL, array(1, 2, 3)) AS a',
+            'cast(id % 2 AS int) AS b',
+            'cast(id % 2 AS int) AS c').selectExpr(
+                'slice(a, b, 2)',
+                'slice(a, b, c)'))
+
+
+@pytest.mark.parametrize('data_gen', [ArrayGen(int_gen)], ids=idfn)
+def test_array_slice_invalid_args_on_rows_a_conditional_selects(data_gen):
+    # Here the predicate holds for every row, so Spark on the CPU does evaluate slice and
+    # throws. Filtering the batch down to the selected rows must not hide invalid arguments.
+    small_gen = IntegerGen(nullable=False, min_val=0, max_val=10, special_cases=[])
+    length_error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
+        if is_databricks_runtime() or is_spark_400_or_later()\
+        else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
+    assert_gpu_and_cpu_error(
+        lambda spark: two_col_df(spark, data_gen, small_gen).selectExpr(
+            'CASE WHEN b >= 0 THEN slice(a, 1, b - 11) END').collect(),
+        conf={},
+        error_message=length_error)
+    start_error = "The value of parameter(s) `start` in `slice` is invalid: Expects a positive or a negative value for `start`, but got"\
+        if is_databricks_runtime() or is_spark_400_or_later()\
+        else "Unexpected value for start in function slice: SQL array indices start at 1."
+    assert_gpu_and_cpu_error(
+        lambda spark: two_col_df(spark, data_gen, small_gen).selectExpr(
+            'if(b >= 0, slice(a, b - b, 5), NULL)').collect(),
+        conf={},
+        error_message=start_error)
+
+
 @pytest.mark.parametrize('data_gen', array_item_test_gens, ids=idfn)
 @disable_ansi_mode
 def test_array_element_at(data_gen):
